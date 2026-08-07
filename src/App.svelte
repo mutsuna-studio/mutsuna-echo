@@ -81,7 +81,7 @@
     <div class="status-row">
       <div>
         <h2>APIキー</h2>
-        <p class="help">キーはOSの資格情報ストアに保存され、画面へ読み戻しません。</p>
+        <p class="help">キーはOSの暗号化機能で保護され、画面へ読み戻しません。</p>
       </div>
       {#if loading}
         <span class="badge neutral">確認中</span>
