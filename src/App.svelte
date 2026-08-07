@@ -1,10 +1,14 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { Alert, AlertDescription } from "@mutsuna/ui/alert";
+  import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import type { SelectedAudioFile, Transcript, TranscriptionUsage } from "./lib/types/transcript";
+
+  const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
 
   let hasApiKey = $state(false);
   let loading = $state(true);
@@ -79,8 +83,6 @@
   }
 
   async function deleteApiKey() {
-    if (!window.confirm("保存済みのElevenLabs APIキーを削除しますか？")) return;
-
     deleting = true;
     message = "";
     errorMessage = "";
@@ -154,7 +156,8 @@
   <title>Mutsuna Echo</title>
 </svelte:head>
 
-<main class="shell">
+<ThemeProvider theme={echoTheme}>
+  <main class="shell">
   <header class="hero">
     <p class="eyebrow">Mutsuna Echo</p>
     <h1>会話を、読み返せる形へ。</h1>
@@ -162,10 +165,10 @@
   </header>
 
   {#if message}
-    <p class="notice success" role="status">{message}</p>
+    <Alert class="notice success" role="status"><AlertDescription>{message}</AlertDescription></Alert>
   {/if}
   {#if errorMessage}
-    <p class="notice error" role="alert">{errorMessage}</p>
+    <Alert class="notice error" variant="destructive" role="alert"><AlertDescription>{errorMessage}</AlertDescription></Alert>
   {/if}
 
   <AudioInputPanel
@@ -207,4 +210,5 @@
     onSave={saveApiKey}
     onDelete={deleteApiKey}
   />
-</main>
+  </main>
+</ThemeProvider>

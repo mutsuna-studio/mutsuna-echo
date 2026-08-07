@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { Badge } from "@mutsuna/ui/badge";
+  import { Button } from "@mutsuna/ui/button";
+  import { Card } from "@mutsuna/ui/card";
+  import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
   import RecordingPanel from "./RecordingPanel.svelte";
   import { formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import type { SelectedAudioFile } from "../types/transcript";
@@ -40,24 +44,25 @@
   let inputMode = $state<"file" | "record">("file");
 </script>
 
-<section class="card transcription-card" aria-busy={selecting || transcribing}>
+<Card class="card transcription-card" aria-busy={selecting || transcribing}>
   <div class="section-heading">
     <div>
       <p class="step">Step 1</p>
       <h2>音声を用意</h2>
     </div>
-    <span class:ready={Boolean(selectedAudio)} class="badge">
+    <Badge variant={selectedAudio ? "default" : "secondary"}>
       {recordingBusy ? "録音中" : selectedAudio ? "準備済み" : "未選択"}
-    </span>
+    </Badge>
   </div>
 
-  <div class="input-tabs" role="tablist" aria-label="音声の入力方法">
-    <button class:active={inputMode === "file"} type="button" role="tab" aria-selected={inputMode === "file"} onclick={() => inputMode = "file"} disabled={recordingBusy}>ファイルを選択</button>
-    <button class:active={inputMode === "record"} type="button" role="tab" aria-selected={inputMode === "record"} onclick={() => inputMode = "record"} disabled={recordingBusy}>このアプリで録音</button>
-  </div>
+  <Tabs bind:value={inputMode}>
+    <TabsList class="input-tabs" aria-label="音声の入力方法">
+      <TabsTrigger value="file" disabled={recordingBusy}>ファイルを選択</TabsTrigger>
+      <TabsTrigger value="record" disabled={recordingBusy}>このアプリで録音</TabsTrigger>
+    </TabsList>
 
-  {#if inputMode === "file"}
-    <button class="file-picker" type="button" onclick={onSelect} disabled={busy}>
+  <TabsContent value="file">
+    <Button class="file-picker" variant="outline" size="lg" type="button" onclick={onSelect} disabled={busy}>
       <span class="file-icon" aria-hidden="true">♪</span>
       <span class="file-copy">
         <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
@@ -67,8 +72,9 @@
             : "MP3・M4A・WAV・FLAC"}
         </small>
       </span>
-    </button>
-  {:else}
+    </Button>
+  </TabsContent>
+  <TabsContent value="record">
     <RecordingPanel
       disabled={recordingDisabled}
       onAudioReady={onRecordedAudio}
@@ -76,7 +82,8 @@
       {onMessage}
       {onError}
     />
-  {/if}
+  </TabsContent>
+  </Tabs>
 
   {#if selectedAudio}
     <div class="cost-estimate">
@@ -98,8 +105,8 @@
         {hasApiKey ? "日本語・話者分離・単語タイムスタンプ" : "先にAPIキーを設定してください"}
       </p>
     </div>
-    <button class="primary" type="button" onclick={onTranscribe} disabled={!canTranscribe}>
+    <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>
       {transcribing ? "文字起こし中…" : "文字起こし開始"}
-    </button>
+    </Button>
   </div>
-</section>
+</Card>

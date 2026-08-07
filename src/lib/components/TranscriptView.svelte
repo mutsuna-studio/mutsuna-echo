@@ -1,17 +1,19 @@
 <script lang="ts">
+  import { Badge } from "@mutsuna/ui/badge";
+  import { Card } from "@mutsuna/ui/card";
   import { formatTimestamp } from "../format";
   import type { Transcript } from "../types/transcript";
 
   let { transcript }: { transcript: Transcript } = $props();
 </script>
 
-<section class="card transcript-card" aria-label="文字起こし結果">
+<Card class="card transcript-card" aria-label="文字起こし結果">
   <div class="section-heading transcript-heading">
     <div>
       <p class="step">Transcript</p>
       <h2>文字起こし結果</h2>
     </div>
-    <span class="model">{transcript.model} · {transcript.language}</span>
+    <Badge class="model" variant="secondary">{transcript.model} · {transcript.language}</Badge>
   </div>
 
   {#if transcript.segments.length > 0}
@@ -29,4 +31,4 @@
   {:else}
     <p class="empty-result">発話は検出されませんでした。</p>
   {/if}
-</section>
+</Card>

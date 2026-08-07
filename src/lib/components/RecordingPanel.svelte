@@ -1,5 +1,19 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { Alert, AlertDescription, AlertTitle } from "@mutsuna/ui/alert";
+  import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle
+  } from "@mutsuna/ui/alert-dialog";
+  import { Button } from "@mutsuna/ui/button";
+  import { Checkbox } from "@mutsuna/ui/checkbox";
+  import { Select } from "@mutsuna/ui/select";
   import { formatFileSize, formatRecordedAt } from "../format";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
@@ -37,6 +51,9 @@
   let loading = $state(true);
   let actionBusy = $state(false);
   let deliveredOutput = $state("");
+  let cancelDialogOpen = $state(false);
+  let discardDialogOpen = $state(false);
+  let pendingDiscard = $state<RecoverableRecording | null>(null);
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -44,6 +61,20 @@
   const canStart = $derived(
     Boolean(capabilities?.supported) && (microphone || systemAudio) && !disabled && !actionBusy && !active
   );
+  const microphoneOptions = $derived([
+    { value: "", label: "OSの既定マイク" },
+    ...((capabilities?.microphoneDevices ?? []).map((device) => ({
+      value: device.id,
+      label: `${device.name}${device.isDefault ? "（既定）" : ""}`
+    })))
+  ]);
+  const systemOptions = $derived([
+    { value: "", label: "OSの既定出力" },
+    ...((capabilities?.systemDevices ?? []).map((device) => ({
+      value: device.id,
+      label: `${device.name}${device.isDefault ? "（既定）" : ""}`
+    })))
+  ]);
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
@@ -179,7 +210,6 @@
   }
 
   async function cancel() {
-    if (!window.confirm("録音中の音声を保存せず破棄しますか？")) return;
     actionBusy = true;
     try {
       status = await invoke<RecordingStatus>("cancel_recording");
@@ -206,7 +236,6 @@
   }
 
   async function discard(recording: RecoverableRecording) {
-    if (!window.confirm("この未完了録音を削除しますか？")) return;
     actionBusy = true;
     try {
       await invoke("discard_recording", { sessionId: recording.sessionId });
@@ -216,6 +245,11 @@
     } finally {
       actionBusy = false;
     }
+  }
+
+  function confirmDiscard(recording: RecoverableRecording) {
+    pendingDiscard = recording;
+    discardDialogOpen = true;
   }
 
   async function selectRecordedAudio(recording: RecordedAudioSummary) {
@@ -243,18 +277,20 @@
   {/if}
 
   {#if recoverable.length > 0 && !active}
-    <div class="recovery" role="alert">
-      <strong>中断された録音があります</strong>
+    <Alert role="alert">
+      <AlertTitle>中断された録音があります</AlertTitle>
+      <AlertDescription>
       {#each recoverable as recording (recording.sessionId)}
         <div class="recovery-row">
           <span>{new Date(recording.startedAt).toLocaleString("ja-JP")} · {formatTimer(recording.durationMs)}</span>
           <div>
-            <button type="button" onclick={() => recover(recording)} disabled={actionBusy}>復旧</button>
-            <button class="text-danger" type="button" onclick={() => discard(recording)} disabled={actionBusy}>削除</button>
+            <Button variant="outline" size="sm" type="button" onclick={() => recover(recording)} disabled={actionBusy}>復旧</Button>
+            <Button variant="destructive" size="sm" type="button" onclick={() => confirmDiscard(recording)} disabled={actionBusy}>削除</Button>
           </div>
         </div>
       {/each}
-    </div>
+      </AlertDescription>
+    </Alert>
   {/if}
 
   {#if !active}
@@ -264,13 +300,14 @@
           <strong>過去の録音</strong>
           <small>Music/Mutsuna Echoに保存された最新100件</small>
         </div>
-        <button type="button" onclick={refreshRecordedAudio} disabled={actionBusy}>更新</button>
+        <Button variant="outline" size="sm" type="button" onclick={refreshRecordedAudio} disabled={actionBusy}>更新</Button>
       </div>
       {#if recordedAudio.length > 0}
         <div class="history-list">
           {#each recordedAudio as recording (recording.id)}
-            <button
+            <Button
               class="history-item"
+              variant="ghost"
               type="button"
               onclick={() => selectRecordedAudio(recording)}
               disabled={actionBusy || disabled}
@@ -280,7 +317,7 @@
                 <small>{formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}</small>
               </span>
               <span class="history-action">選択</span>
-            </button>
+            </Button>
           {/each}
         </div>
       {:else}
@@ -292,32 +329,22 @@
   <div class="sources" aria-disabled={active || disabled}>
     <div class="source">
       <label class="source-toggle">
-        <input type="checkbox" bind:checked={microphone} disabled={!capabilities.microphoneSupported || active || disabled} />
+        <Checkbox bind:checked={microphone} disabled={!capabilities.microphoneSupported || active || disabled} />
         <span>マイク</span>
       </label>
       {#if capabilities.microphoneDevices.length > 0}
-        <select bind:value={microphoneDeviceId} disabled={!microphone || active || disabled} aria-label="マイクデバイス">
-          <option value="">OSの既定マイク</option>
-          {#each capabilities.microphoneDevices as device (device.id)}
-            <option value={device.id}>{device.name}{device.isDefault ? "（既定）" : ""}</option>
-          {/each}
-        </select>
+        <Select bind:value={microphoneDeviceId} options={microphoneOptions} disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
       {/if}
       <div class="meter" aria-label="マイク入力レベル"><span style:width={`${(status?.microphoneLevel ?? 0) * 100}%`}></span></div>
     </div>
 
     <div class="source">
       <label class="source-toggle">
-        <input type="checkbox" bind:checked={systemAudio} disabled={!capabilities.systemAudioSupported || active || disabled} />
+        <Checkbox bind:checked={systemAudio} disabled={!capabilities.systemAudioSupported || active || disabled} />
         <span>システム音声</span>
       </label>
       {#if capabilities.systemDevices.length > 0}
-        <select bind:value={systemDeviceId} disabled={!systemAudio || active || disabled} aria-label="システム音声デバイス">
-          <option value="">OSの既定出力</option>
-          {#each capabilities.systemDevices as device (device.id)}
-            <option value={device.id}>{device.name}{device.isDefault ? "（既定）" : ""}</option>
-          {/each}
-        </select>
+        <Select bind:value={systemDeviceId} options={systemOptions} disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
       {/if}
       <div class="meter" aria-label="システム音声レベル"><span style:width={`${(status?.systemLevel ?? 0) * 100}%`}></span></div>
     </div>
@@ -335,45 +362,67 @@
 
   <div class="record-actions">
     {#if active}
-      <button class="stop" type="button" onclick={stop} disabled={actionBusy || status?.phase === "finalizing"}>
+      <Button variant="destructive" size="lg" type="button" onclick={stop} disabled={actionBusy || status?.phase === "finalizing"} loading={actionBusy || status?.phase === "finalizing"}>
         {status?.phase === "finalizing" || actionBusy ? "M4Aを確定中…" : "録音を停止"}
-      </button>
-      <button class="cancel" type="button" onclick={cancel} disabled={actionBusy || status?.phase === "finalizing"}>破棄</button>
+      </Button>
+      <Button variant="outline" size="lg" type="button" onclick={() => cancelDialogOpen = true} disabled={actionBusy || status?.phase === "finalizing"}>破棄</Button>
     {:else}
-      <button class="start" type="button" onclick={start} disabled={!canStart}>録音を開始</button>
+      <Button size="lg" type="button" onclick={start} disabled={!canStart}>録音を開始</Button>
     {/if}
   </div>
 {/if}
+
+<AlertDialog bind:open={cancelDialogOpen}>
+  <AlertDialogContent>
+    <AlertDialogHeader>
+      <AlertDialogTitle>録音を破棄しますか？</AlertDialogTitle>
+      <AlertDialogDescription>録音中の音声は保存されず、復元できません。</AlertDialogDescription>
+    </AlertDialogHeader>
+    <AlertDialogFooter>
+      <AlertDialogCancel>録音を続ける</AlertDialogCancel>
+      <AlertDialogAction variant="destructive" onclick={cancel}>破棄</AlertDialogAction>
+    </AlertDialogFooter>
+  </AlertDialogContent>
+</AlertDialog>
+
+<AlertDialog bind:open={discardDialogOpen}>
+  <AlertDialogContent>
+    <AlertDialogHeader>
+      <AlertDialogTitle>未完了の録音を削除しますか？</AlertDialogTitle>
+      <AlertDialogDescription>取得済みの音声も削除され、この操作は取り消せません。</AlertDialogDescription>
+    </AlertDialogHeader>
+    <AlertDialogFooter>
+      <AlertDialogCancel>キャンセル</AlertDialogCancel>
+      <AlertDialogAction
+        variant="destructive"
+        onclick={() => pendingDiscard && discard(pendingDiscard)}
+      >削除</AlertDialogAction>
+    </AlertDialogFooter>
+  </AlertDialogContent>
+</AlertDialog>
 
 <style>
   .placeholder,
   .limitation { margin: 18px 0 0; color: #647068; font-size: 0.86rem; }
   .limitation { padding: 11px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; }
-  .recovery { display: grid; gap: 10px; margin-top: 18px; padding: 14px; border-radius: 12px; background: #fff7df; color: #624b17; font-size: 0.84rem; }
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
-  .recovery button { min-height: 32px; padding: 0 10px; border: 1px solid #d5c48f; border-radius: 8px; background: #fff; cursor: pointer; }
-  .recovery .text-danger { color: #9a3028; }
   .history { display: grid; gap: 10px; margin-top: 18px; }
   .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .history-heading > div { display: grid; gap: 3px; }
   .history-heading small,
   .history-empty { color: #68746c; font-size: 0.78rem; }
-  .history-heading button { min-height: 32px; padding: 0 10px; border: 1px solid #c7cfca; background: #fff; }
   .history-list { display: grid; overflow: hidden; border: 1px solid #dce3de; border-radius: 12px; }
-  .history-item { display: flex; width: 100%; min-height: auto; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 0; border-top: 1px solid #e4e9e6; border-radius: 0; color: #253b2e; background: #fff; text-align: left; }
-  .history-item:first-child { border-top: 0; }
-  .history-item:hover:not(:disabled) { background: #f5f8f6; }
-  .history-item > span:first-child { display: grid; min-width: 0; gap: 3px; }
-  .history-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .history-item small { color: #68746c; }
+  .history-list :global(.history-item) { width: 100%; min-height: auto; justify-content: space-between; padding: 12px 14px; border-top: 1px solid #e4e9e6; border-radius: 0; text-align: left; }
+  .history-list :global(.history-item:first-child) { border-top: 0; }
+  .history-list :global(.history-item > span:first-child) { display: grid; min-width: 0; gap: 3px; }
+  .history-list :global(.history-item strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-list :global(.history-item small) { color: var(--muted-foreground); }
   .history-action { flex: none; color: #23704a; font-size: 0.78rem; font-weight: 750; }
   .history-empty { margin: 0; padding: 14px; border-radius: 10px; background: #f5f7f5; }
   .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
   .source { display: grid; gap: 10px; padding: 15px; border: 1px solid #dce3de; border-radius: 12px; background: #f8faf8; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
-  .source-toggle input { width: 17px; height: 17px; flex: none; }
-  select { box-sizing: border-box; width: 100%; height: 38px; padding: 0 9px; border: 1px solid #bdc8c0; border-radius: 8px; color: #253b2e; background: #fff; }
   .meter { height: 5px; overflow: hidden; border-radius: 99px; background: #dfe6e1; }
   .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 100ms linear; }
   .recorder { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: #f3f6f4; }
@@ -383,16 +432,11 @@
   .recorder.active .record-dot { background: #dc4438; box-shadow: 0 0 0 5px rgb(220 68 56 / 12%); }
   .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; font-size: 0.84rem; }
   .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
-  .record-actions button { min-height: 44px; padding: 0 18px; border-radius: 10px; cursor: pointer; font-weight: 750; }
-  .record-actions button:disabled { cursor: not-allowed; opacity: 0.5; }
-  .start { border: 1px solid #246b49; color: #fff; background: #246b49; }
-  .stop { border: 1px solid #9f382f; color: #fff; background: #b84237; }
-  .cancel { border: 1px solid #c7cfca; color: #6f3833; background: #fff; }
   @media (max-width: 600px) {
     .sources { grid-template-columns: 1fr; }
     .recorder { flex-wrap: wrap; }
     .recorder small { width: 100%; margin-left: 20px; }
-    .record-actions button { flex: 1; }
+    .record-actions :global(button) { flex: 1; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
   }
 </style>

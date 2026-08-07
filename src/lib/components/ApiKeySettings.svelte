@@ -1,4 +1,20 @@
 <script lang="ts">
+  import { Badge } from "@mutsuna/ui/badge";
+  import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle
+  } from "@mutsuna/ui/alert-dialog";
+  import { Button } from "@mutsuna/ui/button";
+  import { Card } from "@mutsuna/ui/card";
+  import { Input } from "@mutsuna/ui/input";
+  import { Label } from "@mutsuna/ui/label";
+
   interface Props {
     loading: boolean;
     saving: boolean;
@@ -11,6 +27,7 @@
 
   let { loading, saving, deleting, hasApiKey, busy, onSave, onDelete }: Props = $props();
   let apiKey = $state("");
+  let deleteDialogOpen = $state(false);
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
@@ -20,7 +37,7 @@
   }
 </script>
 
-<section class="card settings-card" aria-busy={loading || saving || deleting}>
+<Card class="card settings-card" aria-busy={loading || saving || deleting}>
   <div class="section-heading">
     <div>
       <p class="step">Settings</p>
@@ -28,18 +45,18 @@
       <p class="help">キーはOSの暗号化機能で保護し、画面へ読み戻しません。</p>
     </div>
     {#if loading}
-      <span class="badge">確認中</span>
+      <Badge variant="secondary">確認中</Badge>
     {:else if hasApiKey}
-      <span class="badge ready">設定済み</span>
+      <Badge>設定済み</Badge>
     {:else}
-      <span class="badge">未設定</span>
+      <Badge variant="secondary">未設定</Badge>
     {/if}
   </div>
 
   <form onsubmit={submit}>
-    <label for="api-key">API key</label>
+    <Label for="api-key">API key</Label>
     <div class="input-row">
-      <input
+      <Input
         id="api-key"
         type="password"
         placeholder={hasApiKey ? "新しいキーに置き換える" : "sk_..."}
@@ -48,9 +65,9 @@
         bind:value={apiKey}
         disabled={busy}
       />
-      <button class="secondary" type="submit" disabled={busy || !apiKey.trim()}>
+      <Button variant="secondary" size="lg" type="submit" disabled={busy || !apiKey.trim()} loading={saving}>
         {saving ? "確認中…" : hasApiKey ? "更新" : "保存"}
-      </button>
+      </Button>
     </div>
   </form>
 
@@ -59,8 +76,23 @@
   </p>
 
   {#if hasApiKey}
-    <button class="danger" type="button" onclick={onDelete} disabled={busy}>
+    <Button class="danger" variant="link" type="button" onclick={() => deleteDialogOpen = true} disabled={busy} loading={deleting}>
       {deleting ? "削除中…" : "保存済みキーを削除"}
-    </button>
+    </Button>
   {/if}
-</section>
+</Card>
+
+<AlertDialog bind:open={deleteDialogOpen}>
+  <AlertDialogContent>
+    <AlertDialogHeader>
+      <AlertDialogTitle>保存済みAPIキーを削除しますか？</AlertDialogTitle>
+      <AlertDialogDescription>
+        ElevenLabsのAPIキーをこの端末から削除します。再度文字起こしを行うには、APIキーの入力が必要です。
+      </AlertDialogDescription>
+    </AlertDialogHeader>
+    <AlertDialogFooter>
+      <AlertDialogCancel>キャンセル</AlertDialogCancel>
+      <AlertDialogAction variant="destructive" onclick={onDelete}>削除</AlertDialogAction>
+    </AlertDialogFooter>
+  </AlertDialogContent>
+</AlertDialog>
