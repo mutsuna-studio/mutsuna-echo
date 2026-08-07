@@ -5,6 +5,7 @@ Svelte 5 + TypeScript + Tauri 2 + Rustで作る、デスクトップ文字起こ
 ## v0.1
 
 - MP3 / M4A / WAV / FLACの選択
+- 再生時間のローカル解析と送信前のコスト概算
 - ElevenLabs Scribe v2による日本語文字起こし
 - 話者分離とタイムスタンプ表示
 - ElevenLabs APIキーの安全なローカル保存

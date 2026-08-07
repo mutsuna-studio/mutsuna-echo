@@ -39,6 +39,11 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  function formatEstimatedCost(costUsd: number): string {
+    if (costUsd < 0.0001) return "$0.0001未満";
+    return `約 $${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
+  }
+
   async function refreshStatus() {
     hasApiKey = await invoke<boolean>("has_api_key");
   }
@@ -170,11 +175,24 @@
         <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
         <small>
           {selectedAudio
-            ? `${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
+            ? `${formatTimestamp(selectedAudio.durationMs)} · ${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
             : "MP3・M4A・WAV・FLAC"}
         </small>
       </span>
     </button>
+
+    {#if selectedAudio}
+      <div class="cost-estimate">
+        <div>
+          <span>推定コスト</span>
+          <strong>{formatEstimatedCost(selectedAudio.estimatedCostUsd)}</strong>
+        </div>
+        <small>
+          公開単価 ${selectedAudio.pricingRateUsdPerHour.toFixed(2)}/時間
+          （{selectedAudio.pricingVerifiedOn}確認）に基づく概算です。プラン内枠や請求時の丸めにより実際の請求額とは異なる場合があります。
+        </small>
+      </div>
+    {/if}
 
     <div class="action-row">
       <div>
@@ -353,6 +371,37 @@
   .section-heading,
   .action-row {
     justify-content: space-between;
+  }
+
+  .cost-estimate {
+    display: grid;
+    gap: 5px;
+    margin-top: 12px;
+    padding: 13px 15px;
+    border-radius: 10px;
+    color: #315541;
+    background: #edf7f1;
+  }
+
+  .cost-estimate div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .cost-estimate span,
+  .cost-estimate small {
+    font-size: 0.78rem;
+  }
+
+  .cost-estimate strong {
+    font-size: 1.02rem;
+  }
+
+  .cost-estimate small {
+    color: #607269;
+    line-height: 1.5;
   }
 
   .badge,

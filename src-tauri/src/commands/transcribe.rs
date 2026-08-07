@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use lofty::{config::ParseOptions, file::AudioFile, probe::Probe};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -14,6 +15,8 @@ use crate::transcription::Transcript;
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac"];
 const ELEVENLABS_MAX_FILE_SIZE: u64 = 5_000_000_000;
+const ELEVENLABS_STT_USD_PER_HOUR: f64 = 0.22;
+const PRICING_VERIFIED_ON: &str = "2026-08-08";
 
 #[derive(Default)]
 pub(crate) struct AudioSelectionState {
@@ -26,6 +29,15 @@ pub(crate) struct AudioSelectionState {
 pub(crate) struct SelectedAudioFile {
     name: String,
     size_bytes: u64,
+    duration_ms: u64,
+    estimated_cost_usd: f64,
+    pricing_rate_usd_per_hour: f64,
+    pricing_verified_on: &'static str,
+}
+
+struct AudioEstimate {
+    duration_ms: u64,
+    estimated_cost_usd: f64,
 }
 
 struct TranscriptionGuard<'a>(&'a AtomicBool);
@@ -67,6 +79,29 @@ fn validate_audio_file(path: &Path) -> Result<u64, String> {
     Ok(metadata.len())
 }
 
+fn estimate_audio_cost(path: &Path) -> Result<AudioEstimate, String> {
+    let tagged_file = Probe::open(path)
+        .and_then(|probe| probe.options(ParseOptions::new().read_tags(false)).read())
+        .map_err(|error| {
+            eprintln!("Could not read audio duration: {error:?}");
+            "音声の再生時間を取得できませんでした。ファイル内容を確認してください。".to_string()
+        })?;
+    let duration = tagged_file.properties().duration();
+
+    if duration.is_zero() {
+        return Err("音声の再生時間が0秒です。別のファイルを選択してください。".to_string());
+    }
+
+    let duration_ms = u64::try_from(duration.as_millis())
+        .map_err(|_| "音声の再生時間が長すぎます。".to_string())?;
+    let estimated_cost_usd = duration.as_secs_f64() / 3600.0 * ELEVENLABS_STT_USD_PER_HOUR;
+
+    Ok(AudioEstimate {
+        duration_ms,
+        estimated_cost_usd,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn select_audio_file(
     app: AppHandle,
@@ -86,6 +121,7 @@ pub(crate) async fn select_audio_file(
         .into_path()
         .map_err(|_| "選択したファイルのパスを取得できませんでした。".to_string())?;
     let size_bytes = validate_audio_file(&path)?;
+    let estimate = estimate_audio_cost(&path)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -97,7 +133,14 @@ pub(crate) async fn select_audio_file(
         .lock()
         .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
 
-    Ok(Some(SelectedAudioFile { name, size_bytes }))
+    Ok(Some(SelectedAudioFile {
+        name,
+        size_bytes,
+        duration_ms: estimate.duration_ms,
+        estimated_cost_usd: estimate.estimated_cost_usd,
+        pricing_rate_usd_per_hour: ELEVENLABS_STT_USD_PER_HOUR,
+        pricing_verified_on: PRICING_VERIFIED_ON,
+    }))
 }
 
 #[tauri::command]
@@ -129,9 +172,41 @@ pub(crate) async fn transcribe_selected_audio(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Write};
+    use std::{fs::File, io::Write, path::Path};
 
-    use super::validate_audio_file;
+    use super::{estimate_audio_cost, validate_audio_file, ELEVENLABS_STT_USD_PER_HOUR};
+
+    fn write_one_second_wav(path: &Path) {
+        const SAMPLE_RATE: u32 = 8_000;
+        const CHANNELS: u16 = 1;
+        const BITS_PER_SAMPLE: u16 = 16;
+        let data_size = SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8);
+        let mut file = File::create(path).expect("create WAV fixture");
+
+        file.write_all(b"RIFF").expect("write RIFF");
+        file.write_all(&(36 + data_size).to_le_bytes())
+            .expect("write RIFF size");
+        file.write_all(b"WAVEfmt ").expect("write WAVE fmt");
+        file.write_all(&16_u32.to_le_bytes())
+            .expect("write fmt size");
+        file.write_all(&1_u16.to_le_bytes())
+            .expect("write PCM format");
+        file.write_all(&CHANNELS.to_le_bytes())
+            .expect("write channels");
+        file.write_all(&SAMPLE_RATE.to_le_bytes())
+            .expect("write sample rate");
+        file.write_all(&(SAMPLE_RATE * 2).to_le_bytes())
+            .expect("write byte rate");
+        file.write_all(&2_u16.to_le_bytes())
+            .expect("write block align");
+        file.write_all(&BITS_PER_SAMPLE.to_le_bytes())
+            .expect("write bits per sample");
+        file.write_all(b"data").expect("write data marker");
+        file.write_all(&data_size.to_le_bytes())
+            .expect("write data size");
+        file.write_all(&vec![0_u8; data_size as usize])
+            .expect("write PCM samples");
+    }
 
     #[test]
     fn rejects_unsupported_file_extension() {
@@ -146,5 +221,18 @@ mod tests {
             result.expect_err("unsupported extension should fail"),
             "MP3、M4A、WAV、FLACのいずれかを選択してください。"
         );
+    }
+
+    #[test]
+    fn estimates_cost_from_local_audio_duration() {
+        let path =
+            std::env::temp_dir().join(format!("mutsuna-echo-duration-{}.wav", std::process::id()));
+        write_one_second_wav(&path);
+
+        let estimate = estimate_audio_cost(&path).expect("estimate WAV cost");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(estimate.duration_ms, 1_000);
+        assert!((estimate.estimated_cost_usd - ELEVENLABS_STT_USD_PER_HOUR / 3600.0).abs() < 1e-9);
     }
 }

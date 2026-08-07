@@ -15,4 +15,8 @@ export type Transcript = {
 export type SelectedAudioFile = {
   name: string;
   sizeBytes: number;
+  durationMs: number;
+  estimatedCostUsd: number;
+  pricingRateUsdPerHour: number;
+  pricingVerifiedOn: string;
 };
