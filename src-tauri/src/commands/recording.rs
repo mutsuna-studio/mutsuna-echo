@@ -1,0 +1,173 @@
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
+
+use crate::{
+    commands::transcribe::{describe_audio_path, SelectedAudioFile},
+    recording::{
+        self,
+        types::{
+            RecordingCapabilities, RecordingStatus, RecoverableRecording, StartRecordingRequest,
+        },
+        RecordingService,
+    },
+};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StopRecordingResult {
+    status: RecordingStatus,
+    audio: Option<SelectedAudioFile>,
+}
+
+#[tauri::command]
+pub(crate) fn get_recording_capabilities() -> Result<RecordingCapabilities, String> {
+    recording::capabilities()
+}
+
+#[tauri::command]
+pub(crate) fn get_recording_status(
+    state: State<'_, RecordingService>,
+) -> Result<RecordingStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = state;
+        recording::android::status()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(state.status())
+    }
+}
+
+#[tauri::command]
+pub(crate) fn get_recorded_audio(
+    state: State<'_, RecordingService>,
+) -> Result<Option<SelectedAudioFile>, String> {
+    #[cfg(target_os = "android")]
+    let status = recording::android::status()?;
+    #[cfg(not(target_os = "android"))]
+    let status = state.status();
+    status
+        .output_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .map(describe_audio_path)
+        .transpose()
+}
+
+#[tauri::command]
+pub(crate) fn start_recording(
+    app: AppHandle,
+    state: State<'_, RecordingService>,
+    request: StartRecordingRequest,
+) -> Result<RecordingStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, state);
+        recording::android::start(&request)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        state.start(app, request)
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        recording::android::stop(false)?;
+        let status = wait_for_android_stop().await?;
+        let audio = status
+            .output_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .map(describe_audio_path)
+            .transpose()?;
+        return Ok(StopRecordingResult { status, audio });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        app.state::<RecordingService>().request_stop(false)?;
+        let worker_app = app.clone();
+        let status = tauri::async_runtime::spawn_blocking(move || {
+            worker_app.state::<RecordingService>().wait_for_stop()
+        })
+        .await
+        .map_err(|error| format!("録音の確定処理を待機できませんでした: {error}"))??;
+        let audio = status
+            .output_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .map(describe_audio_path)
+            .transpose()?;
+        Ok(StopRecordingResult { status, audio })
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_recording(app: AppHandle) -> Result<RecordingStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        recording::android::stop(true)?;
+        return wait_for_android_stop().await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        app.state::<RecordingService>().request_stop(true)?;
+        let worker_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            worker_app.state::<RecordingService>().wait_for_stop()
+        })
+        .await
+        .map_err(|error| format!("録音の破棄処理を待機できませんでした: {error}"))?
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn wait_for_android_stop() -> Result<RecordingStatus, String> {
+    for _ in 0..600 {
+        let status = recording::android::status()?;
+        if matches!(
+            status.phase,
+            crate::recording::types::RecordingPhase::Idle
+                | crate::recording::types::RecordingPhase::Completed
+                | crate::recording::types::RecordingPhase::Failed
+        ) {
+            return Ok(status);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(
+        "Android録音の確定処理がタイムアウトしました。録音はバックグラウンドで保護されています。"
+            .into(),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn list_recoverable_recordings(
+    app: AppHandle,
+) -> Result<Vec<RecoverableRecording>, String> {
+    recording::recoverable_recordings(&app)
+}
+
+#[tauri::command]
+pub(crate) fn recover_recording(
+    app: AppHandle,
+    session_id: String,
+) -> Result<SelectedAudioFile, String> {
+    #[cfg(target_os = "android")]
+    let path = {
+        let _ = app;
+        recording::android::recover(&session_id)?
+    };
+    #[cfg(not(target_os = "android"))]
+    let path = recording::recover(&app, &session_id)?;
+    describe_audio_path(&path)
+}
+
+#[tauri::command]
+pub(crate) fn discard_recording(app: AppHandle, session_id: String) -> Result<(), String> {
+    recording::discard(&app, &session_id)
+}

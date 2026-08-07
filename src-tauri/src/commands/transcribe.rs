@@ -8,8 +8,8 @@ use std::{
 
 use lofty::{config::ParseOptions, file::AudioFile, probe::Probe};
 use serde::Serialize;
-use tauri::{AppHandle, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::transcription::Transcript;
 
@@ -33,6 +33,37 @@ pub(crate) struct SelectedAudioFile {
     estimated_cost_usd: f64,
     pricing_rate_usd_per_hour: f64,
     pricing_verified_on: &'static str,
+}
+
+pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, String> {
+    let size_bytes = validate_audio_file(path)?;
+    let estimate = estimate_audio_cost(path)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("選択した音声ファイル")
+        .to_string();
+    Ok(SelectedAudioFile {
+        name,
+        size_bytes,
+        duration_ms: estimate.duration_ms,
+        estimated_cost_usd: estimate.estimated_cost_usd,
+        pricing_rate_usd_per_hour: ELEVENLABS_STT_USD_PER_HOUR,
+        pricing_verified_on: PRICING_VERIFIED_ON,
+    })
+}
+
+pub(crate) fn set_selected_audio_path(
+    app: &AppHandle,
+    path: PathBuf,
+) -> Result<SelectedAudioFile, String> {
+    let selected = describe_audio_path(&path)?;
+    let state = app.state::<AudioSelectionState>();
+    *state
+        .path
+        .lock()
+        .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
+    Ok(selected)
 }
 
 struct AudioEstimate {
@@ -117,30 +148,25 @@ pub(crate) async fn select_audio_file(
         return Ok(None);
     };
 
-    let path = selected
-        .into_path()
-        .map_err(|_| "選択したファイルのパスを取得できませんでした。".to_string())?;
-    let size_bytes = validate_audio_file(&path)?;
-    let estimate = estimate_audio_cost(&path)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("選択した音声ファイル")
-        .to_string();
-
+    let path = selected_file_path(selected)?;
+    let selected = describe_audio_path(&path)?;
     *state
         .path
         .lock()
         .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
+    Ok(Some(selected))
+}
 
-    Ok(Some(SelectedAudioFile {
-        name,
-        size_bytes,
-        duration_ms: estimate.duration_ms,
-        estimated_cost_usd: estimate.estimated_cost_usd,
-        pricing_rate_usd_per_hour: ELEVENLABS_STT_USD_PER_HOUR,
-        pricing_verified_on: PRICING_VERIFIED_ON,
-    }))
+fn selected_file_path(selected: FilePath) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    if let FilePath::Url(url) = &selected {
+        if url.scheme() == "content" {
+            return crate::recording::android::copy_content_uri(url.as_str());
+        }
+    }
+    selected
+        .into_path()
+        .map_err(|_| "選択したファイルのパスを取得できませんでした。".to_string())
 }
 
 #[tauri::command]

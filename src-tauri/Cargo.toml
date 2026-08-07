@@ -1,7 +1,7 @@
 [package]
 name = "mutsuna-echo"
 version = "0.1.0"
-description = "A desktop transcription app powered by ElevenLabs Scribe v2"
+description = "A cross-platform recording and transcription app powered by ElevenLabs Scribe v2"
 authors = ["Mutsuna Studio"]
 edition = "2021"
 
@@ -26,8 +26,22 @@ zeroize = "1.9.0"
 lofty = "0.24.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-[target."cfg(windows)".dependencies]
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+[dev-dependencies]
+jni = "0.21.1"
+ndk-context = "0.1.1"
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
+[target."cfg(windows)".dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_WinRT", "Win32_Media_MediaFoundation"] }
+flexaudio = "0.2.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+flexaudio = "0.2.0"
+avassetwriter = "0.11.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
+ndk-context = "0.1.1"
+tokio = { version = "1", features = ["time"] }
+
+[target.'cfg(all(not(target_os = "windows"), not(target_os = "android")))'.dependencies]
 keyring = "4.1.6"

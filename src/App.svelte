@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import RecordingPanel from "./lib/components/RecordingPanel.svelte";
   import type { SelectedAudioFile, Transcript, TranscriptionUsage } from "./lib/types/transcript";
 
   let apiKey = $state("");
@@ -10,6 +11,8 @@
   let selecting = $state(false);
   let transcribing = $state(false);
   let usageLoading = $state(false);
+  let recordingBusy = $state(false);
+  let inputMode = $state<"file" | "record">("file");
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcript = $state<Transcript | null>(null);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
@@ -17,7 +20,7 @@
   let message = $state("");
   let errorMessage = $state("");
 
-  const busy = $derived(loading || saving || deleting || selecting || transcribing);
+  const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const canTranscribe = $derived(hasApiKey && selectedAudio !== null && !busy);
 
   function errorText(error: unknown): string {
@@ -181,6 +184,21 @@
       transcribing = false;
     }
   }
+
+  function handleRecordedAudio(audio: SelectedAudioFile) {
+    selectedAudio = audio;
+    transcript = null;
+  }
+
+  function showMessage(nextMessage: string) {
+    message = nextMessage;
+    if (nextMessage) errorMessage = "";
+  }
+
+  function showError(nextError: string) {
+    errorMessage = nextError;
+    if (nextError) message = "";
+  }
 </script>
 
 <svelte:head>
@@ -205,24 +223,39 @@
     <div class="section-heading">
       <div>
         <p class="step">Step 1</p>
-        <h2>音声ファイル</h2>
+        <h2>音声を用意</h2>
       </div>
       <span class:ready={selectedAudio} class="badge">
-        {selectedAudio ? "選択済み" : "未選択"}
+        {recordingBusy ? "録音中" : selectedAudio ? "準備済み" : "未選択"}
       </span>
     </div>
 
-    <button class="file-picker" type="button" onclick={selectAudioFile} disabled={busy}>
-      <span class="file-icon" aria-hidden="true">♪</span>
-      <span class="file-copy">
-        <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
-        <small>
-          {selectedAudio
-            ? `${formatTimestamp(selectedAudio.durationMs)} · ${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
-            : "MP3・M4A・WAV・FLAC"}
-        </small>
-      </span>
-    </button>
+    <div class="input-tabs" role="tablist" aria-label="音声の入力方法">
+      <button class:active={inputMode === "file"} type="button" role="tab" aria-selected={inputMode === "file"} onclick={() => inputMode = "file"} disabled={recordingBusy}>ファイルを選択</button>
+      <button class:active={inputMode === "record"} type="button" role="tab" aria-selected={inputMode === "record"} onclick={() => inputMode = "record"} disabled={recordingBusy}>このアプリで録音</button>
+    </div>
+
+    {#if inputMode === "file"}
+      <button class="file-picker" type="button" onclick={selectAudioFile} disabled={busy}>
+        <span class="file-icon" aria-hidden="true">♪</span>
+        <span class="file-copy">
+          <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
+          <small>
+            {selectedAudio
+              ? `${formatTimestamp(selectedAudio.durationMs)} · ${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
+              : "MP3・M4A・WAV・FLAC"}
+          </small>
+        </span>
+      </button>
+    {:else}
+      <RecordingPanel
+        disabled={loading || saving || deleting || selecting || transcribing}
+        onAudioReady={handleRecordedAudio}
+        onBusyChange={(value) => recordingBusy = value}
+        onMessage={showMessage}
+        onError={showError}
+      />
+    {/if}
 
     {#if selectedAudio}
       <div class="cost-estimate">
@@ -584,6 +617,28 @@
     text-align: left;
   }
 
+  .input-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    margin-top: 22px;
+    padding: 4px;
+    border-radius: 12px;
+    background: #edf1ee;
+  }
+
+  .input-tabs button {
+    border: 0;
+    color: #637068;
+    background: transparent;
+  }
+
+  .input-tabs button.active {
+    color: #205a3c;
+    background: #fff;
+    box-shadow: 0 2px 8px rgb(35 67 48 / 9%);
+  }
+
   .file-icon {
     display: grid;
     width: 40px;
@@ -778,6 +833,10 @@
     }
 
     .usage-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .input-tabs {
       grid-template-columns: 1fr;
     }
   }
