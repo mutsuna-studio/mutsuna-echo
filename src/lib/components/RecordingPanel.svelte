@@ -267,6 +267,15 @@
       actionBusy = false;
     }
   }
+
+  async function revealRecordedAudio(recording: RecordedAudioSummary) {
+    try {
+      await invoke("reveal_recorded_audio", { recordingId: recording.id });
+    } catch (error) {
+      onError(errorText(error));
+      await refreshRecordedAudio();
+    }
+  }
 </script>
 
 {#if loading}
@@ -305,19 +314,30 @@
       {#if recordedAudio.length > 0}
         <div class="history-list">
           {#each recordedAudio as recording (recording.id)}
-            <Button
-              class="history-item"
-              variant="ghost"
-              type="button"
-              onclick={() => selectRecordedAudio(recording)}
-              disabled={actionBusy || disabled}
-            >
-              <span>
-                <strong>{recording.fileName}</strong>
-                <small>{formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}</small>
-              </span>
-              <span class="history-action">選択</span>
-            </Button>
+            <div class="history-item">
+              <Button
+                class="history-select"
+                variant="ghost"
+                type="button"
+                onclick={() => selectRecordedAudio(recording)}
+                disabled={actionBusy || disabled}
+              >
+                <span>
+                  <strong>{recording.fileName}</strong>
+                  <small>{formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}</small>
+                </span>
+                <span class="history-action">選択</span>
+              </Button>
+              <Button
+                class="history-reveal"
+                variant="outline"
+                size="sm"
+                type="button"
+                onclick={() => revealRecordedAudio(recording)}
+                disabled={actionBusy}
+                aria-label={`${recording.fileName}の保存場所を開く`}
+              >場所を開く</Button>
+            </div>
           {/each}
         </div>
       {:else}
@@ -413,11 +433,13 @@
   .history-heading small,
   .history-empty { color: #68746c; font-size: 0.78rem; }
   .history-list { display: grid; overflow: hidden; border: 1px solid #dce3de; border-radius: 12px; }
-  .history-list :global(.history-item) { width: 100%; min-height: auto; justify-content: space-between; padding: 12px 14px; border-top: 1px solid #e4e9e6; border-radius: 0; text-align: left; }
-  .history-list :global(.history-item:first-child) { border-top: 0; }
-  .history-list :global(.history-item > span:first-child) { display: grid; min-width: 0; gap: 3px; }
-  .history-list :global(.history-item strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .history-list :global(.history-item small) { color: var(--muted-foreground); }
+  .history-item { display: flex; align-items: center; gap: 8px; padding: 6px; border-top: 1px solid var(--border); }
+  .history-item:first-child { border-top: 0; }
+  .history-item :global(.history-select) { min-width: 0; height: auto; flex: 1; justify-content: space-between; padding: 8px; text-align: left; }
+  .history-item :global(.history-select > span:first-child) { display: grid; min-width: 0; gap: 3px; }
+  .history-item :global(.history-select strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-item :global(.history-select small) { color: var(--muted-foreground); }
+  .history-item :global(.history-reveal) { flex: none; }
   .history-action { flex: none; color: #23704a; font-size: 0.78rem; font-weight: 750; }
   .history-empty { margin: 0; padding: 14px; border-radius: 10px; background: #f5f7f5; }
   .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
@@ -438,5 +460,6 @@
     .recorder small { width: 100%; margin-left: 20px; }
     .record-actions :global(button) { flex: 1; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
+    .history-action { display: none; }
   }
 </style>

@@ -168,6 +168,18 @@ pub(crate) fn select_recorded_audio(
 }
 
 #[tauri::command]
+pub(crate) fn reveal_recorded_audio(app: AppHandle, recording_id: String) -> Result<(), String> {
+    let path = recording::completed_recording_path(&app, &recording_id)?;
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| {
+        if matches!(error, tauri_plugin_opener::Error::UnsupportedPlatform) {
+            "このOSでは録音ファイルの保存場所を開けません。".to_string()
+        } else {
+            format!("録音ファイルの保存場所を開けませんでした: {error}")
+        }
+    })
+}
+
+#[tauri::command]
 pub(crate) fn recover_recording(
     app: AppHandle,
     session_id: String,

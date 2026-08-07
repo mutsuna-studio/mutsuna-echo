@@ -25,6 +25,7 @@ pub fn run() {
             commands::recording::list_recoverable_recordings,
             commands::recording::list_recorded_audio,
             commands::recording::select_recorded_audio,
+            commands::recording::reveal_recorded_audio,
             commands::recording::recover_recording,
             commands::recording::discard_recording
         ])
