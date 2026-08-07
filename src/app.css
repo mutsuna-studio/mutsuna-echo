@@ -221,22 +221,6 @@ h2 {
   font-size: 0.86rem;
 }
 
-.notice {
-  margin: 14px 0 0;
-  padding: 12px 14px;
-  border-radius: 10px;
-  font-size: 0.9rem;
-}
-
-.notice.success {
-  color: var(--success-foreground);
-  background: color-mix(in oklch, var(--success) 24%, var(--background));
-}
-
-.notice.error {
-  color: var(--destructive);
-}
-
 .transcript-heading { margin-bottom: 4px; }
 .segments { margin-top: 22px; }
 

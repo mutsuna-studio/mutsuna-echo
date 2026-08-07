@@ -1,6 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { Alert, AlertDescription } from "@mutsuna/ui/alert";
+  import {
+    Toaster,
+    showErrorToast,
+    showSuccessToast,
+    showWarningToast
+  } from "@mutsuna/ui/sonner";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
@@ -22,8 +27,8 @@
   let transcript = $state<Transcript | null>(null);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let usageError = $state("");
-  let message = $state("");
-  let errorMessage = $state("");
+  let lastErrorToast = $state("");
+  let lastErrorToastAt = $state(0);
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
@@ -56,7 +61,7 @@
         hasApiKey = await invoke<boolean>("has_api_key");
         if (hasApiKey) await refreshUsage();
       } catch (error) {
-        errorMessage = errorText(error);
+        showError(errorText(error));
       } finally {
         loading = false;
       }
@@ -65,18 +70,18 @@
 
   async function saveApiKey(apiKey: string) {
     saving = true;
-    message = "";
-    errorMessage = "";
 
     try {
       const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey });
       hasApiKey = true;
-      message = modelsAccessible
-        ? "APIキーを確認し、安全に保存しました。"
-        : "制限付きAPIキーとして保存しました。各権限は利用時に確認します。";
+      if (modelsAccessible) {
+        showSuccessToast("APIキーを確認し、安全に保存しました。");
+      } else {
+        showWarningToast("制限付きAPIキーとして保存しました。", "各権限は利用時に確認します。");
+      }
       await refreshUsage();
     } catch (error) {
-      errorMessage = errorText(error);
+      showError(errorText(error));
     } finally {
       saving = false;
     }
@@ -84,16 +89,14 @@
 
   async function deleteApiKey() {
     deleting = true;
-    message = "";
-    errorMessage = "";
     try {
       await invoke("delete_api_key");
       hasApiKey = false;
       transcriptionUsage = null;
       usageError = "";
-      message = "APIキーを削除しました。";
+      showSuccessToast("APIキーを削除しました。");
     } catch (error) {
-      errorMessage = errorText(error);
+      showError(errorText(error));
     } finally {
       deleting = false;
     }
@@ -101,8 +104,6 @@
 
   async function selectAudioFile() {
     selecting = true;
-    message = "";
-    errorMessage = "";
     try {
       const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
       if (selected) {
@@ -110,7 +111,7 @@
         transcript = null;
       }
     } catch (error) {
-      errorMessage = errorText(error);
+      showError(errorText(error));
     } finally {
       selecting = false;
     }
@@ -121,16 +122,16 @@
 
     transcribing = true;
     transcript = null;
-    message = "";
-    errorMessage = "";
     try {
       transcript = await invoke<Transcript>("transcribe_selected_audio");
-      message = transcript.segments.length > 0
-        ? "文字起こしが完了しました。"
-        : "文字起こしは完了しましたが、発話を検出できませんでした。";
+      if (transcript.segments.length > 0) {
+        showSuccessToast("文字起こしが完了しました。");
+      } else {
+        showWarningToast("文字起こしは完了しました。", "発話を検出できませんでした。");
+      }
       await refreshUsage();
     } catch (error) {
-      errorMessage = errorText(error);
+      showError(errorText(error));
     } finally {
       transcribing = false;
     }
@@ -142,13 +143,18 @@
   }
 
   function showMessage(nextMessage: string) {
-    message = nextMessage;
-    if (nextMessage) errorMessage = "";
+    if (nextMessage) showSuccessToast(nextMessage);
   }
 
   function showError(nextError: string) {
-    errorMessage = nextError;
-    if (nextError) message = "";
+    if (!nextError) return;
+
+    const now = Date.now();
+    if (nextError === lastErrorToast && now - lastErrorToastAt < 3_000) return;
+
+    lastErrorToast = nextError;
+    lastErrorToastAt = now;
+    showErrorToast("処理に失敗しました", nextError);
   }
 </script>
 
@@ -157,19 +163,13 @@
 </svelte:head>
 
 <ThemeProvider theme={echoTheme}>
+  <Toaster position="top-right" closeButton />
   <main class="shell">
   <header class="hero">
     <p class="eyebrow">Mutsuna Echo</p>
     <h1>会話を、読み返せる形へ。</h1>
     <p class="lead">音声ファイルを選択して、話者とタイムスタンプ付きで文字起こしします。</p>
   </header>
-
-  {#if message}
-    <Alert class="notice success" role="status"><AlertDescription>{message}</AlertDescription></Alert>
-  {/if}
-  {#if errorMessage}
-    <Alert class="notice error" variant="destructive" role="alert"><AlertDescription>{errorMessage}</AlertDescription></Alert>
-  {/if}
 
   <AudioInputPanel
     {selectedAudio}
