@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Months, Utc};
+use chrono::{DateTime, Datelike, Months, Utc};
 use reqwest::{redirect::Policy, Client, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,9 @@ use tauri::AppHandle;
 const SUBSCRIPTION_URL: &str = "https://api.elevenlabs.io/v1/user/subscription";
 const USAGE_URL: &str =
     "https://api.elevenlabs.io/v1/workspace/analytics/query/usage-by-product-over-time";
+// ElevenLabs prices Scribe v2 at $0.22/hour. API credits represent
+// $0.0001 each (10,000 credits per USD), so one hour consumes 2,200 credits.
+const SCRIBE_V2_CREDITS_PER_HOUR: f64 = 2_200.0;
 
 #[derive(Debug, Deserialize)]
 struct SubscriptionResponse {
@@ -104,57 +107,36 @@ async fn fetch_subscription(
     parse_response(response, "契約情報").await
 }
 
-fn included_scribe_minutes(tier: &str) -> Option<f64> {
-    // ElevenLabs has used versioned/internal suffixes for subscription tiers.
-    // Match the public plan name inside the identifier instead of requiring an
-    // exact value such as `creator`.
-    let normalized = tier
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-
-    if normalized.contains("business") {
-        Some(4_500.0 * 60.0)
-    } else if normalized.contains("scale") {
-        Some(1_359.0 * 60.0)
-    } else if normalized.contains("creator") {
-        Some(100.0 * 60.0)
-    } else if normalized.contains("starter") {
-        Some(27.0 * 60.0)
-    } else if normalized == "pro" || normalized.starts_with("pro") {
-        Some(450.0 * 60.0)
-    } else if normalized.contains("free") || normalized.contains("payasyougo") {
-        Some(4.5 * 60.0)
-    } else {
-        None
-    }
+fn credits_to_duration_ms(credits: f64) -> u64 {
+    (credits / SCRIBE_V2_CREDITS_PER_HOUR * 3_600_000.0).round() as u64
 }
 
-fn available_duration_ms(subscription: &SubscriptionResponse) -> Option<u64> {
-    if subscription.character_limit == 0 {
-        return None;
-    }
-
-    let included_minutes = included_scribe_minutes(&subscription.tier)?;
+fn available_duration_ms(subscription: &SubscriptionResponse) -> u64 {
     let remaining_credits = subscription
         .character_limit
         .saturating_sub(subscription.character_count);
-    let remaining_ratio = remaining_credits as f64 / subscription.character_limit as f64;
-    Some((included_minutes * remaining_ratio * 60_000.0).round() as u64)
+    credits_to_duration_ms(remaining_credits as f64)
 }
 
-fn period_start_ms(subscription: &SubscriptionResponse) -> Option<i64> {
-    let reset = DateTime::<Utc>::from_timestamp(subscription.next_character_count_reset_unix?, 0)?;
-    let months = match subscription.character_refresh_period.as_deref() {
-        Some("3_month_period") => 3,
-        Some("6_month_period") => 6,
-        Some("annual_period") => 12,
-        _ => 1,
-    };
-    reset
-        .checked_sub_months(Months::new(months))
-        .map(|date| date.timestamp_millis())
+fn period_start_ms(subscription: &SubscriptionResponse) -> i64 {
+    let subscription_start = subscription
+        .next_character_count_reset_unix
+        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+        .and_then(|reset| {
+            let months = match subscription.character_refresh_period.as_deref() {
+                Some("3_month_period") => 3,
+                Some("6_month_period") => 6,
+                Some("annual_period") => 12,
+                _ => 1,
+            };
+            reset.checked_sub_months(Months::new(months))
+        });
+
+    subscription_start
+        .or_else(|| Utc::now().with_day(1))
+        .map(|date| date.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc())
+        .unwrap_or_else(Utc::now)
+        .timestamp_millis()
 }
 
 fn is_speech_to_text_product(name: &str) -> bool {
@@ -197,20 +179,10 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
         .sum())
 }
 
-fn credits_to_duration_ms(credits: f64, subscription: &SubscriptionResponse) -> Option<u64> {
-    let included_minutes = included_scribe_minutes(&subscription.tier)?;
-    if subscription.character_limit == 0 {
-        return None;
-    }
-    let minutes = credits / subscription.character_limit as f64 * included_minutes;
-    Some((minutes * 60_000.0).round() as u64)
-}
-
 async fn fetch_used_duration(
     client: &Client,
     api_key: &SecretString,
     start_ms: i64,
-    subscription: &SubscriptionResponse,
 ) -> Result<ApiResponse<u64>, String> {
     let end_ms = Utc::now().timestamp_millis();
     let response = client
@@ -230,9 +202,7 @@ async fn fetch_used_duration(
     match parse_response::<UsageResponse>(response, "使用量").await? {
         ApiResponse::Data(usage) => {
             let credits = used_credits(&usage)?;
-            let duration_ms = credits_to_duration_ms(credits, subscription)
-                .ok_or_else(|| "契約プランの文字起こし時間を換算できませんでした。".to_string())?;
-            Ok(ApiResponse::Data(duration_ms))
+            Ok(ApiResponse::Data(credits_to_duration_ms(credits)))
         }
         ApiResponse::MissingPermission => Ok(ApiResponse::MissingPermission),
     }
@@ -263,39 +233,32 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
     let resets_at_unix = subscription.next_character_count_reset_unix;
     let mut warning = if subscription.character_limit == 0 {
         Some(format!(
-            "ElevenLabsの契約APIが{}プランの利用枠を0クレジットとして返したため、文字起こし可能時間を換算できません。APIキー側の「使用制限: 無制限」とは別の、アカウントの契約枠です。",
-            subscription.tier
-        ))
-    } else if available_duration_ms.is_none() {
-        Some(format!(
-            "ElevenLabsが返したプラン識別子「{}」に対応する公開換算表がないため、文字起こし可能時間を計算できません。",
+            "ElevenLabsの契約APIは{}プランの月次契約枠を0クレジットとして返しています。APIキーの「使用制限: 無制限」はキー単位の上限で、アカウントの契約枠やPay As You Go残高とは別です。",
             subscription.tier
         ))
     } else {
         None
     };
 
-    let used_duration_ms = if available_duration_ms.is_none() {
-        None
-    } else if let Some(start_ms) = period_start_ms(&subscription) {
-        match fetch_used_duration(&client, &api_key, start_ms, &subscription).await? {
-            ApiResponse::Data(duration_ms) => Some(duration_ms),
-            ApiResponse::MissingPermission => {
-                warning = Some(
-                    "使用済み時間を参照する権限がありません。ElevenLabsのAPIキー設定でWorkspace Analytics Full Read権限を追加してください。Speech to Text以外の生成権限は不要です。"
-                        .to_string(),
-                );
-                None
-            }
+    let used_duration_ms = match fetch_used_duration(
+        &client,
+        &api_key,
+        period_start_ms(&subscription),
+    )
+    .await?
+    {
+        ApiResponse::Data(duration_ms) => Some(duration_ms),
+        ApiResponse::MissingPermission => {
+            warning = Some(
+                "使用済み時間を参照する権限がありません。ElevenLabsのAPIキー設定でWorkspace Analytics Full Read権限を追加してください。Speech to Text以外の生成権限は不要です。"
+                    .to_string(),
+            );
+            None
         }
-    } else {
-        warning =
-            Some("契約期間の開始日を取得できないため、使用済み時間を表示できません。".to_string());
-        None
     };
 
     Ok(TranscriptionUsage {
-        available_duration_ms,
+        available_duration_ms: Some(available_duration_ms),
         used_duration_ms,
         tier: Some(subscription.tier),
         resets_at_unix,
@@ -315,32 +278,18 @@ mod tests {
     fn converts_remaining_creator_credits_to_scribe_time() {
         let subscription = SubscriptionResponse {
             tier: "creator".to_string(),
-            character_count: 25_000,
-            character_limit: 100_000,
+            character_count: 55_000,
+            character_limit: 220_000,
             next_character_count_reset_unix: None,
             character_refresh_period: None,
         };
 
-        assert_eq!(
-            available_duration_ms(&subscription),
-            Some(75 * 60 * 60 * 1_000)
-        );
+        assert_eq!(available_duration_ms(&subscription), 75 * 60 * 60 * 1_000);
     }
 
     #[test]
-    fn accepts_versioned_subscription_tier_identifiers() {
-        let subscription = SubscriptionResponse {
-            tier: "creator_v2_annual".to_string(),
-            character_count: 25_000,
-            character_limit: 100_000,
-            next_character_count_reset_unix: None,
-            character_refresh_period: None,
-        };
-
-        assert_eq!(
-            available_duration_ms(&subscription),
-            Some(75 * 60 * 60 * 1_000)
-        );
+    fn converts_credits_without_depending_on_plan_tier() {
+        assert_eq!(credits_to_duration_ms(2_200.0), 60 * 60 * 1_000);
     }
 
     #[test]
@@ -357,19 +306,8 @@ mod tests {
                 vec![json!("2026-08-02"), json!("text-to-speech"), json!(99_000)],
             ],
         };
-        let subscription = SubscriptionResponse {
-            tier: "creator".to_string(),
-            character_count: 0,
-            character_limit: 100_000,
-            next_character_count_reset_unix: None,
-            character_refresh_period: None,
-        };
-
         assert!(is_speech_to_text_product("Speech_to_Text"));
         assert_eq!(used_credits(&usage).unwrap(), 1_500.0);
-        assert_eq!(
-            credits_to_duration_ms(1_500.0, &subscription),
-            Some(90 * 60_000)
-        );
+        assert_eq!(credits_to_duration_ms(1_500.0), 2_454_545);
     }
 }
