@@ -156,6 +156,12 @@ fn numeric_value(value: &Value) -> Option<f64> {
 }
 
 fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
+    // The analytics API can omit metric columns entirely when the selected
+    // period has no usage. That is a valid zero-usage response.
+    if usage.rows.is_empty() {
+        return Ok(0.0);
+    }
+
     let product_index = usage
         .columns
         .iter()
@@ -164,8 +170,18 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
     let credits_index = usage
         .columns
         .iter()
-        .position(|column| column == "credits_used")
-        .ok_or_else(|| "ElevenLabsの使用量にクレジット情報が含まれていません。".to_string())?;
+        .position(|column| {
+            matches!(
+                column.as_str(),
+                "credits_used" | "credit_usage" | "credits" | "usage"
+            )
+        })
+        .ok_or_else(|| {
+            format!(
+                "ElevenLabsの使用量にクレジット情報が含まれていません（列: {}）。",
+                usage.columns.join(", ")
+            )
+        })?;
 
     Ok(usage
         .rows
@@ -245,14 +261,18 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
         &api_key,
         period_start_ms(&subscription),
     )
-    .await?
+    .await
     {
-        ApiResponse::Data(duration_ms) => Some(duration_ms),
-        ApiResponse::MissingPermission => {
+        Ok(ApiResponse::Data(duration_ms)) => Some(duration_ms),
+        Ok(ApiResponse::MissingPermission) => {
             warning = Some(
                 "使用済み時間を参照する権限がありません。ElevenLabsのAPIキー設定でWorkspace Analytics Full Read権限を追加してください。Speech to Text以外の生成権限は不要です。"
                     .to_string(),
             );
+            None
+        }
+        Err(error) => {
+            warning = Some(error);
             None
         }
     };
@@ -309,5 +329,15 @@ mod tests {
         assert!(is_speech_to_text_product("Speech_to_Text"));
         assert_eq!(used_credits(&usage).unwrap(), 1_500.0);
         assert_eq!(credits_to_duration_ms(1_500.0), 2_454_545);
+    }
+
+    #[test]
+    fn treats_an_empty_analytics_response_as_zero_usage() {
+        let usage = UsageResponse {
+            columns: vec!["timestamp".into(), "product_type".into()],
+            rows: vec![],
+        };
+
+        assert_eq!(used_credits(&usage).unwrap(), 0.0);
     }
 }
