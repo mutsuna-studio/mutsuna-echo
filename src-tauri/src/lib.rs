@@ -12,7 +12,8 @@ pub fn run() {
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,
             commands::transcribe::select_audio_file,
-            commands::transcribe::transcribe_selected_audio
+            commands::transcribe::transcribe_selected_audio,
+            commands::usage::get_transcription_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

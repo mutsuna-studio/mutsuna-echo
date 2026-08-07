@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import type { SelectedAudioFile, Transcript } from "./lib/types/transcript";
+  import type { SelectedAudioFile, Transcript, TranscriptionUsage } from "./lib/types/transcript";
 
   let apiKey = $state("");
   let hasApiKey = $state(false);
@@ -9,8 +9,11 @@
   let deleting = $state(false);
   let selecting = $state(false);
   let transcribing = $state(false);
+  let usageLoading = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcript = $state<Transcript | null>(null);
+  let transcriptionUsage = $state<TranscriptionUsage | null>(null);
+  let usageError = $state("");
   let message = $state("");
   let errorMessage = $state("");
 
@@ -44,6 +47,37 @@
     return `約 $${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
   }
 
+  function formatDuration(milliseconds: number): string {
+    const totalMinutes = Math.max(0, Math.round(milliseconds / 60_000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours === 0) return `${minutes}分`;
+    return minutes === 0 ? `${hours}時間` : `${hours}時間 ${minutes}分`;
+  }
+
+  function formatResetDate(unixSeconds: number): string {
+    return new Intl.DateTimeFormat("ja-JP", {
+      year: "numeric",
+      month: "long",
+      day: "numeric"
+    }).format(new Date(unixSeconds * 1_000));
+  }
+
+  async function refreshUsage() {
+    if (!hasApiKey || usageLoading) return;
+
+    usageLoading = true;
+    usageError = "";
+    try {
+      transcriptionUsage = await invoke<TranscriptionUsage>("get_transcription_usage");
+    } catch (error) {
+      transcriptionUsage = null;
+      usageError = errorText(error);
+    } finally {
+      usageLoading = false;
+    }
+  }
+
   async function refreshStatus() {
     hasApiKey = await invoke<boolean>("has_api_key");
   }
@@ -52,6 +86,7 @@
     void (async () => {
       try {
         await refreshStatus();
+        if (hasApiKey) await refreshUsage();
       } catch (error) {
         errorMessage = errorText(error);
       } finally {
@@ -73,7 +108,8 @@
       hasApiKey = true;
       message = modelsAccessible
         ? "APIキーを確認し、安全に保存しました。"
-        : "制限付きAPIキーとして保存しました。Speech to Text権限は文字起こし時に確認します。";
+        : "制限付きAPIキーとして保存しました。各権限は利用時に確認します。";
+      await refreshUsage();
     } catch (error) {
       errorMessage = errorText(error);
     } finally {
@@ -92,6 +128,8 @@
     try {
       await invoke("delete_api_key");
       hasApiKey = false;
+      transcriptionUsage = null;
+      usageError = "";
       apiKey = "";
       message = "APIキーを削除しました。";
     } catch (error) {
@@ -132,6 +170,7 @@
       message = transcript.segments.length > 0
         ? "文字起こしが完了しました。"
         : "文字起こしは完了しましたが、発話を検出できませんでした。";
+      await refreshUsage();
     } catch (error) {
       errorMessage = errorText(error);
     } finally {
@@ -207,6 +246,60 @@
     </div>
   </section>
 
+  {#if hasApiKey}
+    <section class="card usage-card" aria-busy={usageLoading}>
+      <div class="section-heading">
+        <div>
+          <p class="step">Usage</p>
+          <h2>ElevenLabs 利用状況</h2>
+        </div>
+        <button class="refresh" type="button" onclick={refreshUsage} disabled={usageLoading}>
+          {usageLoading ? "更新中…" : "更新"}
+        </button>
+      </div>
+
+      {#if usageLoading && !transcriptionUsage}
+        <p class="usage-placeholder" role="status">契約枠と使用量を確認しています…</p>
+      {:else}
+        <div class="usage-grid">
+          <div>
+            <span>今月利用可能</span>
+            <strong>
+              {transcriptionUsage?.availableDurationMs !== null && transcriptionUsage?.availableDurationMs !== undefined
+                ? formatDuration(transcriptionUsage.availableDurationMs)
+                : "取得できません"}
+            </strong>
+          </div>
+          <div>
+            <span>今月使用済み（Scribe換算）</span>
+            <strong>
+              {transcriptionUsage?.usedDurationMs !== null && transcriptionUsage?.usedDurationMs !== undefined
+                ? formatDuration(transcriptionUsage.usedDurationMs)
+                : "取得できません"}
+            </strong>
+          </div>
+        </div>
+      {/if}
+
+      {#if transcriptionUsage?.tier || transcriptionUsage?.resetsAtUnix}
+        <p class="usage-meta">
+          {transcriptionUsage.tier ? `${transcriptionUsage.tier}プラン` : ""}
+          {transcriptionUsage.tier && transcriptionUsage.resetsAtUnix ? " · " : ""}
+          {transcriptionUsage.resetsAtUnix ? `${formatResetDate(transcriptionUsage.resetsAtUnix)}にリセット` : ""}
+        </p>
+      {/if}
+      {#if transcriptionUsage?.warning}
+        <p class="usage-warning" role="alert">{transcriptionUsage.warning}</p>
+      {/if}
+      {#if usageError}
+        <p class="usage-warning" role="alert">{usageError}</p>
+      {/if}
+      <p class="usage-note">
+        時間は契約枠と製品別クレジット使用量をScribe v2の公開枠で換算した値です。他のElevenLabs機能や追加機能を使うと実際の音声時間と異なる場合があります。
+      </p>
+    </section>
+  {/if}
+
   {#if transcript}
     <section class="card transcript-card" aria-label="文字起こし結果">
       <div class="section-heading transcript-heading">
@@ -269,7 +362,9 @@
       </div>
     </form>
 
-    <p class="security-note">ElevenLabsではSpeech to Textだけを許可し、利用上限を設定してください。</p>
+    <p class="security-note">
+      ElevenLabsではSpeech to Text、User Read、Workspace Analytics Full Readだけを許可し、利用上限を設定してください。
+    </p>
 
     {#if hasApiKey}
       <button class="danger" type="button" onclick={deleteApiKey} disabled={busy}>
@@ -392,6 +487,65 @@
 
   .cost-estimate span,
   .cost-estimate small {
+    font-size: 0.78rem;
+  }
+
+  .usage-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+  }
+
+  .usage-grid div {
+    display: grid;
+    gap: 6px;
+    padding: 16px;
+    border-radius: 12px;
+    background: #f3f7f4;
+  }
+
+  .usage-grid span,
+  .usage-meta,
+  .usage-placeholder,
+  .usage-note,
+  .usage-warning {
+    font-size: 0.82rem;
+  }
+
+  .usage-grid span,
+  .usage-meta,
+  .usage-placeholder,
+  .usage-note {
+    color: #647068;
+  }
+
+  .usage-grid strong {
+    color: #235c3e;
+    font-size: 1.15rem;
+  }
+
+  .usage-meta,
+  .usage-placeholder,
+  .usage-note,
+  .usage-warning {
+    margin: 12px 0 0;
+    line-height: 1.55;
+  }
+
+  .usage-warning {
+    padding: 11px 12px;
+    border-radius: 9px;
+    color: #8b4a19;
+    background: #fff4e8;
+  }
+
+  .refresh {
+    min-height: auto;
+    padding: 7px 11px;
+    border: 1px solid #c5cec8;
+    color: #315541;
+    background: #f8faf8;
     font-size: 0.78rem;
   }
 
@@ -625,6 +779,10 @@
 
     .model {
       display: none;
+    }
+
+    .usage-grid {
+      grid-template-columns: 1fr;
     }
   }
 </style>

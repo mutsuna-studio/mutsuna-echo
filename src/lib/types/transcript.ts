@@ -20,3 +20,11 @@ export type SelectedAudioFile = {
   pricingRateUsdPerHour: number;
   pricingVerifiedOn: string;
 };
+
+export type TranscriptionUsage = {
+  availableDurationMs: number | null;
+  usedDurationMs: number | null;
+  tier: string | null;
+  resetsAtUnix: number | null;
+  warning: string | null;
+};
