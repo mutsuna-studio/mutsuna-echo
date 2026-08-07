@@ -88,7 +88,6 @@ pub(crate) fn delete_api_key(app: AppHandle) -> Result<(), String> {
 }
 
 /// Load the key for Rust-side ElevenLabs requests. Never expose this via Tauri.
-#[allow(dead_code)]
 pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
     crate::credentials::load_api_key(app)
 }

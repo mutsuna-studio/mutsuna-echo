@@ -132,11 +132,16 @@ fn period_start_ms(subscription: &SubscriptionResponse) -> i64 {
             reset.checked_sub_months(Months::new(months))
         });
 
-    subscription_start
-        .or_else(|| Utc::now().with_day(1))
-        .map(|date| date.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc())
-        .unwrap_or_else(Utc::now)
-        .timestamp_millis()
+    if let Some(start) = subscription_start {
+        return start.timestamp_millis();
+    }
+
+    let now = Utc::now();
+    now.date_naive()
+        .with_day(1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date| date.and_utc().timestamp_millis())
+        .unwrap_or_else(|| now.timestamp_millis())
 }
 
 fn is_speech_to_text_product(name: &str) -> bool {
@@ -152,7 +157,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        .filter(|value| value.is_finite() && *value > 0.0)
+        .filter(|value| value.is_finite())
 }
 
 fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
@@ -170,17 +175,13 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
     let credits_index = usage
         .columns
         .iter()
-        .position(|column| {
-            matches!(
-                column.as_str(),
-                "credits_used" | "credit_usage" | "credits" | "usage"
-            )
-        })
+        .position(|column| column == "credits_used")
         .ok_or_else(|| {
-            format!(
-                "ElevenLabsの使用量にクレジット情報が含まれていません（列: {}）。",
-                usage.columns.join(", ")
-            )
+            eprintln!(
+                "ElevenLabs usage response did not contain credits_used; columns: {:?}",
+                usage.columns
+            );
+            "ElevenLabsの使用量レスポンス形式を確認できませんでした。".to_string()
         })?;
 
     Ok(usage
@@ -192,7 +193,8 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
                 .is_some_and(is_speech_to_text_product)
         })
         .filter_map(|row| row.get(credits_index).and_then(numeric_value))
-        .sum())
+        .sum::<f64>()
+        .max(0.0))
 }
 
 async fn fetch_used_duration(
@@ -289,8 +291,8 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
 #[cfg(test)]
 mod tests {
     use super::{
-        available_duration_ms, credits_to_duration_ms, is_speech_to_text_product, used_credits,
-        SubscriptionResponse, UsageResponse,
+        available_duration_ms, credits_to_duration_ms, is_speech_to_text_product, period_start_ms,
+        used_credits, SubscriptionResponse, UsageResponse,
     };
     use serde_json::json;
 
@@ -310,6 +312,19 @@ mod tests {
     #[test]
     fn converts_credits_without_depending_on_plan_tier() {
         assert_eq!(credits_to_duration_ms(2_200.0), 60 * 60 * 1_000);
+    }
+
+    #[test]
+    fn preserves_the_billing_cycle_reset_time() {
+        let subscription = SubscriptionResponse {
+            tier: "creator".to_string(),
+            character_count: 0,
+            character_limit: 10_000,
+            next_character_count_reset_unix: Some(1_787_054_400),
+            character_refresh_period: Some("monthly_period".to_string()),
+        };
+
+        assert_eq!(period_start_ms(&subscription), 1_784_376_000_000);
     }
 
     #[test]
@@ -339,5 +354,18 @@ mod tests {
         };
 
         assert_eq!(used_credits(&usage).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn rejects_non_empty_analytics_without_documented_credit_column() {
+        let usage = UsageResponse {
+            columns: vec!["timestamp".into(), "product_type".into(), "usage".into()],
+            rows: vec![vec![json!("2026-08-01"), json!("speech-to-text"), json!(1)]],
+        };
+
+        assert_eq!(
+            used_credits(&usage).unwrap_err(),
+            "ElevenLabsの使用量レスポンス形式を確認できませんでした。"
+        );
     }
 }

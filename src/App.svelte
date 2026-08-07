@@ -55,6 +55,10 @@
     return minutes === 0 ? `${hours}時間` : `${hours}時間 ${minutes}分`;
   }
 
+  function formatOptionalDuration(milliseconds: number | null | undefined): string {
+    return milliseconds == null ? "取得できません" : formatDuration(milliseconds);
+  }
+
   function formatResetDate(unixSeconds: number): string {
     return new Intl.DateTimeFormat("ja-JP", {
       year: "numeric",
@@ -264,19 +268,11 @@
         <div class="usage-grid">
           <div>
             <span>今月利用可能</span>
-            <strong>
-              {transcriptionUsage?.availableDurationMs !== null && transcriptionUsage?.availableDurationMs !== undefined
-                ? formatDuration(transcriptionUsage.availableDurationMs)
-                : "取得できません"}
-            </strong>
+            <strong>{formatOptionalDuration(transcriptionUsage?.availableDurationMs)}</strong>
           </div>
           <div>
             <span>今月使用済み（Scribe換算）</span>
-            <strong>
-              {transcriptionUsage?.usedDurationMs !== null && transcriptionUsage?.usedDurationMs !== undefined
-                ? formatDuration(transcriptionUsage.usedDurationMs)
-                : "取得できません"}
-            </strong>
+            <strong>{formatOptionalDuration(transcriptionUsage?.usedDurationMs)}</strong>
           </div>
         </div>
       {/if}
