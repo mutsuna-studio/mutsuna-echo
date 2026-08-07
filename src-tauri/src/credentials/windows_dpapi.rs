@@ -1,5 +1,6 @@
 use std::{fs, path::PathBuf, slice};
 
+use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager};
 use windows::{
     core::w,
@@ -23,7 +24,9 @@ fn credential_path(app: &AppHandle) -> Result<PathBuf, String> {
         })
 }
 
-fn copy_and_free(blob: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+use zeroize::{Zeroize, Zeroizing};
+
+fn copy_and_free(blob: CRYPT_INTEGER_BLOB, clear_before_free: bool) -> Vec<u8> {
     let bytes = if blob.cbData == 0 || blob.pbData.is_null() {
         Vec::new()
     } else {
@@ -32,6 +35,12 @@ fn copy_and_free(blob: CRYPT_INTEGER_BLOB) -> Vec<u8> {
     };
 
     if !blob.pbData.is_null() {
+        if clear_before_free && blob.cbData > 0 {
+            // SAFETY: DPAPI returned a writable allocation of exactly cbData
+            // bytes. Clear plaintext before returning it to the Windows heap.
+            unsafe { slice::from_raw_parts_mut(blob.pbData, blob.cbData as usize) }.zeroize();
+        }
+
         // SAFETY: DPAPI allocates output with LocalAlloc and transfers ownership
         // to the caller, which must release it using LocalFree.
         unsafe {
@@ -69,10 +78,10 @@ fn protect(plain_text: &[u8]) -> Result<Vec<u8>, String> {
         "Windowsの暗号化機能でAPIキーを保護できませんでした。Windowsへサインインし直してから再試行してください。".to_string()
     })?;
 
-    Ok(copy_and_free(output))
+    Ok(copy_and_free(output, false))
 }
 
-fn unprotect(encrypted: &[u8]) -> Result<Vec<u8>, String> {
+fn unprotect(encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     let input_length = u32::try_from(encrypted.len())
         .map_err(|_| "保存済みAPIキーのデータが大きすぎます。".to_string())?;
     let input = CRYPT_INTEGER_BLOB {
@@ -100,10 +109,10 @@ fn unprotect(encrypted: &[u8]) -> Result<Vec<u8>, String> {
             .to_string()
     })?;
 
-    Ok(copy_and_free(output))
+    Ok(Zeroizing::new(copy_and_free(output, true)))
 }
 
-pub(crate) fn save_api_key(app: &AppHandle, api_key: &str) -> Result<(), String> {
+pub(crate) fn save_api_key(app: &AppHandle, api_key: &SecretString) -> Result<(), String> {
     let path = credential_path(app)?;
     let parent = path
         .parent()
@@ -114,7 +123,7 @@ pub(crate) fn save_api_key(app: &AppHandle, api_key: &str) -> Result<(), String>
         "APIキーの保存フォルダーを作成できませんでした。".to_string()
     })?;
 
-    let encrypted = protect(api_key.as_bytes())?;
+    let encrypted = protect(api_key.expose_secret().as_bytes())?;
     fs::write(path, encrypted).map_err(|error| {
         eprintln!("Could not write encrypted API key: {error:?}");
         "暗号化したAPIキーを保存できませんでした。保存先への書き込み権限を確認してください。"
@@ -125,14 +134,17 @@ pub(crate) fn save_api_key(app: &AppHandle, api_key: &str) -> Result<(), String>
 pub(crate) fn has_api_key(app: &AppHandle) -> Result<bool, String> {
     let path = credential_path(app)?;
 
-    if !path.exists() {
-        return Ok(false);
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            eprintln!("Could not inspect encrypted API key: {error:?}");
+            Err("保存済みAPIキーの状態を確認できませんでした。".to_string())
+        }
     }
-
-    Ok(!load_api_key(app)?.is_empty())
 }
 
-pub(crate) fn load_api_key(app: &AppHandle) -> Result<String, String> {
+pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
     let path = credential_path(app)?;
     let encrypted = match fs::read(path) {
         Ok(encrypted) => encrypted,
@@ -146,10 +158,12 @@ pub(crate) fn load_api_key(app: &AppHandle) -> Result<String, String> {
     };
     let plain_text = unprotect(&encrypted)?;
 
-    String::from_utf8(plain_text).map_err(|error| {
-        eprintln!("Decrypted API key was not UTF-8: {error:?}");
+    let api_key = std::str::from_utf8(&plain_text).map_err(|_| {
+        eprintln!("Decrypted API key was not valid UTF-8");
         "保存済みAPIキーの形式が壊れています。キーを削除して再登録してください。".to_string()
-    })
+    })?;
+
+    Ok(SecretString::from(api_key.to_owned()))
 }
 
 pub(crate) fn delete_api_key(app: &AppHandle) -> Result<(), String> {
@@ -177,6 +191,6 @@ mod tests {
         let decrypted = unprotect(&encrypted).expect("DPAPI decryption should succeed");
 
         assert_ne!(encrypted, plain_text);
-        assert_eq!(decrypted, plain_text);
+        assert_eq!(decrypted.as_slice(), plain_text);
     }
 }

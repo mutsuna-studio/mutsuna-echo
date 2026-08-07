@@ -32,13 +32,14 @@
 
   async function saveApiKey(event: SubmitEvent) {
     event.preventDefault();
+    let submittedApiKey = apiKey.trim();
+    apiKey = "";
     saving = true;
     message = "";
     errorMessage = "";
 
     try {
-      const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey });
-      apiKey = "";
+      const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey: submittedApiKey });
       hasApiKey = true;
       message = modelsAccessible
         ? "APIキーを確認し、安全に保存しました。"
@@ -46,6 +47,7 @@
     } catch (error) {
       errorMessage = errorText(error);
     } finally {
+      submittedApiKey = "";
       saving = false;
     }
   }
@@ -82,6 +84,9 @@
       <div>
         <h2>APIキー</h2>
         <p class="help">キーはOSの暗号化機能で保護され、画面へ読み戻しません。</p>
+        <p class="help security-note">
+          ElevenLabsではSpeech to Textだけを許可し、利用上限を設定してください。
+        </p>
       </div>
       {#if loading}
         <span class="badge neutral">確認中</span>
@@ -185,6 +190,10 @@
   .lead,
   .help {
     color: #647068;
+  }
+
+  .security-note {
+    margin-top: 5px;
   }
 
   .lead {
