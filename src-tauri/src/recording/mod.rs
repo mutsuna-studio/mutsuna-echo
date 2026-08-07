@@ -33,6 +33,15 @@ const MAC_FRAGMENT_SECONDS: f64 = 10.0;
 const WINDOWS_FRAGMENT_SECONDS: f64 = 2.0;
 const CHUNK_NS: i64 = 20_000_000;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureEventEffect {
+    None,
+    Stalled,
+    Recovered,
+    Stop(StopReason),
+}
+
 struct ActiveRecording {
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -278,7 +287,7 @@ fn run_desktop_recording(
     cancel: &Arc<AtomicBool>,
     ready: &mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), String> {
-    use flexaudio::{open, Event, OutputFormat, SourceKind, Stream, StreamConfig};
+    use flexaudio::{open, OutputFormat, SourceKind, Stream, StreamConfig};
 
     let output = OutputFormat {
         sample_rate: SAMPLE_RATE,
@@ -366,6 +375,8 @@ fn run_desktop_recording(
     let mut mic_queue = VecDeque::new();
     let mut sys_queue = VecDeque::new();
     let mut stop_reason = StopReason::User;
+    let mut microphone_stalled = false;
+    let mut system_stalled = false;
 
     while !stop.load(Ordering::Acquire) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -376,16 +387,16 @@ fn run_desktop_recording(
 
         if let Some(stream) = microphone.as_mut() {
             while let Some(event) = stream.poll_event() {
-                if matches!(event, Event::DeviceLost) {
-                    stop_reason = StopReason::SourceDisconnected;
-                    stop.store(true, Ordering::Release);
-                } else if matches!(event, Event::StreamStalled) {
-                    stop_reason = StopReason::SourceStalled;
-                    stop.store(true, Ordering::Release);
-                } else if let Event::Error(_) | Event::PermissionDenied = event {
-                    stop_reason = StopReason::CaptureError;
-                    stop.store(true, Ordering::Release);
+                match capture_event_effect(&event) {
+                    CaptureEventEffect::None => {}
+                    CaptureEventEffect::Stalled => microphone_stalled = true,
+                    CaptureEventEffect::Recovered => microphone_stalled = false,
+                    CaptureEventEffect::Stop(reason) => {
+                        stop_reason = reason;
+                        stop.store(true, Ordering::Release);
+                    }
                 }
+                update_capture_warning(status, microphone_stalled, system_stalled);
             }
             while let Some(chunk) = stream.poll_chunk() {
                 if let Some(writer) = microphone_writer.as_mut() {
@@ -400,16 +411,16 @@ fn run_desktop_recording(
 
         if let Some(stream) = system.as_mut() {
             while let Some(event) = stream.poll_event() {
-                if matches!(event, Event::DeviceLost) {
-                    stop_reason = StopReason::SourceDisconnected;
-                    stop.store(true, Ordering::Release);
-                } else if matches!(event, Event::StreamStalled) {
-                    stop_reason = StopReason::SourceStalled;
-                    stop.store(true, Ordering::Release);
-                } else if let Event::Error(_) | Event::PermissionDenied = event {
-                    stop_reason = StopReason::CaptureError;
-                    stop.store(true, Ordering::Release);
+                match capture_event_effect(&event) {
+                    CaptureEventEffect::None => {}
+                    CaptureEventEffect::Stalled => system_stalled = true,
+                    CaptureEventEffect::Recovered => system_stalled = false,
+                    CaptureEventEffect::Stop(reason) => {
+                        stop_reason = reason;
+                        stop.store(true, Ordering::Release);
+                    }
                 }
+                update_capture_warning(status, microphone_stalled, system_stalled);
             }
             while let Some(chunk) = stream.poll_chunk() {
                 if let Some(writer) = system_writer.as_mut() {
@@ -495,10 +506,45 @@ fn run_desktop_recording(
         current.elapsed_ms = manifest.duration_ms;
         current.output_path = Some(paths.final_file.to_string_lossy().into_owned());
         current.stop_reason = Some(stop_reason);
+        current.warning = None;
         current.microphone_level = 0.0;
         current.system_level = 0.0;
     });
     Ok(())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn capture_event_effect(event: &flexaudio::Event) -> CaptureEventEffect {
+    use flexaudio::Event;
+
+    match event {
+        // flexaudio automatically reopens a stalled backend. Stalling is therefore a
+        // temporary health state, not a reason to finalize the whole meeting.
+        Event::StreamStalled => CaptureEventEffect::Stalled,
+        Event::StreamRecovered => CaptureEventEffect::Recovered,
+        Event::DeviceLost => CaptureEventEffect::Stop(StopReason::SourceDisconnected),
+        Event::PermissionDenied => CaptureEventEffect::Stop(StopReason::CaptureError),
+        Event::Error(detail) if detail.starts_with("reopen failed:") => CaptureEventEffect::Stalled,
+        Event::Error(_) => CaptureEventEffect::Stop(StopReason::CaptureError),
+        _ => CaptureEventEffect::None,
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn update_capture_warning(
+    status: &Arc<Mutex<RecordingStatus>>,
+    microphone_stalled: bool,
+    system_stalled: bool,
+) {
+    let warning = match (microphone_stalled, system_stalled) {
+        (true, true) => Some("マイクとシステム音声を再接続しています。録音は継続中です。"),
+        (true, false) => Some("マイクを再接続しています。録音は継続中です。"),
+        (false, true) => Some("システム音声を再接続しています。録音は継続中です。"),
+        (false, false) => None,
+    };
+    set_status(status, |current| {
+        current.warning = warning.map(str::to_owned)
+    });
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -735,6 +781,9 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 mod tests {
     use super::{unique_output_path, validate_session_id};
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    use super::{capture_event_effect, CaptureEventEffect};
+
     #[test]
     fn session_id_cannot_escape_recording_root() {
         assert!(validate_session_id("../../secret").is_err());
@@ -747,6 +796,25 @@ mod tests {
         assert_eq!(
             path.extension().and_then(|value| value.to_str()),
             Some("m4a")
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn temporary_stream_stalls_do_not_stop_recording() {
+        assert_eq!(
+            capture_event_effect(&flexaudio::Event::StreamStalled),
+            CaptureEventEffect::Stalled
+        );
+        assert_eq!(
+            capture_event_effect(&flexaudio::Event::Error(
+                "reopen failed: device is temporarily unavailable".into()
+            )),
+            CaptureEventEffect::Stalled
+        );
+        assert_eq!(
+            capture_event_effect(&flexaudio::Event::StreamRecovered),
+            CaptureEventEffect::Recovered
         );
     }
 }

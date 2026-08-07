@@ -262,6 +262,10 @@
     <small>48 kHz · mono · AAC-LC · 64 kbps</small>
   </div>
 
+  {#if active && status?.warning}
+    <p class="capture-warning" role="status">{status.warning}</p>
+  {/if}
+
   <div class="record-actions">
     {#if active}
       <button class="stop" type="button" onclick={stop} disabled={actionBusy || status?.phase === "finalizing"}>
@@ -295,6 +299,7 @@
   .recorder small { margin-left: auto; color: #68746c; }
   .record-dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca7a0; }
   .recorder.active .record-dot { background: #dc4438; box-shadow: 0 0 0 5px rgb(220 68 56 / 12%); }
+  .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; font-size: 0.84rem; }
   .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
   .record-actions button { min-height: 44px; padding: 0 18px; border-radius: 10px; cursor: pointer; font-weight: 750; }
   .record-actions button:disabled { cursor: not-allowed; opacity: 0.5; }

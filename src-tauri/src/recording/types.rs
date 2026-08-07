@@ -83,6 +83,7 @@ pub struct RecordingStatus {
     pub system_audio: bool,
     pub output_path: Option<String>,
     pub stop_reason: Option<StopReason>,
+    pub warning: Option<String>,
     pub error: Option<String>,
 }
 
@@ -98,6 +99,7 @@ impl Default for RecordingStatus {
             system_audio: false,
             output_path: None,
             stop_reason: None,
+            warning: None,
             error: None,
         }
     }

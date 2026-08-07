@@ -35,6 +35,7 @@ export interface RecordingStatus {
   systemAudio: boolean;
   outputPath: string | null;
   stopReason: StopReason | null;
+  warning: string | null;
   error: string | null;
 }
 
