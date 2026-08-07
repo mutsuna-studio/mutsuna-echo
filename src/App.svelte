@@ -1,14 +1,21 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import type { SelectedAudioFile, Transcript } from "./lib/types/transcript";
 
   let apiKey = $state("");
   let hasApiKey = $state(false);
   let loading = $state(true);
   let saving = $state(false);
   let deleting = $state(false);
+  let selecting = $state(false);
+  let transcribing = $state(false);
+  let selectedAudio = $state<SelectedAudioFile | null>(null);
+  let transcript = $state<Transcript | null>(null);
   let message = $state("");
   let errorMessage = $state("");
+
+  const busy = $derived(loading || saving || deleting || selecting || transcribing);
+  const canTranscribe = $derived(hasApiKey && selectedAudio !== null && !busy);
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
@@ -16,18 +23,36 @@
     return "予期しないエラーが発生しました。";
   }
 
+  function formatTimestamp(milliseconds: number): string {
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return hours > 0
+      ? `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
+      : `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   async function refreshStatus() {
     hasApiKey = await invoke<boolean>("has_api_key");
   }
 
-  onMount(async () => {
-    try {
-      await refreshStatus();
-    } catch (error) {
-      errorMessage = errorText(error);
-    } finally {
-      loading = false;
-    }
+  $effect(() => {
+    void (async () => {
+      try {
+        await refreshStatus();
+      } catch (error) {
+        errorMessage = errorText(error);
+      } finally {
+        loading = false;
+      }
+    })();
   });
 
   async function saveApiKey(event: SubmitEvent) {
@@ -70,35 +95,146 @@
       deleting = false;
     }
   }
+
+  async function selectAudioFile() {
+    selecting = true;
+    message = "";
+    errorMessage = "";
+
+    try {
+      const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
+      if (selected) {
+        selectedAudio = selected;
+        transcript = null;
+      }
+    } catch (error) {
+      errorMessage = errorText(error);
+    } finally {
+      selecting = false;
+    }
+  }
+
+  async function transcribeAudio() {
+    if (!canTranscribe) return;
+
+    transcribing = true;
+    transcript = null;
+    message = "";
+    errorMessage = "";
+
+    try {
+      transcript = await invoke<Transcript>("transcribe_selected_audio");
+      message = transcript.segments.length > 0
+        ? "文字起こしが完了しました。"
+        : "文字起こしは完了しましたが、発話を検出できませんでした。";
+    } catch (error) {
+      errorMessage = errorText(error);
+    } finally {
+      transcribing = false;
+    }
+  }
 </script>
 
+<svelte:head>
+  <title>Mutsuna Echo</title>
+</svelte:head>
+
 <main class="shell">
-  <header>
+  <header class="hero">
     <p class="eyebrow">Mutsuna Echo</p>
-    <h1>ElevenLabsの設定</h1>
-    <p class="lead">文字起こしに使用するAPIキーを登録してください。</p>
+    <h1>会話を、読み返せる形へ。</h1>
+    <p class="lead">音声ファイルを選択して、話者とタイムスタンプ付きで文字起こしします。</p>
   </header>
 
-  <section class="card" aria-busy={loading || saving || deleting}>
-    <div class="status-row">
+  {#if message}
+    <p class="notice success" role="status">{message}</p>
+  {/if}
+  {#if errorMessage}
+    <p class="notice error" role="alert">{errorMessage}</p>
+  {/if}
+
+  <section class="card transcription-card" aria-busy={selecting || transcribing}>
+    <div class="section-heading">
       <div>
-        <h2>APIキー</h2>
-        <p class="help">キーはOSの暗号化機能で保護され、画面へ読み戻しません。</p>
-        <p class="help security-note">
-          ElevenLabsではSpeech to Textだけを許可し、利用上限を設定してください。
+        <p class="step">Step 1</p>
+        <h2>音声ファイル</h2>
+      </div>
+      <span class:ready={selectedAudio} class="badge">
+        {selectedAudio ? "選択済み" : "未選択"}
+      </span>
+    </div>
+
+    <button class="file-picker" type="button" onclick={selectAudioFile} disabled={busy}>
+      <span class="file-icon" aria-hidden="true">♪</span>
+      <span class="file-copy">
+        <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
+        <small>
+          {selectedAudio
+            ? `${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
+            : "MP3・M4A・WAV・FLAC"}
+        </small>
+      </span>
+    </button>
+
+    <div class="action-row">
+      <div>
+        <p class="step">Step 2</p>
+        <p class="action-help">
+          {hasApiKey ? "日本語・話者分離・単語タイムスタンプ" : "先にAPIキーを設定してください"}
         </p>
       </div>
-      {#if loading}
-        <span class="badge neutral">確認中</span>
-      {:else if hasApiKey}
-        <span class="badge saved">設定済み</span>
+      <button class="primary" type="button" onclick={transcribeAudio} disabled={!canTranscribe}>
+        {transcribing ? "文字起こし中…" : "文字起こし開始"}
+      </button>
+    </div>
+  </section>
+
+  {#if transcript}
+    <section class="card transcript-card" aria-label="文字起こし結果">
+      <div class="section-heading transcript-heading">
+        <div>
+          <p class="step">Transcript</p>
+          <h2>文字起こし結果</h2>
+        </div>
+        <span class="model">{transcript.model} · {transcript.language}</span>
+      </div>
+
+      {#if transcript.segments.length > 0}
+        <div class="segments">
+          {#each transcript.segments as segment, index (`${segment.speaker}-${segment.startMs}-${index}`)}
+            <article class="segment">
+              <div class="segment-meta">
+                <strong>{segment.speaker}</strong>
+                <time>{formatTimestamp(segment.startMs)}</time>
+              </div>
+              <p>{segment.text}</p>
+            </article>
+          {/each}
+        </div>
       {:else}
-        <span class="badge neutral">未設定</span>
+        <p class="empty-result">発話は検出されませんでした。</p>
+      {/if}
+    </section>
+  {/if}
+
+  <section class="card settings-card" aria-busy={loading || saving || deleting}>
+    <div class="section-heading">
+      <div>
+        <p class="step">Settings</p>
+        <h2>ElevenLabs APIキー</h2>
+        <p class="help">キーはOSの暗号化機能で保護し、画面へ読み戻しません。</p>
+      </div>
+      {#if loading}
+        <span class="badge">確認中</span>
+      {:else if hasApiKey}
+        <span class="badge ready">設定済み</span>
+      {:else}
+        <span class="badge">未設定</span>
       {/if}
     </div>
 
     <form onsubmit={saveApiKey}>
-      <label for="api-key">ElevenLabs API key</label>
+      <label for="api-key">API key</label>
       <div class="input-row">
         <input
           id="api-key"
@@ -107,27 +243,20 @@
           autocomplete="off"
           spellcheck="false"
           bind:value={apiKey}
-          disabled={loading || saving || deleting}
+          disabled={busy}
         />
-        <button class="primary" type="submit" disabled={loading || saving || deleting || !apiKey.trim()}>
+        <button class="secondary" type="submit" disabled={busy || !apiKey.trim()}>
           {saving ? "確認中…" : hasApiKey ? "更新" : "保存"}
         </button>
       </div>
     </form>
 
-    {#if message}
-      <p class="notice success" role="status">{message}</p>
-    {/if}
-    {#if errorMessage}
-      <p class="notice error" role="alert">{errorMessage}</p>
-    {/if}
+    <p class="security-note">ElevenLabsではSpeech to Textだけを許可し、利用上限を設定してください。</p>
 
     {#if hasApiKey}
-      <div class="danger-zone">
-        <button class="danger" type="button" onclick={deleteApiKey} disabled={saving || deleting}>
-          {deleting ? "削除中…" : "保存済みキーを削除"}
-        </button>
-      </div>
+      <button class="danger" type="button" onclick={deleteApiKey} disabled={busy}>
+        {deleting ? "削除中…" : "保存済みキーを削除"}
+      </button>
     {/if}
   </section>
 </main>
@@ -152,21 +281,22 @@
   }
 
   .shell {
-    width: min(680px, calc(100% - 40px));
+    width: min(760px, calc(100% - 40px));
     margin: 0 auto;
-    padding: 64px 0;
+    padding: 56px 0 72px;
   }
 
-  header {
-    margin-bottom: 28px;
+  .hero {
+    margin-bottom: 30px;
   }
 
-  .eyebrow {
-    margin: 0 0 8px;
+  .eyebrow,
+  .step {
+    margin: 0 0 7px;
     color: #23704a;
-    font-size: 0.78rem;
+    font-size: 0.74rem;
     font-weight: 800;
-    letter-spacing: 0.16em;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
   }
 
@@ -177,99 +307,127 @@
   }
 
   h1 {
-    margin-bottom: 10px;
-    font-size: clamp(2rem, 6vw, 3rem);
-    letter-spacing: -0.04em;
+    max-width: 650px;
+    margin-bottom: 12px;
+    font-size: clamp(2.1rem, 6vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.05em;
   }
 
   h2 {
-    margin-bottom: 5px;
-    font-size: 1.1rem;
+    margin-bottom: 0;
+    font-size: 1.14rem;
   }
 
   .lead,
-  .help {
+  .help,
+  .action-help,
+  .security-note,
+  .empty-result {
     color: #647068;
   }
 
-  .security-note {
-    margin-top: 5px;
-  }
-
   .lead {
+    max-width: 610px;
     margin-bottom: 0;
-  }
-
-  .help {
-    margin-bottom: 0;
-    font-size: 0.88rem;
   }
 
   .card {
-    padding: 28px;
+    margin-top: 18px;
+    padding: 26px;
     border: 1px solid #d8dfda;
     border-radius: 18px;
     background: #fff;
-    box-shadow: 0 16px 42px rgb(29 54 39 / 8%);
+    box-shadow: 0 16px 42px rgb(29 54 39 / 7%);
   }
 
-  .status-row,
-  .input-row {
+  .section-heading,
+  .action-row,
+  .input-row,
+  .segment-meta {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
   }
 
-  .status-row {
+  .section-heading,
+  .action-row {
     justify-content: space-between;
-    margin-bottom: 28px;
   }
 
-  .badge {
+  .badge,
+  .model {
     flex: none;
     padding: 6px 10px;
     border-radius: 999px;
-    font-size: 0.78rem;
+    color: #667068;
+    background: #edf0ed;
+    font-size: 0.76rem;
     font-weight: 700;
   }
 
-  .badge.saved {
+  .badge.ready {
     color: #176440;
     background: #e2f5e9;
   }
 
-  .badge.neutral {
-    color: #667068;
-    background: #edf0ed;
-  }
-
-  label {
-    display: block;
-    margin-bottom: 8px;
-    font-size: 0.86rem;
-    font-weight: 700;
-  }
-
-  input {
-    box-sizing: border-box;
-    min-width: 0;
-    flex: 1;
-    height: 46px;
-    padding: 0 14px;
-    border: 1px solid #bdc8c0;
-    border-radius: 10px;
+  .file-picker {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 14px;
+    margin-top: 22px;
+    padding: 16px;
+    border: 1px dashed #9db2a4;
+    border-radius: 12px;
     color: #17211b;
-    background: #fbfcfb;
-    outline: none;
+    background: #f8faf8;
+    text-align: left;
   }
 
-  input:focus {
-    border-color: #2c8058;
-    box-shadow: 0 0 0 3px rgb(44 128 88 / 14%);
+  .file-icon {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    place-items: center;
+    border-radius: 10px;
+    color: #fff;
+    background: #2c8058;
+    font-size: 1.2rem;
+  }
+
+  .file-copy {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+  }
+
+  .file-copy strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-copy small {
+    color: #6a766e;
+  }
+
+  .action-row {
+    margin-top: 22px;
+    padding-top: 20px;
+    border-top: 1px solid #e7ebe8;
+  }
+
+  .action-help,
+  .help,
+  .security-note {
+    margin-bottom: 0;
+    font-size: 0.86rem;
   }
 
   button {
-    height: 46px;
+    min-height: 44px;
     padding: 0 18px;
     border-radius: 10px;
     cursor: pointer;
@@ -278,7 +436,7 @@
 
   button:disabled {
     cursor: not-allowed;
-    opacity: 0.55;
+    opacity: 0.5;
   }
 
   .primary {
@@ -287,10 +445,16 @@
     background: #246b49;
   }
 
+  .secondary {
+    border: 1px solid #b7c4bb;
+    color: #234c37;
+    background: #f6f8f6;
+  }
+
   .notice {
-    margin: 18px 0 0;
-    padding: 11px 13px;
-    border-radius: 9px;
+    margin: 14px 0 0;
+    padding: 12px 14px;
+    border-radius: 10px;
     font-size: 0.9rem;
   }
 
@@ -304,34 +468,114 @@
     background: #fff0ee;
   }
 
-  .danger-zone {
-    margin-top: 24px;
-    padding-top: 20px;
-    border-top: 1px solid #e5e9e6;
+  .transcript-heading {
+    margin-bottom: 4px;
+  }
+
+  .segments {
+    margin-top: 22px;
+  }
+
+  .segment {
+    padding: 20px 0;
+    border-top: 1px solid #e7ebe8;
+  }
+
+  .segment:first-child {
+    border-top: 0;
+  }
+
+  .segment-meta {
+    margin-bottom: 9px;
+  }
+
+  .segment-meta strong {
+    color: #23704a;
+    font-size: 0.86rem;
+  }
+
+  .segment-meta time {
+    color: #78827b;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .segment p {
+    margin-bottom: 0;
+    line-height: 1.8;
+    white-space: pre-wrap;
+  }
+
+  .settings-card {
+    margin-top: 30px;
+  }
+
+  form {
+    margin-top: 22px;
+  }
+
+  label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 0.84rem;
+    font-weight: 700;
+  }
+
+  input {
+    box-sizing: border-box;
+    min-width: 0;
+    height: 44px;
+    flex: 1;
+    padding: 0 13px;
+    border: 1px solid #bdc8c0;
+    border-radius: 10px;
+    color: #17211b;
+    background: #fbfcfb;
+    outline: none;
+  }
+
+  input:focus {
+    border-color: #2c8058;
+    box-shadow: 0 0 0 3px rgb(44 128 88 / 14%);
+  }
+
+  .security-note {
+    margin-top: 12px;
   }
 
   .danger {
-    height: auto;
+    min-height: auto;
+    margin-top: 18px;
     padding: 0;
     border: 0;
     color: #a33a31;
     background: transparent;
-    font-size: 0.86rem;
+    font-size: 0.84rem;
   }
 
-  @media (max-width: 560px) {
+  @media (max-width: 600px) {
     .shell {
-      width: min(100% - 28px, 680px);
-      padding: 36px 0;
+      width: min(100% - 28px, 760px);
+      padding: 36px 0 52px;
     }
 
     .card {
       padding: 20px;
     }
 
+    .action-row,
     .input-row {
       align-items: stretch;
       flex-direction: column;
+    }
+
+    .primary,
+    .secondary {
+      width: 100%;
+    }
+
+    .model {
+      display: none;
     }
   }
 </style>
