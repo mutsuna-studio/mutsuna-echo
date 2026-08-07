@@ -1,31 +1,17 @@
 use std::time::Duration;
 
-use reqwest::{redirect::Policy, Client, StatusCode};
+use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use tauri::AppHandle;
 
+use crate::transcription::elevenlabs::client::{api_error_kind, ApiErrorKind, ElevenLabsClient};
+
 const ELEVENLABS_MODELS_URL: &str = "https://api.elevenlabs.io/v1/models";
 
-fn elevenlabs_client() -> Result<Client, String> {
-    Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| {
-            eprintln!("Could not build ElevenLabs HTTP client: {error:?}");
-            "ElevenLabsへの接続を準備できませんでした。".to_string()
-        })
-}
-
-fn error_status(body: &Value) -> Option<&str> {
-    body.pointer("/detail/status").and_then(Value::as_str)
-}
-
-async fn validate_api_key(api_key: &str) -> Result<bool, String> {
-    let response = elevenlabs_client()?
+async fn validate_api_key(api_key: &SecretString) -> Result<bool, String> {
+    let response = ElevenLabsClient::new(api_key, Duration::from_secs(20))?
         .get(ELEVENLABS_MODELS_URL)
-        .header("xi-api-key", api_key)
         .send()
         .await
         .map_err(|error| format!("ElevenLabsに接続できませんでした: {error}"))?;
@@ -38,12 +24,12 @@ async fn validate_api_key(api_key: &str) -> Result<bool, String> {
 
     let body = response.json::<Value>().await.unwrap_or(Value::Null);
 
-    match error_status(&body) {
-        Some("invalid_api_key") => Err("ElevenLabs APIキーが無効です。".to_string()),
+    match api_error_kind(&body) {
+        ApiErrorKind::InvalidApiKey => Err("ElevenLabs APIキーが無効です。".to_string()),
         // Restricted keys are valid even when they cannot access the models
         // endpoint. Speech-to-Text permission is checked by the transcription
         // request itself.
-        Some("missing_permissions") => Ok(false),
+        ApiErrorKind::MissingPermissions => Ok(false),
         _ => match http_status {
             StatusCode::UNAUTHORIZED => {
                 Err("ElevenLabsでAPIキーを認証できませんでした。".to_string())
@@ -68,7 +54,7 @@ pub(crate) async fn save_api_key(app: AppHandle, api_key: String) -> Result<bool
         return Err("APIキーを入力してください。".to_string());
     }
 
-    let models_accessible = validate_api_key(api_key.expose_secret()).await?;
+    let models_accessible = validate_api_key(&api_key).await?;
 
     crate::credentials::save_api_key(&app, &api_key)?;
 
@@ -101,27 +87,8 @@ mod tests {
         time::Duration,
     };
 
-    use super::{elevenlabs_client, error_status};
-    use serde_json::json;
-
-    #[test]
-    fn reads_structured_error_status() {
-        let body = json!({
-            "detail": {
-                "status": "missing_permissions",
-                "message": "The API key is missing the permission models_read"
-            }
-        });
-
-        assert_eq!(error_status(&body), Some("missing_permissions"));
-    }
-
-    #[test]
-    fn ignores_unstructured_error_body() {
-        let body = json!({ "detail": "Unauthorized" });
-
-        assert_eq!(error_status(&body), None);
-    }
+    use crate::transcription::elevenlabs::client::ElevenLabsClient;
+    use secrecy::SecretString;
 
     #[test]
     fn credential_client_does_not_follow_redirects() {
@@ -152,13 +119,15 @@ mod tests {
 
         ready_rx.recv().expect("wait for server readiness");
         let response = tauri::async_runtime::block_on(async {
-            elevenlabs_client()
-                .expect("build client")
-                .get(format!("http://{redirect_address}/validate"))
-                .header("xi-api-key", "test-secret")
-                .send()
-                .await
-                .expect("send request")
+            ElevenLabsClient::new(
+                &SecretString::from("test-secret".to_string()),
+                Duration::from_secs(20),
+            )
+            .expect("build client")
+            .get(format!("http://{redirect_address}/validate"))
+            .send()
+            .await
+            .expect("send request")
         });
 
         assert!(response.status().is_redirection());

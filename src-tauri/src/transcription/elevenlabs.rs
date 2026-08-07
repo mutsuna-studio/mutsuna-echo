@@ -1,11 +1,15 @@
 use std::{collections::HashMap, path::Path, time::Duration};
 
-use reqwest::{header::HeaderValue, multipart::Form, redirect::Policy, Client, StatusCode};
-use secrecy::{ExposeSecret, SecretString};
+use reqwest::{multipart::Form, StatusCode};
+use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Transcript, TranscriptSegment};
+
+pub(crate) mod client;
+
+use client::{api_error_kind, ApiErrorKind, ElevenLabsClient};
 
 const SPEECH_TO_TEXT_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 const MODEL_ID: &str = "scribe_v2";
@@ -39,18 +43,6 @@ struct SegmentBuilder {
     start_ms: Option<u64>,
     end_ms: Option<u64>,
     text: String,
-}
-
-fn transcription_client() -> Result<Client, String> {
-    Client::builder()
-        .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(60 * 30))
-        .build()
-        .map_err(|error| {
-            eprintln!("Could not build ElevenLabs transcription client: {error:?}");
-            "文字起こし通信を準備できませんでした。".to_string()
-        })
 }
 
 fn seconds_to_ms(value: Option<f64>) -> Option<u64> {
@@ -140,17 +132,15 @@ fn normalize(response: ElevenLabsTranscript) -> Transcript {
 }
 
 fn provider_error(status: StatusCode, body: &Value) -> String {
-    let error_status = body.pointer("/detail/status").and_then(Value::as_str);
-
-    match error_status {
-        Some("invalid_api_key") => {
+    match api_error_kind(body) {
+        ApiErrorKind::InvalidApiKey => {
             "保存済みのElevenLabs APIキーが無効です。設定し直してください。".to_string()
         }
-        Some("missing_permissions") => {
+        ApiErrorKind::MissingPermissions => {
             "APIキーにSpeech to Text権限がありません。ElevenLabsで権限を追加してください。"
                 .to_string()
         }
-        Some("quota_exceeded") => {
+        ApiErrorKind::QuotaExceeded => {
             "ElevenLabsの利用可能枠が不足しています。利用状況と上限を確認してください。".to_string()
         }
         _ if status == StatusCode::PAYLOAD_TOO_LARGE => {
@@ -159,7 +149,9 @@ fn provider_error(status: StatusCode, body: &Value) -> String {
         _ if status == StatusCode::UNPROCESSABLE_ENTITY => {
             "音声ファイルを処理できませんでした。形式やファイル内容を確認してください。".to_string()
         }
-        _ => format!("ElevenLabsで文字起こしに失敗しました（HTTP {status}）。"),
+        ApiErrorKind::Other => {
+            format!("ElevenLabsで文字起こしに失敗しました（HTTP {status}）。")
+        }
     }
 }
 
@@ -177,13 +169,8 @@ pub(crate) async fn transcribe(path: &Path, api_key: &SecretString) -> Result<Tr
             "選択した音声ファイルを開けませんでした。".to_string()
         })?;
 
-    let mut header = HeaderValue::from_str(api_key.expose_secret())
-        .map_err(|_| "保存済みAPIキーの形式が不正です。設定し直してください。".to_string())?;
-    header.set_sensitive(true);
-
-    let response = transcription_client()?
+    let response = ElevenLabsClient::new(api_key, Duration::from_secs(60 * 30))?
         .post(SPEECH_TO_TEXT_URL)
-        .header("xi-api-key", header)
         .multipart(form)
         .send()
         .await

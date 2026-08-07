@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Months, Utc};
-use reqwest::{redirect::Policy, Client, Response, StatusCode};
-use secrecy::{ExposeSecret, SecretString};
+use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::AppHandle;
+
+use crate::transcription::elevenlabs::client::{api_error_kind, ApiErrorKind, ElevenLabsClient};
 
 const SUBSCRIPTION_URL: &str = "https://api.elevenlabs.io/v1/user/subscription";
 const USAGE_URL: &str =
@@ -46,21 +47,6 @@ enum ApiResponse<T> {
     MissingPermission,
 }
 
-fn usage_client() -> Result<Client, String> {
-    Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| {
-            eprintln!("Could not build ElevenLabs usage client: {error:?}");
-            "ElevenLabsの利用状況を確認する通信を準備できませんでした。".to_string()
-        })
-}
-
-fn error_status(body: &Value) -> Option<&str> {
-    body.pointer("/detail/status").and_then(Value::as_str)
-}
-
 async fn parse_response<T: for<'de> Deserialize<'de>>(
     response: Response,
     operation: &str,
@@ -78,9 +64,9 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
     }
 
     let body = response.json::<Value>().await.unwrap_or(Value::Null);
-    match error_status(&body) {
-        Some("missing_permissions") => Ok(ApiResponse::MissingPermission),
-        Some("invalid_api_key") => {
+    match api_error_kind(&body) {
+        ApiErrorKind::MissingPermissions => Ok(ApiResponse::MissingPermission),
+        ApiErrorKind::InvalidApiKey => {
             Err("保存済みのElevenLabs APIキーが無効です。設定し直してください。".to_string())
         }
         _ if status == StatusCode::UNAUTHORIZED => {
@@ -94,12 +80,10 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
 }
 
 async fn fetch_subscription(
-    client: &Client,
-    api_key: &SecretString,
+    client: &ElevenLabsClient,
 ) -> Result<ApiResponse<SubscriptionResponse>, String> {
     let response = client
         .get(SUBSCRIPTION_URL)
-        .header("xi-api-key", api_key.expose_secret())
         .send()
         .await
         .map_err(|error| format!("ElevenLabsの契約情報を取得できませんでした: {error}"))?;
@@ -198,14 +182,12 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
 }
 
 async fn fetch_used_duration(
-    client: &Client,
-    api_key: &SecretString,
+    client: &ElevenLabsClient,
     start_ms: i64,
 ) -> Result<ApiResponse<u64>, String> {
     let end_ms = Utc::now().timestamp_millis();
     let response = client
         .post(USAGE_URL)
-        .header("xi-api-key", api_key.expose_secret())
         .json(&serde_json::json!({
             "start_time": start_ms,
             "end_time": end_ms,
@@ -229,9 +211,9 @@ async fn fetch_used_duration(
 #[tauri::command]
 pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<TranscriptionUsage, String> {
     let api_key = crate::commands::api_key::load_api_key(&app)?;
-    let client = usage_client()?;
+    let client = ElevenLabsClient::new(&api_key, Duration::from_secs(20))?;
 
-    let subscription = match fetch_subscription(&client, &api_key).await? {
+    let subscription = match fetch_subscription(&client).await? {
         ApiResponse::Data(subscription) => subscription,
         ApiResponse::MissingPermission => {
             return Ok(TranscriptionUsage {
@@ -258,12 +240,7 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
         None
     };
 
-    let used_duration_ms = match fetch_used_duration(
-        &client,
-        &api_key,
-        period_start_ms(&subscription),
-    )
-    .await
+    let used_duration_ms = match fetch_used_duration(&client, period_start_ms(&subscription)).await
     {
         Ok(ApiResponse::Data(duration_ms)) => Some(duration_ms),
         Ok(ApiResponse::MissingPermission) => {
