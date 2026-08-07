@@ -1,4 +1,5 @@
 use std::{
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -117,7 +118,15 @@ fn estimate_audio_cost(path: &Path) -> Result<AudioEstimate, String> {
             eprintln!("Could not read audio duration: {error:?}");
             "音声の再生時間を取得できませんでした。ファイル内容を確認してください。".to_string()
         })?;
-    let duration = tagged_file.properties().duration();
+    let mut duration = tagged_file.properties().duration();
+    if duration.is_zero()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("m4a"))
+    {
+        duration = fragmented_m4a_duration(path).unwrap_or_default();
+    }
 
     if duration.is_zero() {
         return Err("音声の再生時間が0秒です。別のファイルを選択してください。".to_string());
@@ -131,6 +140,222 @@ fn estimate_audio_cost(path: &Path) -> Result<AudioEstimate, String> {
         duration_ms,
         estimated_cost_usd,
     })
+}
+
+#[derive(Default)]
+struct FragmentedMp4Timing {
+    timescale: u32,
+    end_time: u64,
+}
+
+pub(crate) fn fragmented_m4a_duration(path: &Path) -> Option<std::time::Duration> {
+    const MAX_METADATA_BOX_SIZE: u64 = 16 * 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let mut timing = FragmentedMp4Timing::default();
+    let mut cursor = 0u64;
+    while let Some((kind, payload_start, box_end)) = file_mp4_box(&mut file, cursor, length) {
+        if matches!(&kind, b"moov" | b"moof") {
+            let payload_length = box_end.checked_sub(payload_start)?;
+            if payload_length > MAX_METADATA_BOX_SIZE {
+                return None;
+            }
+            file.seek(SeekFrom::Start(payload_start)).ok()?;
+            let mut payload = vec![0; usize::try_from(payload_length).ok()?];
+            file.read_exact(&mut payload).ok()?;
+            if &kind == b"moov" {
+                visit_mp4_boxes(&payload, 0, payload.len(), &mut timing);
+            } else {
+                visit_moof(&payload, 0, payload.len(), &mut timing);
+            }
+        }
+        if box_end <= cursor {
+            break;
+        }
+        cursor = box_end;
+    }
+    (timing.timescale > 0 && timing.end_time > 0).then(|| {
+        std::time::Duration::from_secs_f64(timing.end_time as f64 / timing.timescale as f64)
+    })
+}
+
+fn file_mp4_box(file: &mut std::fs::File, start: u64, limit: u64) -> Option<([u8; 4], u64, u64)> {
+    if start.checked_add(8)? > limit {
+        return None;
+    }
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header[..8]).ok()?;
+    let size32 = u32::from_be_bytes(header[..4].try_into().ok()?) as u64;
+    let kind = header[4..8].try_into().ok()?;
+    let (size, header_size) = if size32 == 1 {
+        file.read_exact(&mut header[8..16]).ok()?;
+        (u64::from_be_bytes(header[8..16].try_into().ok()?), 16u64)
+    } else if size32 == 0 {
+        (limit.checked_sub(start)?, 8u64)
+    } else {
+        (size32, 8u64)
+    };
+    if size < header_size {
+        return None;
+    }
+    let box_end = start.checked_add(size)?;
+    (box_end <= limit).then_some((kind, start + header_size, box_end))
+}
+
+fn visit_mp4_boxes(data: &[u8], start: usize, end: usize, timing: &mut FragmentedMp4Timing) {
+    let mut cursor = start;
+    while let Some((kind, payload_start, box_end)) = mp4_box(data, cursor, end) {
+        match &kind {
+            b"moov" | b"trak" | b"mdia" => visit_mp4_boxes(data, payload_start, box_end, timing),
+            b"mdhd" => {
+                timing.timescale =
+                    parse_mdhd_timescale(&data[payload_start..box_end]).unwrap_or(timing.timescale)
+            }
+            b"moof" => visit_moof(data, payload_start, box_end, timing),
+            _ => {}
+        }
+        if box_end <= cursor {
+            break;
+        }
+        cursor = box_end;
+    }
+}
+
+fn visit_moof(data: &[u8], start: usize, end: usize, timing: &mut FragmentedMp4Timing) {
+    let mut cursor = start;
+    while let Some((kind, payload_start, box_end)) = mp4_box(data, cursor, end) {
+        if &kind == b"traf" {
+            if let Some((base_time, duration)) = parse_traf(data, payload_start, box_end) {
+                timing.end_time = if let Some(base_time) = base_time {
+                    timing.end_time.max(base_time.saturating_add(duration))
+                } else {
+                    timing.end_time.saturating_add(duration)
+                };
+            }
+        }
+        if box_end <= cursor {
+            break;
+        }
+        cursor = box_end;
+    }
+}
+
+fn parse_traf(data: &[u8], start: usize, end: usize) -> Option<(Option<u64>, u64)> {
+    let mut default_duration = None;
+    let mut base_time = None;
+    let mut runs = Vec::new();
+    let mut cursor = start;
+    while let Some((kind, payload_start, box_end)) = mp4_box(data, cursor, end) {
+        let payload = &data[payload_start..box_end];
+        match &kind {
+            b"tfhd" => default_duration = parse_tfhd_default_duration(payload),
+            b"tfdt" => base_time = parse_tfdt_base_time(payload),
+            b"trun" => runs.push(payload),
+            _ => {}
+        }
+        if box_end <= cursor {
+            break;
+        }
+        cursor = box_end;
+    }
+    let mut duration = 0u64;
+    for run in runs {
+        duration = duration.checked_add(parse_trun_duration(run, default_duration)?)?;
+    }
+    Some((base_time, duration))
+}
+
+fn mp4_box(data: &[u8], start: usize, limit: usize) -> Option<([u8; 4], usize, usize)> {
+    if start.checked_add(8)? > limit || limit > data.len() {
+        return None;
+    }
+    let size32 = read_u32(data, start)? as u64;
+    let kind = data.get(start + 4..start + 8)?.try_into().ok()?;
+    let (size, header) = if size32 == 1 {
+        (read_u64(data, start + 8)?, 16usize)
+    } else if size32 == 0 {
+        ((limit - start) as u64, 8usize)
+    } else {
+        (size32, 8usize)
+    };
+    if size < header as u64 {
+        return None;
+    }
+    let box_end = start.checked_add(usize::try_from(size).ok()?)?;
+    (box_end <= limit).then_some((kind, start + header, box_end))
+}
+
+fn parse_mdhd_timescale(payload: &[u8]) -> Option<u32> {
+    match *payload.first()? {
+        0 => read_u32(payload, 12),
+        1 => read_u32(payload, 20),
+        _ => None,
+    }
+}
+
+fn parse_tfhd_default_duration(payload: &[u8]) -> Option<u32> {
+    let flags = read_u32(payload, 0)? & 0x00ff_ffff;
+    let mut cursor = 8usize;
+    if flags & 0x000001 != 0 {
+        cursor = cursor.checked_add(8)?;
+    }
+    if flags & 0x000002 != 0 {
+        cursor = cursor.checked_add(4)?;
+    }
+    (flags & 0x000008 != 0)
+        .then(|| read_u32(payload, cursor))
+        .flatten()
+}
+
+fn parse_tfdt_base_time(payload: &[u8]) -> Option<u64> {
+    match *payload.first()? {
+        0 => read_u32(payload, 4).map(u64::from),
+        1 => read_u64(payload, 4),
+        _ => None,
+    }
+}
+
+fn parse_trun_duration(payload: &[u8], default_duration: Option<u32>) -> Option<u64> {
+    let flags = read_u32(payload, 0)? & 0x00ff_ffff;
+    let sample_count = read_u32(payload, 4)? as usize;
+    let mut cursor = 8usize;
+    if flags & 0x000001 != 0 {
+        cursor = cursor.checked_add(4)?;
+    }
+    if flags & 0x000004 != 0 {
+        cursor = cursor.checked_add(4)?;
+    }
+    if flags & 0x000100 == 0 {
+        return Some(u64::from(default_duration?) * sample_count as u64);
+    }
+    let mut duration = 0u64;
+    for _ in 0..sample_count {
+        duration = duration.checked_add(u64::from(read_u32(payload, cursor)?))?;
+        cursor = cursor.checked_add(4)?;
+        if flags & 0x000200 != 0 {
+            cursor = cursor.checked_add(4)?;
+        }
+        if flags & 0x000400 != 0 {
+            cursor = cursor.checked_add(4)?;
+        }
+        if flags & 0x000800 != 0 {
+            cursor = cursor.checked_add(4)?;
+        }
+    }
+    Some(duration)
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        data.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(
+        data.get(offset..offset.checked_add(8)?)?.try_into().ok()?,
+    ))
 }
 
 #[tauri::command]

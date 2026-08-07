@@ -468,12 +468,18 @@ fn run_desktop_recording(
         current.stop_reason = Some(stop_reason);
     });
     if let Some(writer) = microphone_writer {
-        writer.finish()?;
+        writer
+            .finish()
+            .map_err(|error| format!("マイク音声のM4A確定に失敗しました: {error}"))?;
     }
     if let Some(writer) = system_writer {
-        writer.finish()?;
+        writer
+            .finish()
+            .map_err(|error| format!("システム音声のM4A確定に失敗しました: {error}"))?;
     }
-    mixed_writer.finish()?;
+    mixed_writer
+        .finish()
+        .map_err(|error| format!("会議音声のM4A確定に失敗しました: {error}"))?;
 
     atomic_copy_to_output(&paths.mixed, &paths.final_file)?;
     manifest.duration_ms = started.elapsed().as_millis() as u64;

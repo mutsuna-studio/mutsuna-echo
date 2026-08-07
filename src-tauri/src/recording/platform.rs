@@ -114,7 +114,15 @@ impl M4aWriter {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<(), String> {
+    pub fn finish(mut self) -> Result<(), String> {
+        // Media Foundation buffers complete AAC access units. Finalizing a
+        // newly opened or extremely short stream otherwise returns
+        // MF_E_SINK_NO_SAMPLES_PROCESSED (0xC00D4A44).
+        const MIN_FINALIZE_FRAMES: u64 = 2_048;
+        while self.samples_written < MIN_FINALIZE_FRAMES {
+            let frames = (MIN_FINALIZE_FRAMES - self.samples_written).min(960) as usize;
+            self.write(&vec![0.0; frames])?;
+        }
         unsafe { self.sink_writer.Finalize().map_err(windows_encoder_error) }
     }
 }
@@ -308,7 +316,7 @@ mod tests {
         ));
         let mut writer = M4aWriter::create(&path, 64_000, 2.0).expect("create Windows encoder");
         for _ in 0..250 {
-            writer.write(&[0.0; 960]).expect("write audio chunk");
+            writer.write(&[0.1; 960]).expect("write audio chunk");
         }
         writer.finish().expect("finalize M4A");
         let metadata = std::fs::metadata(&path).expect("M4A exists");
@@ -324,6 +332,43 @@ mod tests {
         assert_eq!(tagged.properties().sample_rate(), Some(48_000));
         assert_eq!(tagged.properties().channels(), Some(1));
         assert!(matches!(tagged.properties().audio_bitrate(), Some(60..=68)));
+        let duration = crate::commands::transcribe::fragmented_m4a_duration(&path)
+            .expect("read fragmented duration");
+        assert!((4.9..=5.1).contains(&duration.as_secs_f64()));
+        crate::commands::transcribe::describe_audio_path(&path)
+            .expect("recorded M4A is selectable for transcription");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_encoder_can_finalize_without_captured_samples() {
+        use super::M4aWriter;
+        use lofty::{file::AudioFile, probe::Probe};
+
+        for captured_frames in [0, 1, 960] {
+            let path = std::env::temp_dir().join(format!(
+                "mutsuna-echo-short-encoder-{}-{captured_frames}.m4a",
+                std::process::id()
+            ));
+            let mut writer = M4aWriter::create(&path, 96_000, 2.0).expect("create Windows encoder");
+            if captured_frames > 0 {
+                writer
+                    .write(&vec![0.0; captured_frames])
+                    .expect("write short audio");
+            }
+            writer.finish().expect("finalize short M4A");
+            let tagged = Probe::open(&path)
+                .and_then(Probe::read)
+                .expect("parse short M4A");
+            assert_eq!(tagged.properties().sample_rate(), Some(48_000));
+            assert!(crate::commands::transcribe::fragmented_m4a_duration(&path)
+                .is_some_and(|duration| !duration.is_zero()));
+            crate::commands::transcribe::describe_audio_path(&path)
+                .expect("short M4A is selectable for transcription");
+            let bytes = std::fs::read(&path).expect("read short M4A");
+            assert!(bytes.windows(4).any(|atom| atom == b"moof"));
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
