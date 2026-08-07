@@ -1,14 +1,17 @@
 package jp.mutsuna.echo
 
 import android.content.Context
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import org.json.JSONObject
+import org.json.JSONArray
 
 object RecordingBridge {
+  private const val HISTORY_RELATIVE_PATH = "Music/Mutsuna Echo/"
   @Volatile internal var activity: MainActivity? = null
   private val lock = Any()
   private var status = JSONObject(defaultStatus())
@@ -75,6 +78,79 @@ object RecordingBridge {
     return destination.absolutePath
   }
 
+  @JvmStatic fun listCompletedRecordings(context: Context): String {
+    val recordings = JSONArray()
+    val projection = arrayOf(
+      MediaStore.Audio.Media._ID,
+      MediaStore.Audio.Media.DISPLAY_NAME,
+      MediaStore.Audio.Media.SIZE,
+      MediaStore.Audio.Media.DATE_MODIFIED
+    )
+    val selection = "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.MIME_TYPE}=?"
+    context.contentResolver.query(
+      MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+      projection,
+      selection,
+      arrayOf(HISTORY_RELATIVE_PATH, "audio/mp4"),
+      "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
+    )?.use { cursor ->
+      val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+      val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+      val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+      val modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+      while (cursor.moveToNext() && recordings.length() < 100) {
+        val uri = ContentUris.withAppendedId(
+          MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+          cursor.getLong(idColumn)
+        )
+        recordings.put(JSONObject().apply {
+          put("id", uri.toString())
+          put("fileName", cursor.getString(nameColumn))
+          put("sizeBytes", cursor.getLong(sizeColumn))
+          put("recordedAtUnixMs", cursor.getLong(modifiedColumn) * 1_000L)
+        })
+      }
+    }
+    return recordings.toString()
+  }
+
+  @JvmStatic fun copyCompletedRecording(context: Context, value: String): String {
+    val uri = Uri.parse(value)
+    require(uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY) {
+      "録音履歴のIDが不正です。"
+    }
+    val projection = arrayOf(
+      MediaStore.Audio.Media.DISPLAY_NAME,
+      MediaStore.Audio.Media.RELATIVE_PATH,
+      MediaStore.Audio.Media.MIME_TYPE
+    )
+    var displayName: String? = null
+    context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val relativePath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH))
+        val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE))
+        require(relativePath == HISTORY_RELATIVE_PATH && mimeType == "audio/mp4") {
+          "Mutsuna Echoの録音ファイルではありません。"
+        }
+        displayName = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME))
+      }
+    }
+    val safeName = requireNotNull(displayName) { "選択した録音ファイルが見つかりません。" }
+      .substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
+    require(safeName.lowercase().endsWith(".m4a")) { "録音ファイルの形式が不正です。" }
+    val directory = java.io.File(context.cacheDir, "imports").apply { mkdirs() }
+    var destination = java.io.File(directory, safeName)
+    var suffix = 2
+    val stem = destination.name.removeSuffix(".m4a")
+    while (destination.exists()) destination = java.io.File(directory, "${stem}_${suffix++}.m4a")
+    val temporary = java.io.File(directory, destination.name + ".partial")
+    context.contentResolver.openInputStream(uri)?.use { input ->
+      java.io.FileOutputStream(temporary).use { output -> input.copyTo(output); output.fd.sync() }
+    } ?: throw IllegalStateException("選択した録音を開けませんでした。")
+    check(temporary.renameTo(destination)) { "選択した録音をアプリ領域へ確定できませんでした。" }
+    return destination.absolutePath
+  }
+
   @JvmStatic fun recover(context: Context, sessionId: String): String {
     require(Regex("^[A-Za-z0-9-]+$").matches(sessionId)) { "録音セッションIDが不正です。" }
     val directory = java.io.File(context.filesDir, "recordings/in-progress/$sessionId")
@@ -118,6 +194,6 @@ object RecordingBridge {
 
   private fun defaultStatus() = """{
     "phase":"idle","sessionId":null,"elapsedMs":0,"microphone":false,"systemAudio":false,
-    "microphoneLevel":0.0,"systemLevel":0.0,"outputPath":null,"stopReason":null,"error":null
+    "microphoneLevel":0.0,"systemLevel":0.0,"outputPath":null,"stopReason":null,"warning":null,"error":null
   }""".trimIndent()
 }

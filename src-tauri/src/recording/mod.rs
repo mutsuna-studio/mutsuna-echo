@@ -16,8 +16,8 @@ use tauri::AppHandle;
 
 pub use service::RecordingService;
 use types::{
-    AudioDevice, RecordingCapabilities, RecordingStatus, RecoverableRecording, CHANNELS,
-    FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
+    AudioDevice, RecordedAudioSummary, RecordingCapabilities, RecordingStatus,
+    RecoverableRecording, CHANNELS, FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
 };
 
 pub fn capabilities() -> Result<RecordingCapabilities, String> {
@@ -88,6 +88,33 @@ pub fn capabilities() -> Result<RecordingCapabilities, String> {
 
 pub fn recoverable_recordings(app: &AppHandle) -> Result<Vec<RecoverableRecording>, String> {
     session::recoverable_recordings(app)
+}
+
+pub fn completed_recordings(app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        android::completed_recordings()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        session::completed_recordings(app)
+    }
+}
+
+pub fn completed_recording_path(
+    app: &AppHandle,
+    recording_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        android::copy_completed_recording(recording_id)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        session::completed_recording_path(app, recording_id)
+    }
 }
 
 pub fn recover(app: &AppHandle, session_id: &str) -> Result<std::path::PathBuf, String> {

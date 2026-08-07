@@ -4,8 +4,8 @@ use jni::{
 };
 
 use super::types::{
-    RecordingCapabilities, RecordingStatus, StartRecordingRequest, CHANNELS, FINAL_BITRATE,
-    MAX_DURATION_MS, SAMPLE_RATE,
+    RecordedAudioSummary, RecordingCapabilities, RecordingStatus, StartRecordingRequest, CHANNELS,
+    FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
 };
 
 const BRIDGE: &str = "jp/mutsuna/echo/RecordingBridge";
@@ -112,6 +112,49 @@ pub fn copy_content_uri(uri: &str) -> Result<std::path::PathBuf, String> {
         env.get_string(&JString::from(value))
             .map(String::from)
             .map_err(|error| format!("コピーした音声の場所を読み取れませんでした: {error}"))
+    })?;
+    Ok(std::path::PathBuf::from(path))
+}
+
+pub fn completed_recordings() -> Result<Vec<RecordedAudioSummary>, String> {
+    let json = with_env(|env, app| {
+        let value = env
+            .call_static_method(
+                BRIDGE,
+                "listCompletedRecordings",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::Object(app)],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| format!("Androidの録音履歴を取得できませんでした: {error}"))?;
+        env.get_string(&JString::from(value))
+            .map(String::from)
+            .map_err(|error| format!("Androidの録音履歴を読み取れませんでした: {error}"))
+    })?;
+    serde_json::from_str(&json)
+        .map_err(|error| format!("Androidの録音履歴の応答が不正です: {error}"))
+}
+
+pub fn copy_completed_recording(recording_id: &str) -> Result<std::path::PathBuf, String> {
+    let path = with_env(|env, app| {
+        let recording_id = env
+            .new_string(recording_id)
+            .map_err(|error| format!("選択した録音IDをAndroidへ渡せませんでした: {error}"))?;
+        let value = env
+            .call_static_method(
+                BRIDGE,
+                "copyCompletedRecording",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    JValue::Object(app),
+                    JValue::Object(&JObject::from(recording_id)),
+                ],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| format!("Androidの録音を選択できませんでした: {error}"))?;
+        env.get_string(&JString::from(value))
+            .map(String::from)
+            .map_err(|error| format!("選択した録音の場所を読み取れませんでした: {error}"))
     })?;
     Ok(std::path::PathBuf::from(path))
 }

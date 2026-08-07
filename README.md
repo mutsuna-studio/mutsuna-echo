@@ -19,6 +19,7 @@ Svelte 5 + TypeScript + Tauri 2 + Rustで作る、マルチOS対応の録音・�
   - 48 kHz / mono / AAC-LC / M4A
   - マイクとシステム音声を別々の復旧用トラックとして保持し、同一タイムラインでミックス
   - 録音中断に備えたfragmented MP4と起動時復旧
+  - `Music/Mutsuna Echo`に保存した過去100件の録音を一覧から再選択
 
 音声はWebViewへ読み込まず、RustからElevenLabsへストリーミング送信します。APIキーもRust側だけで読み出します。
 

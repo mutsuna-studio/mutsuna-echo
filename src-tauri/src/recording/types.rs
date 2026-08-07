@@ -115,6 +115,15 @@ pub struct RecoverableRecording {
     pub system_audio: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedAudioSummary {
+    pub id: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub recorded_at_unix_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::StartRecordingRequest;

@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use chrono::Local;
@@ -8,8 +9,10 @@ use tauri::{AppHandle, Manager};
 
 use super::{
     manifest::{remove_session, RecordingManifest},
-    types::RecoverableRecording,
+    types::{RecordedAudioSummary, RecoverableRecording},
 };
+
+const HISTORY_LIMIT: usize = 100;
 
 pub(super) struct RecordingPaths {
     pub(super) session_id: String,
@@ -29,11 +32,7 @@ impl RecordingPaths {
         fs::create_dir_all(&directory)
             .map_err(|error| format!("録音用の一時フォルダーを作成できませんでした: {error}"))?;
 
-        let output_directory = app
-            .path()
-            .audio_dir()
-            .map_err(|error| format!("ミュージックフォルダーを取得できませんでした: {error}"))?
-            .join("Mutsuna Echo");
+        let output_directory = completed_recordings_directory(app)?;
         fs::create_dir_all(&output_directory)
             .map_err(|error| format!("録音の保存先を作成できませんでした: {error}"))?;
 
@@ -65,6 +64,97 @@ fn recordings_root(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|error| format!("アプリデータフォルダーを取得できませんでした: {error}"))?
         .join("recordings"))
+}
+
+fn completed_recordings_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    let directory = app
+        .path()
+        .cache_dir()
+        .map_err(|error| format!("録音履歴フォルダーを取得できませんでした: {error}"))?
+        .join("recordings");
+    #[cfg(not(target_os = "android"))]
+    let directory = app
+        .path()
+        .audio_dir()
+        .map_err(|error| format!("ミュージックフォルダーを取得できませんでした: {error}"))?
+        .join("Mutsuna Echo");
+
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("録音履歴フォルダーを準備できませんでした: {error}"))?;
+    Ok(directory)
+}
+
+pub(super) fn completed_recordings(app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+    let directory = completed_recordings_directory(app)?;
+    completed_recordings_in(&directory)
+}
+
+fn completed_recordings_in(directory: &Path) -> Result<Vec<RecordedAudioSummary>, String> {
+    let mut recordings = fs::read_dir(directory)
+        .map_err(|error| format!("過去の録音を確認できませんでした: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+            {
+                return None;
+            }
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            let file_name = entry.file_name().into_string().ok()?;
+            let recorded_at_unix_ms = metadata
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis()
+                .try_into()
+                .ok()?;
+            Some(RecordedAudioSummary {
+                id: file_name.clone(),
+                file_name,
+                size_bytes: metadata.len(),
+                recorded_at_unix_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    recordings.sort_by_key(|recording| std::cmp::Reverse(recording.recorded_at_unix_ms));
+    recordings.truncate(HISTORY_LIMIT);
+    Ok(recordings)
+}
+
+pub(super) fn completed_recording_path(
+    app: &AppHandle,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    validate_completed_file_name(file_name)?;
+    let path = completed_recordings_directory(app)?.join(file_name);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| {
+        "選択した録音ファイルが見つかりません。履歴を更新してください。".to_string()
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("選択した録音ファイルを安全に開けませんでした。".to_string());
+    }
+    Ok(path)
+}
+
+fn validate_completed_file_name(file_name: &str) -> Result<(), String> {
+    let path = Path::new(file_name);
+    if path.file_name().and_then(|name| name.to_str()) != Some(file_name)
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+    {
+        return Err("録音ファイル名が不正です。".to_string());
+    }
+    Ok(())
 }
 
 pub(super) fn atomic_copy_to_output(source: &Path, destination: &Path) -> Result<(), String> {
@@ -155,7 +245,10 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{unique_output_path, validate_session_id};
+    use super::{
+        completed_recordings_in, unique_output_path, validate_completed_file_name,
+        validate_session_id,
+    };
 
     #[test]
     fn session_id_cannot_escape_recording_root() {
@@ -170,5 +263,32 @@ mod tests {
             path.extension().and_then(|value| value.to_str()),
             Some("m4a")
         );
+    }
+
+    #[test]
+    fn completed_recording_name_cannot_escape_output_directory() {
+        assert!(validate_completed_file_name("2026-08-08_12-00-00.m4a").is_ok());
+        assert!(validate_completed_file_name("../secret.m4a").is_err());
+        assert!(validate_completed_file_name("meeting.mp3").is_err());
+    }
+
+    #[test]
+    fn completed_recordings_include_only_m4a_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "mutsuna-completed-recordings-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create history fixture directory");
+        std::fs::write(directory.join("meeting.m4a"), b"audio").expect("write M4A fixture");
+        std::fs::write(directory.join("notes.txt"), b"not audio").expect("write non-audio fixture");
+
+        let recordings = completed_recordings_in(&directory).expect("list completed recordings");
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0].id, "meeting.m4a");
+        assert_eq!(recordings[0].file_name, "meeting.m4a");
+        assert_eq!(recordings[0].size_bytes, 5);
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

@@ -6,7 +6,8 @@ use crate::{
     recording::{
         self,
         types::{
-            RecordingCapabilities, RecordingStatus, RecoverableRecording, StartRecordingRequest,
+            RecordedAudioSummary, RecordingCapabilities, RecordingStatus, RecoverableRecording,
+            StartRecordingRequest,
         },
         RecordingService,
     },
@@ -150,6 +151,20 @@ pub(crate) fn list_recoverable_recordings(
     app: AppHandle,
 ) -> Result<Vec<RecoverableRecording>, String> {
     recording::recoverable_recordings(&app)
+}
+
+#[tauri::command]
+pub(crate) fn list_recorded_audio(app: AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+    recording::completed_recordings(&app)
+}
+
+#[tauri::command]
+pub(crate) fn select_recorded_audio(
+    app: AppHandle,
+    recording_id: String,
+) -> Result<SelectedAudioFile, String> {
+    let path = recording::completed_recording_path(&app, &recording_id)?;
+    crate::commands::transcribe::set_selected_audio_path(&app, path)
 }
 
 #[tauri::command]

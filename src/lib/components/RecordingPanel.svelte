@@ -1,8 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { formatFileSize, formatRecordedAt } from "../format";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
+    RecordedAudioSummary,
     RecordingCapabilities,
     RecordingStatus,
     StopRecordingResult
@@ -27,6 +29,7 @@
   let capabilities = $state<RecordingCapabilities | null>(null);
   let status = $state<RecordingStatus | null>(null);
   let recoverable = $state<RecoverableRecording[]>([]);
+  let recordedAudio = $state<RecordedAudioSummary[]>([]);
   let microphone = $state(true);
   let systemAudio = $state(true);
   let microphoneDeviceId = $state("");
@@ -71,6 +74,16 @@
       deliveredOutput = nextStatus.outputPath;
       onAudioReady(audio);
       onMessage(stopMessage(nextStatus.stopReason));
+      await refreshRecordedAudio();
+    }
+  }
+
+  async function refreshRecordedAudio() {
+    try {
+      recordedAudio = await invoke<RecordedAudioSummary[]>("list_recorded_audio");
+    } catch (error) {
+      onError(errorText(error));
+      recordedAudio = [];
     }
   }
 
@@ -90,15 +103,20 @@
     let timer: number | undefined;
     void (async () => {
       try {
-        const [nextCapabilities, nextStatus, nextRecoverable] = await Promise.all([
+        const [nextCapabilities, nextStatus, nextRecoverable, nextRecordedAudio] = await Promise.all([
           invoke<RecordingCapabilities>("get_recording_capabilities"),
           invoke<RecordingStatus>("get_recording_status"),
-          invoke<RecoverableRecording[]>("list_recoverable_recordings")
+          invoke<RecoverableRecording[]>("list_recoverable_recordings"),
+          invoke<RecordedAudioSummary[]>("list_recorded_audio").catch((error) => {
+            onError(errorText(error));
+            return [];
+          })
         ]);
         if (cancelled) return;
         capabilities = nextCapabilities;
         status = nextStatus;
         recoverable = nextRecoverable;
+        recordedAudio = nextRecordedAudio;
         microphone = nextCapabilities.microphoneSupported;
         systemAudio = nextCapabilities.systemAudioSupported;
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
@@ -150,6 +168,7 @@
       if (result.audio) {
         deliveredOutput = result.status.outputPath ?? "";
         onAudioReady(result.audio);
+        await refreshRecordedAudio();
       }
       onMessage(stopMessage(result.status.stopReason));
     } catch (error) {
@@ -198,6 +217,22 @@
       actionBusy = false;
     }
   }
+
+  async function selectRecordedAudio(recording: RecordedAudioSummary) {
+    actionBusy = true;
+    try {
+      const audio = await invoke<SelectedAudioFile>("select_recorded_audio", {
+        recordingId: recording.id
+      });
+      onAudioReady(audio);
+      onMessage(`${recording.fileName}を文字起こし対象に選択しました。`);
+    } catch (error) {
+      onError(errorText(error));
+      await refreshRecordedAudio();
+    } finally {
+      actionBusy = false;
+    }
+  }
 </script>
 
 {#if loading}
@@ -220,6 +255,38 @@
         </div>
       {/each}
     </div>
+  {/if}
+
+  {#if !active}
+    <section class="history" aria-label="過去の録音">
+      <div class="history-heading">
+        <div>
+          <strong>過去の録音</strong>
+          <small>Music/Mutsuna Echoに保存された最新100件</small>
+        </div>
+        <button type="button" onclick={refreshRecordedAudio} disabled={actionBusy}>更新</button>
+      </div>
+      {#if recordedAudio.length > 0}
+        <div class="history-list">
+          {#each recordedAudio as recording (recording.id)}
+            <button
+              class="history-item"
+              type="button"
+              onclick={() => selectRecordedAudio(recording)}
+              disabled={actionBusy || disabled}
+            >
+              <span>
+                <strong>{recording.fileName}</strong>
+                <small>{formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}</small>
+              </span>
+              <span class="history-action">選択</span>
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <p class="history-empty">保存済みの録音はまだありません。</p>
+      {/if}
+    </section>
   {/if}
 
   <div class="sources" aria-disabled={active || disabled}>
@@ -287,6 +354,21 @@
   .recovery-row div { display: flex; gap: 7px; }
   .recovery button { min-height: 32px; padding: 0 10px; border: 1px solid #d5c48f; border-radius: 8px; background: #fff; cursor: pointer; }
   .recovery .text-danger { color: #9a3028; }
+  .history { display: grid; gap: 10px; margin-top: 18px; }
+  .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .history-heading > div { display: grid; gap: 3px; }
+  .history-heading small,
+  .history-empty { color: #68746c; font-size: 0.78rem; }
+  .history-heading button { min-height: 32px; padding: 0 10px; border: 1px solid #c7cfca; background: #fff; }
+  .history-list { display: grid; overflow: hidden; border: 1px solid #dce3de; border-radius: 12px; }
+  .history-item { display: flex; width: 100%; min-height: auto; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 0; border-top: 1px solid #e4e9e6; border-radius: 0; color: #253b2e; background: #fff; text-align: left; }
+  .history-item:first-child { border-top: 0; }
+  .history-item:hover:not(:disabled) { background: #f5f8f6; }
+  .history-item > span:first-child { display: grid; min-width: 0; gap: 3px; }
+  .history-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-item small { color: #68746c; }
+  .history-action { flex: none; color: #23704a; font-size: 0.78rem; font-weight: 750; }
+  .history-empty { margin: 0; padding: 14px; border-radius: 10px; background: #f5f7f5; }
   .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
   .source { display: grid; gap: 10px; padding: 15px; border: 1px solid #dce3de; border-radius: 12px; background: #f8faf8; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }

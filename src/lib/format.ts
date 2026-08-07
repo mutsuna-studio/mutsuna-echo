@@ -38,3 +38,13 @@ export function formatResetDate(unixSeconds: number): string {
     day: "numeric"
   }).format(new Date(unixSeconds * 1_000));
 }
+
+export function formatRecordedAt(unixMilliseconds: number): string {
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(unixMilliseconds));
+}

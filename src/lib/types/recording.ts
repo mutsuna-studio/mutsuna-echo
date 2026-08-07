@@ -47,6 +47,13 @@ export interface RecoverableRecording {
   systemAudio: boolean;
 }
 
+export interface RecordedAudioSummary {
+  id: string;
+  fileName: string;
+  sizeBytes: number;
+  recordedAtUnixMs: number;
+}
+
 export interface StopRecordingResult {
   status: RecordingStatus;
   audio: SelectedAudioFile | null;
