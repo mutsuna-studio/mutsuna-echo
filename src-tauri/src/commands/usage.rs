@@ -105,14 +105,29 @@ async fn fetch_subscription(
 }
 
 fn included_scribe_minutes(tier: &str) -> Option<f64> {
-    match tier.to_ascii_lowercase().as_str() {
-        "free" | "free_v2" | "pay_as_you_go" => Some(4.5 * 60.0),
-        "starter" => Some(27.0 * 60.0),
-        "creator" => Some(100.0 * 60.0),
-        "pro" => Some(450.0 * 60.0),
-        "scale" => Some(1_359.0 * 60.0),
-        "business" => Some(4_500.0 * 60.0),
-        _ => None,
+    // ElevenLabs has used versioned/internal suffixes for subscription tiers.
+    // Match the public plan name inside the identifier instead of requiring an
+    // exact value such as `creator`.
+    let normalized = tier
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+
+    if normalized.contains("business") {
+        Some(4_500.0 * 60.0)
+    } else if normalized.contains("scale") {
+        Some(1_359.0 * 60.0)
+    } else if normalized.contains("creator") {
+        Some(100.0 * 60.0)
+    } else if normalized.contains("starter") {
+        Some(27.0 * 60.0)
+    } else if normalized == "pro" || normalized.starts_with("pro") {
+        Some(450.0 * 60.0)
+    } else if normalized.contains("free") || normalized.contains("payasyougo") {
+        Some(4.5 * 60.0)
+    } else {
+        None
     }
 }
 
@@ -246,9 +261,14 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
 
     let available_duration_ms = available_duration_ms(&subscription);
     let resets_at_unix = subscription.next_character_count_reset_unix;
-    let mut warning = if available_duration_ms.is_none() {
+    let mut warning = if subscription.character_limit == 0 {
         Some(format!(
-            "{}プランの文字起こし可能時間を換算できません。ElevenLabsの契約画面で残り利用枠を確認してください。",
+            "ElevenLabsの契約APIが{}プランの利用枠を0クレジットとして返したため、文字起こし可能時間を換算できません。APIキー側の「使用制限: 無制限」とは別の、アカウントの契約枠です。",
+            subscription.tier
+        ))
+    } else if available_duration_ms.is_none() {
+        Some(format!(
+            "ElevenLabsが返したプラン識別子「{}」に対応する公開換算表がないため、文字起こし可能時間を計算できません。",
             subscription.tier
         ))
     } else {
@@ -295,6 +315,22 @@ mod tests {
     fn converts_remaining_creator_credits_to_scribe_time() {
         let subscription = SubscriptionResponse {
             tier: "creator".to_string(),
+            character_count: 25_000,
+            character_limit: 100_000,
+            next_character_count_reset_unix: None,
+            character_refresh_period: None,
+        };
+
+        assert_eq!(
+            available_duration_ms(&subscription),
+            Some(75 * 60 * 60 * 1_000)
+        );
+    }
+
+    #[test]
+    fn accepts_versioned_subscription_tier_identifiers() {
+        let subscription = SubscriptionResponse {
+            tier: "creator_v2_annual".to_string(),
             character_count: 25_000,
             character_limit: 100_000,
             next_character_count_reset_unix: None,
