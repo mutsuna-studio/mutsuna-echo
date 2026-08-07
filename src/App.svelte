@@ -37,10 +37,12 @@
     errorMessage = "";
 
     try {
-      await invoke("save_api_key", { apiKey });
+      const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey });
       apiKey = "";
       hasApiKey = true;
-      message = "APIキーを確認し、安全に保存しました。";
+      message = modelsAccessible
+        ? "APIキーを確認し、安全に保存しました。"
+        : "制限付きAPIキーとして保存しました。Speech to Text権限は文字起こし時に確認します。";
     } catch (error) {
       errorMessage = errorText(error);
     } finally {
