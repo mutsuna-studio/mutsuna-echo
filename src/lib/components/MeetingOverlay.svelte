@@ -454,6 +454,10 @@
     min-height: 100vh;
     padding: 14px;
     overflow: hidden;
+    cursor: default;
+    user-select: none;
+    -webkit-user-drag: none;
+    -webkit-user-select: none;
     /* Opaque platform windows keep their compositor-owned outline and corners. */
     color: var(--foreground);
     background:
