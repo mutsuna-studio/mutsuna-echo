@@ -209,6 +209,39 @@ pub fn dismiss_meeting_overlay(state: tauri::State<'_, MeetingDetectionState>) {
     state.suppress(None);
 }
 
+#[tauri::command]
+pub async fn wait_for_overlay_pointer_release() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+
+            let pressed_deadline = std::time::Instant::now() + Duration::from_millis(250);
+            while unsafe { GetAsyncKeyState(VK_LBUTTON.0.into()) } >= 0 {
+                if std::time::Instant::now() >= pressed_deadline {
+                    return Err("オーバーレイのドラッグ開始を確認できませんでした。".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while unsafe { GetAsyncKeyState(VK_LBUTTON.0.into()) } < 0 {
+                if std::time::Instant::now() >= deadline {
+                    return Err("オーバーレイのドラッグ終了を確認できませんでした。".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("ドラッグ終了の監視に失敗しました: {error}"))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(())
+    }
+}
+
 #[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn show_overlay_preview(

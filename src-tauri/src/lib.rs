@@ -64,6 +64,8 @@ pub fn run() {
             meeting_detection::get_meeting_detection,
             #[cfg(desktop)]
             meeting_detection::dismiss_meeting_overlay,
+            #[cfg(desktop)]
+            meeting_detection::wait_for_overlay_pointer_release,
             #[cfg(all(desktop, debug_assertions))]
             meeting_detection::show_overlay_preview,
             #[cfg(all(desktop, debug_assertions))]

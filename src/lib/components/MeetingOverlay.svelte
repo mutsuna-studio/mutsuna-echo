@@ -29,7 +29,6 @@
   const controllerSize = { width: 310, height: 158 };
   const snapStorageKey = "meeting-overlay-snap-position";
   const snapMargin = 20;
-  const snapSettleDelayMs = 32;
   const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
   type OverlaySnapPosition = (typeof snapPositions)[number];
 
@@ -43,8 +42,7 @@
   }
 
   let snapPosition = storedSnapPosition();
-  let snapDebounceId: number | undefined;
-  let ignoreMoveEventsUntil = 0;
+  let overlayDragInProgress = false;
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
   let previewRuntime = $state.raw<OverlayPreviewRuntime | null>(null);
@@ -119,7 +117,6 @@
     if (!monitor) return;
     const overlay = getCurrentWebviewWindow();
     const size = await overlay.outerSize();
-    ignoreMoveEventsUntil = Date.now() + 300;
     await overlay.setPosition(snapPoint(position, monitor, size));
   }
 
@@ -154,13 +151,45 @@
     await applySnap(nearest, monitor);
   }
 
-  function scheduleSnap() {
-    if (Date.now() < ignoreMoveEventsUntil) return;
-    if (snapDebounceId !== undefined) window.clearTimeout(snapDebounceId);
-    snapDebounceId = window.setTimeout(() => {
-      snapDebounceId = undefined;
-      void snapToNearestPosition().catch((cause) => { error = errorText(cause); });
-    }, snapSettleDelayMs);
+  function waitForBrowserPointerRelease(): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        window.removeEventListener("pointerup", finish, true);
+        window.removeEventListener("pointercancel", finish, true);
+        resolve();
+      };
+      window.addEventListener("pointerup", finish, { capture: true, once: true });
+      window.addEventListener("pointercancel", finish, { capture: true, once: true });
+    });
+  }
+
+  async function startOverlayDrag(event: PointerEvent) {
+    if (event.button !== 0 || overlayDragInProgress) return;
+    event.preventDefault();
+    overlayDragInProgress = true;
+    const platform = navigator.userAgent.toLowerCase();
+    const isWindows = platform.includes("windows");
+    const isMacOs = platform.includes("macintosh") || platform.includes("mac os");
+    const browserRelease = isWindows || isMacOs ? null : waitForBrowserPointerRelease();
+    const nativeRelease = isWindows
+      ? invoke<void>("wait_for_overlay_pointer_release").then(
+          () => ({ error: null }),
+          (cause: unknown) => ({ error: cause })
+        )
+      : null;
+    try {
+      await getCurrentWebviewWindow().startDragging();
+      if (nativeRelease) {
+        const result = await nativeRelease;
+        if (result.error !== null) throw result.error;
+      }
+      else if (browserRelease) await browserRelease;
+      await snapToNearestPosition();
+    } catch (cause) {
+      error = errorText(cause);
+    } finally {
+      overlayDragInProgress = false;
+    }
   }
 
   async function closeOverlay() {
@@ -344,10 +373,8 @@
     let cancelled = false;
     let unlistenStatus: UnlistenFn | undefined;
     let unlistenPreview: UnlistenFn | undefined;
-    let unlistenMoved: UnlistenFn | undefined;
     void (async () => {
       try {
-        unlistenMoved = await getCurrentWebviewWindow().onMoved(scheduleSnap);
         unlistenStatus = await listen<RecordingStatus>("recording-status", ({ payload }) => {
           if (!cancelled) void acceptStatus(payload).catch((cause) => { error = errorText(cause); });
         });
@@ -382,9 +409,7 @@
       cancelled = true;
       unlistenStatus?.();
       unlistenPreview?.();
-      unlistenMoved?.();
       if (previewTransitionId !== undefined) window.clearTimeout(previewTransitionId);
-      if (snapDebounceId !== undefined) window.clearTimeout(snapDebounceId);
     };
   });
 
@@ -409,7 +434,7 @@
     <div class="glass-highlight" aria-hidden="true"></div>
     {#if controllerMode}
       <section class="recording-controller" aria-label="録音コントローラー" aria-live="polite">
-        <div class="recording-summary overlay-drag-handle" title="ドラッグして位置を移動" data-tauri-drag-region>
+        <button class="recording-summary overlay-drag-handle" type="button" aria-label="オーバーレイを移動" title="ドラッグして位置を移動" onpointerdown={startOverlayDrag}>
           <div class:error-state={status?.phase === "failed"} class:success-state={status?.phase === "completed"} class="phase-state">
             {#if status?.phase === "finalizing"}
               <LoaderCircle class="phase-icon spin" aria-hidden="true" />
@@ -424,7 +449,7 @@
             {#if isPreview}<Badge variant="secondary">{previewRuntime?.badgeLabel}</Badge>{/if}
           </div>
           <time>{formatElapsed(status?.elapsedMs ?? 0)}</time>
-        </div>
+        </button>
 
         <div class="audio-sources">
           <div class:enabled={status?.microphone} class="audio-source">
@@ -495,10 +520,10 @@
           {#if error}
             <p class="detection-error" role="alert" title={error}>{error}</p>
           {:else}
-            <div class="detection-identity overlay-drag-handle" title="ドラッグして位置を移動" data-tauri-drag-region>
+            <button class="detection-identity overlay-drag-handle" type="button" aria-label="オーバーレイを移動" title="ドラッグして位置を移動" onpointerdown={startOverlayDrag}>
               <strong>{shownDetection.providerLabel}</strong>
               {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
-            </div>
+            </button>
           {/if}
           <div class="detection-actions">
             <Button
@@ -623,7 +648,15 @@
   .meeting-prompt { height: 100%; }
   .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
 
-  .overlay-drag-handle { cursor: grab; }
+  .overlay-drag-handle {
+    padding: 0;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    cursor: grab;
+    font: inherit;
+    text-align: left;
+  }
   .overlay-drag-handle:active { cursor: grabbing; }
   .overlay-drag-handle > * { pointer-events: none; }
 
