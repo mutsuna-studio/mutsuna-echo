@@ -2,13 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": [
-    "main",
-    "meeting-overlay"
-  ],
-  "permissions": [
-    "core:default",
-    "core:window:allow-set-position",
-    "core:window:allow-set-size"
-  ]
+  "windows": ["main"],
+  "permissions": ["core:default"]
 }
