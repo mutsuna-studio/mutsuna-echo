@@ -1,8 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
-  import { currentMonitor } from "@tauri-apps/api/window";
+  import { LogicalSize, PhysicalPosition, type PhysicalSize } from "@tauri-apps/api/dpi";
+  import { currentMonitor, monitorFromPoint, type Monitor } from "@tauri-apps/api/window";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import AudioWaveform from "@lucide/svelte/icons/audio-waveform";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
@@ -27,6 +27,23 @@
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const promptSize = { width: 320, height: 60 };
   const controllerSize = { width: 310, height: 158 };
+  const snapStorageKey = "meeting-overlay-snap-position";
+  const snapMargin = 20;
+  const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
+  type OverlaySnapPosition = (typeof snapPositions)[number];
+
+  function storedSnapPosition(): OverlaySnapPosition {
+    try {
+      const stored = window.localStorage.getItem(snapStorageKey);
+      return snapPositions.find((position) => position === stored) ?? "bottom-right";
+    } catch {
+      return "bottom-right";
+    }
+  }
+
+  let snapPosition = storedSnapPosition();
+  let snapDebounceId: number | undefined;
+  let ignoreMoveEventsUntil = 0;
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
   let previewRuntime = $state.raw<OverlayPreviewRuntime | null>(null);
@@ -83,6 +100,68 @@
     return `--audio-level: ${Math.max(0, Math.min(1, level)) * 100}%`;
   }
 
+  function snapPoint(position: OverlaySnapPosition, monitor: Monitor, windowSize: PhysicalSize): PhysicalPosition {
+    const workArea = monitor.workArea;
+    const margin = Math.round(snapMargin * monitor.scaleFactor);
+    const left = workArea.position.x + margin;
+    const center = workArea.position.x + Math.round((workArea.size.width - windowSize.width) / 2);
+    const right = workArea.position.x + workArea.size.width - windowSize.width - margin;
+    const top = workArea.position.y + margin;
+    const bottom = workArea.position.y + workArea.size.height - windowSize.height - margin;
+    const x = position.endsWith("left") ? left : position.endsWith("right") ? right : center;
+    const y = position.startsWith("top") ? top : bottom;
+    return new PhysicalPosition(x, y);
+  }
+
+  async function applySnap(position: OverlaySnapPosition, targetMonitor?: Monitor | null) {
+    const monitor = targetMonitor ?? await currentMonitor();
+    if (!monitor) return;
+    const overlay = getCurrentWebviewWindow();
+    const size = await overlay.outerSize();
+    ignoreMoveEventsUntil = Date.now() + 300;
+    await overlay.setPosition(snapPoint(position, monitor, size));
+  }
+
+  function persistSnap(position: OverlaySnapPosition) {
+    snapPosition = position;
+    try {
+      window.localStorage.setItem(snapStorageKey, position);
+    } catch {
+      // Snapping still works for this session when WebView storage is unavailable.
+    }
+  }
+
+  async function snapToNearestPosition() {
+    const overlay = getCurrentWebviewWindow();
+    const [windowPosition, windowSize] = await Promise.all([overlay.outerPosition(), overlay.outerSize()]);
+    const centerX = windowPosition.x + windowSize.width / 2;
+    const centerY = windowPosition.y + windowSize.height / 2;
+    const monitor = await monitorFromPoint(centerX, centerY) ?? await currentMonitor();
+    if (!monitor) return;
+
+    let nearest: OverlaySnapPosition = snapPositions[0];
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const candidate of snapPositions) {
+      const point = snapPoint(candidate, monitor, windowSize);
+      const distance = (point.x - windowPosition.x) ** 2 + (point.y - windowPosition.y) ** 2;
+      if (distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    persistSnap(nearest);
+    await applySnap(nearest, monitor);
+  }
+
+  function scheduleSnap() {
+    if (Date.now() < ignoreMoveEventsUntil) return;
+    if (snapDebounceId !== undefined) window.clearTimeout(snapDebounceId);
+    snapDebounceId = window.setTimeout(() => {
+      snapDebounceId = undefined;
+      void snapToNearestPosition().catch((cause) => { error = errorText(cause); });
+    }, 180);
+  }
+
   async function closeOverlay() {
     await getCurrentWebviewWindow().destroy();
   }
@@ -91,14 +170,7 @@
     const size = compact ? controllerSize : promptSize;
     const overlay = getCurrentWebviewWindow();
     await overlay.setSize(new LogicalSize(size.width, size.height));
-    const monitor = await currentMonitor();
-    if (!monitor) return;
-    const workPosition = monitor.workArea.position.toLogical(monitor.scaleFactor);
-    const workSize = monitor.workArea.size.toLogical(monitor.scaleFactor);
-    await overlay.setPosition(new LogicalPosition(
-      workPosition.x + workSize.width - size.width - 24,
-      workPosition.y + workSize.height - size.height - 24
-    ));
+    await applySnap(snapPosition);
   }
 
   async function enterController(nextStatus: RecordingStatus) {
@@ -271,8 +343,10 @@
     let cancelled = false;
     let unlistenStatus: UnlistenFn | undefined;
     let unlistenPreview: UnlistenFn | undefined;
+    let unlistenMoved: UnlistenFn | undefined;
     void (async () => {
       try {
+        unlistenMoved = await getCurrentWebviewWindow().onMoved(scheduleSnap);
         unlistenStatus = await listen<RecordingStatus>("recording-status", ({ payload }) => {
           if (!cancelled) void acceptStatus(payload).catch((cause) => { error = errorText(cause); });
         });
@@ -296,6 +370,7 @@
         detection = nextDetection;
         await acceptStatus(nextStatus);
         if (!detection && !active && !controllerMode) await closeOverlay();
+        else await applySnap(snapPosition);
       } catch (cause) {
         error = errorText(cause);
       } finally {
@@ -306,7 +381,9 @@
       cancelled = true;
       unlistenStatus?.();
       unlistenPreview?.();
+      unlistenMoved?.();
       if (previewTransitionId !== undefined) window.clearTimeout(previewTransitionId);
+      if (snapDebounceId !== undefined) window.clearTimeout(snapDebounceId);
     };
   });
 
@@ -331,7 +408,7 @@
     <div class="glass-highlight" aria-hidden="true"></div>
     {#if controllerMode}
       <section class="recording-controller" aria-label="録音コントローラー" aria-live="polite">
-        <div class="recording-summary">
+        <div class="recording-summary overlay-drag-handle" title="ドラッグして位置を移動" data-tauri-drag-region>
           <div class:error-state={status?.phase === "failed"} class:success-state={status?.phase === "completed"} class="phase-state">
             {#if status?.phase === "finalizing"}
               <LoaderCircle class="phase-icon spin" aria-hidden="true" />
@@ -417,7 +494,7 @@
           {#if error}
             <p class="detection-error" role="alert" title={error}>{error}</p>
           {:else}
-            <div class="detection-identity">
+            <div class="detection-identity overlay-drag-handle" title="ドラッグして位置を移動" data-tauri-drag-region>
               <strong>{shownDetection.providerLabel}</strong>
               {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
             </div>
@@ -544,6 +621,10 @@
 
   .meeting-prompt { height: 100%; }
   .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
+
+  .overlay-drag-handle { cursor: grab; }
+  .overlay-drag-handle:active { cursor: grabbing; }
+  .overlay-drag-handle > * { pointer-events: none; }
 
   .prompt-row,
   .recording-summary,
