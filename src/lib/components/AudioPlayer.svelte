@@ -17,7 +17,7 @@
     audio: SelectedAudioFile;
     source?: "recording" | "imported";
     seekRequest: AudioSeekRequest | null;
-    onPositionChange: (positionMs: number) => void;
+    onPositionChange: (positionMs: number, followTimeline: boolean) => void;
     onError: (message: string) => void;
   };
 
@@ -119,7 +119,7 @@
     } catch {
       return false;
     }
-    updatePosition(element.currentTime);
+    updatePosition(element.currentTime, true);
     return true;
   }
 
@@ -129,9 +129,9 @@
     if (seekTo(request.positionMs / 1_000)) processedSeekRequestId = request.requestId;
   }
 
-  function updatePosition(seconds: number) {
+  function updatePosition(seconds: number, followTimeline = false) {
     currentSeconds = seconds;
-    onPositionChange(Math.round(seconds * 1_000));
+    onPositionChange(Math.round(seconds * 1_000), followTimeline);
   }
 
   function handleTimeUpdate() {

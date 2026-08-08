@@ -62,6 +62,7 @@
 
   let detailTab = $state<"transcript" | "info">("transcript");
   let playbackPositionMs = $state(0);
+  let timelineFollowRequestId = $state(0);
   let seekRequest = $state.raw<AudioSeekRequest | null>(null);
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
@@ -84,6 +85,7 @@
   $effect(() => {
     selectedAudio?.meetingId;
     playbackPositionMs = 0;
+    timelineFollowRequestId = 0;
     seekRequest = null;
     seekRequestId = 0;
   });
@@ -96,6 +98,11 @@
     if (!selectedAudio) return;
     playbackPositionMs = positionMs;
     seekRequest = { meetingId: selectedAudio.meetingId, requestId: ++seekRequestId, positionMs };
+  }
+
+  function handlePlaybackPosition(positionMs: number, followTimeline: boolean) {
+    playbackPositionMs = positionMs;
+    if (followTimeline) timelineFollowRequestId += 1;
   }
 </script>
 
@@ -126,7 +133,7 @@
         audio={selectedAudio}
         source={meeting?.source}
         {seekRequest}
-        onPositionChange={(positionMs) => playbackPositionMs = positionMs}
+        onPositionChange={handlePlaybackPosition}
         {onError}
       />
     </div>
@@ -162,7 +169,7 @@
     <div class="detail-content">
       {#if detailTab === "transcript"}
         {#if transcript}
-          <TranscriptView {transcript} currentPositionMs={playbackPositionMs} onSeek={seekFromTranscript} />
+          <TranscriptView {transcript} currentPositionMs={playbackPositionMs} followRequestId={timelineFollowRequestId} onSeek={seekFromTranscript} />
         {:else}
           <div class="empty-transcript">
             <FileAudio aria-hidden="true" />

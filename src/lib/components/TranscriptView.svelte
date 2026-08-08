@@ -7,10 +7,11 @@
   type Props = {
     transcript: Transcript;
     currentPositionMs: number;
+    followRequestId: number;
     onSeek: (positionMs: number) => void;
   };
 
-  let { transcript, currentPositionMs, onSeek }: Props = $props();
+  let { transcript, currentPositionMs, followRequestId, onSeek }: Props = $props();
 
   const SEGMENT_PAGE_SIZE = 300;
   let visibleCount = $state(SEGMENT_PAGE_SIZE);
@@ -27,6 +28,7 @@
 
   $effect(() => {
     const index = activeIndex;
+    followRequestId;
     if (index < 0) return;
     if (index >= visibleCount) {
       visibleCount = Math.ceil((index + 1) / SEGMENT_PAGE_SIZE) * SEGMENT_PAGE_SIZE;
@@ -34,9 +36,25 @@
     void tick().then(() => {
       const element = segmentElements[index];
       if (!element) return;
-      element.scrollIntoView({ behavior: "auto", block: "nearest" });
+      scrollToSegment(element);
     });
   });
+
+  function scrollToSegment(element: HTMLElement) {
+    const candidate = element.closest(".detail-content");
+    if (!(candidate instanceof HTMLElement)) {
+      element.scrollIntoView({ behavior: "auto", block: "center" });
+      return;
+    }
+    const viewport = candidate.getBoundingClientRect();
+    const segment = element.getBoundingClientRect();
+    const centeredTop = candidate.scrollTop
+      + segment.top
+      - viewport.top
+      - (candidate.clientHeight - segment.height) / 2;
+    const maximum = Math.max(0, candidate.scrollHeight - candidate.clientHeight);
+    candidate.scrollTo({ top: Math.min(Math.max(0, centeredTop), maximum), behavior: "auto" });
+  }
 
   function segmentIndexAt(value: Transcript, positionMs: number): number {
     const segments = value.segments;
