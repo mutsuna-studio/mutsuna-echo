@@ -6,7 +6,14 @@
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
+  import { Select } from "@mutsuna/ui/select";
   import { formatFileSize, formatTimestamp } from "../format";
+  import {
+    isTranscriptionProviderId,
+    transcriptionProviderOptions,
+    type TranscriptionProviderDefinition,
+    type TranscriptionProviderId
+  } from "../providers";
   import type { RecordedAudioSummary } from "../types/recording";
   import type { SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
   import TranscriptView from "./TranscriptView.svelte";
@@ -15,6 +22,8 @@
     selectedAudio: SelectedAudioFile | null;
     recording: RecordedAudioSummary | null;
     transcript: Transcript | null;
+    providers: readonly TranscriptionProviderDefinition[];
+    provider: TranscriptionProviderId;
     providerLabel: string;
     providerStatus: string;
     transcribing: boolean;
@@ -23,6 +32,7 @@
     libraryOpen: boolean;
     onOpenLibrary: () => void;
     onTranscribe: () => void;
+    onProviderChange: (provider: TranscriptionProviderId) => void;
     onReveal: (recording: RecordedAudioSummary) => void;
     onCreate: () => void;
     onOpenSettings: () => void;
@@ -32,6 +42,8 @@
     selectedAudio,
     recording,
     transcript,
+    providers,
+    provider,
     providerLabel,
     providerStatus,
     transcribing,
@@ -40,12 +52,14 @@
     libraryOpen,
     onOpenLibrary,
     onTranscribe,
+    onProviderChange,
     onReveal,
     onCreate,
     onOpenSettings
   }: Props = $props();
 
   let detailTab = $state<"transcript" | "info">("transcript");
+  const providerOptions = $derived(transcriptionProviderOptions(providers));
 
   const title = $derived(selectedAudio?.name.replace(/\.[^.]+$/, "") ?? "会議を選択");
   const recordedAt = $derived(
@@ -59,6 +73,10 @@
     if (progress?.stage === "transcribing" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     return "文字起こし中…";
   });
+
+  function selectProvider(value: string) {
+    if (isTranscriptionProviderId(value)) onProviderChange(value);
+  }
 </script>
 
 <section class="meeting-workspace">
@@ -76,6 +94,16 @@
           </div>
         </div>
         <div class="header-actions">
+          <div class="model-picker">
+            <span>文字起こしモデル</span>
+            <Select
+              value={provider}
+              options={providerOptions}
+              onValueChange={selectProvider}
+              disabled={transcribing || providers.length === 0}
+              ariaLabel="文字起こしモデル"
+            />
+          </div>
           {#if recording}
             <Button size="sm" variant="ghost" type="button" icon={FolderOpen} onclick={() => onReveal(recording)}>場所を開く</Button>
           {/if}
@@ -150,8 +178,10 @@
   .meeting-meta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 9px; color: var(--muted-foreground); font-size: 0.79rem; }
   .meeting-meta span { display: flex; align-items: center; gap: 5px; }
   .meeting-meta :global(svg) { width: 14px; height: 14px; }
-  .header-actions { display: flex; flex: none; gap: 6px; }
+  .header-actions { display: flex; flex: none; align-items: flex-end; gap: 6px; }
   .header-actions > span { display: contents; }
+  .model-picker { display: grid; width: 210px; gap: 4px; }
+  .model-picker > span { color: var(--muted-foreground); font-size: 0.68rem; font-weight: 650; }
   .provider-line { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 15px; color: var(--muted-foreground); font-size: 0.75rem; }
   .provider-line > span { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted-foreground); }
   .provider-line > span.ready { background: var(--primary); }
@@ -192,7 +222,8 @@
     .workspace-header { padding: 20px 18px 14px; }
     .title-row { flex-wrap: wrap; }
     .meeting-title { flex-basis: calc(100% - 44px); }
-    .header-actions { width: 100%; justify-content: flex-end; }
+    .header-actions { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+    .model-picker { width: min(100%, 240px); margin-right: auto; }
     .audio-summary, .detail-tabs { margin-right: 18px; margin-left: 18px; }
     .detail-content { padding-right: 18px; padding-left: 18px; }
   }

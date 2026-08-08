@@ -94,8 +94,8 @@ export function transcriptionProviderOptions(
 ) {
   return providers.map((provider) => ({
     value: provider.id,
-    label: provider.label,
-    description: provider.modelLabel
+    label: provider.modelLabel,
+    description: `${provider.label} · ${provider.kind === "local" ? "端末内で処理" : "クラウドで処理"}`
   }));
 }
 

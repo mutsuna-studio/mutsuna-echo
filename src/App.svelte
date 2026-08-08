@@ -19,6 +19,7 @@
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
     getTranscriptionProvider,
+    isTranscriptionProviderId,
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId
   } from "./lib/providers";
@@ -34,7 +35,17 @@
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
+  const TRANSCRIPTION_PROVIDER_STORAGE_KEY = "mutsuna-echo.transcription-provider";
   type AppSection = "meetings" | "new" | "settings";
+
+  function savedTranscriptionProvider(): TranscriptionProviderId {
+    try {
+      const saved = localStorage.getItem(TRANSCRIPTION_PROVIDER_STORAGE_KEY);
+      return saved && isTranscriptionProviderId(saved) ? saved : "elevenlabs";
+    } catch {
+      return "elevenlabs";
+    }
+  }
 
   let loading = $state(true);
   let section = $state<AppSection>("meetings");
@@ -50,7 +61,7 @@
   let usageLoading = $state(false);
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
-  let transcriptionProvider = $state<TranscriptionProviderId>("elevenlabs");
+  let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>([]);
   // Transcriptは読み取り専用の大きな値なので、深いProxy化を避ける。
   let transcript = $state.raw<Transcript | null>(null);
@@ -458,6 +469,11 @@
 
   async function changeTranscriptionProvider(provider: TranscriptionProviderId) {
     transcriptionProvider = provider;
+    try {
+      localStorage.setItem(TRANSCRIPTION_PROVIDER_STORAGE_KEY, provider);
+    } catch {
+      // 選択はこのセッションでは維持できるため、ストレージ利用不可は無視する。
+    }
     transcript = null;
     if (selectedAudio) await restoreSelectedTranscript(provider);
   }
@@ -515,7 +531,9 @@
           {selectedAudio}
           recording={selectedRecording}
           {transcript}
-          providerLabel={currentProvider ? `${currentProvider.label} · ${currentProvider.modelLabel}` : "プロバイダーを確認中"}
+          providers={transcriptionProviders}
+          provider={transcriptionProvider}
+          providerLabel={currentProvider?.label ?? "プロバイダーを確認中"}
           providerStatus={currentProvider?.statusMessage ?? "文字起こしプロバイダーを確認しています。"}
           {transcribing}
           progress={transcriptionProgress}
@@ -523,6 +541,7 @@
           {libraryOpen}
           onOpenLibrary={() => libraryOpen = true}
           onTranscribe={transcribeAudio}
+          onProviderChange={changeTranscriptionProvider}
           onReveal={revealRecording}
           onCreate={() => section = "new"}
           onOpenSettings={() => section = "settings"}

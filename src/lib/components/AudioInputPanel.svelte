@@ -151,14 +151,14 @@
     </div>
     <div class="provider-grid">
       <div class="provider-field">
-        <Label for="transcription-provider">プロバイダー</Label>
+        <Label for="transcription-provider">文字起こしモデル</Label>
         <Select
           id="transcription-provider"
           value={provider}
           options={providerOptions}
           onValueChange={selectProvider}
           disabled={busy}
-          ariaLabel="文字起こしプロバイダー"
+          ariaLabel="文字起こしモデル"
         />
       </div>
       <div class="provider-summary">
