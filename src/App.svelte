@@ -24,7 +24,7 @@
     type TranscriptionProviderId
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
-  import type { RecordedAudioSummary } from "./lib/types/recording";
+  import type { RecentMeetingSummary } from "./lib/types/recording";
   import type {
     SelectedAudioFile,
     Transcript,
@@ -50,8 +50,8 @@
   let loading = $state(true);
   let section = $state<AppSection>("meetings");
   let libraryOpen = $state(true);
-  let recordings = $state.raw<RecordedAudioSummary[]>([]);
-  let recordingsLoading = $state(false);
+  let meetings = $state.raw<RecentMeetingSummary[]>([]);
+  let meetingsLoading = $state(false);
   let meetingBusy = $state(false);
   let saving = $state(false);
   let deleting = $state(false);
@@ -86,8 +86,8 @@
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
-  const selectedRecording = $derived(
-    recordings.find((recording) => recording.meetingId === selectedAudio?.meetingId) ?? null
+  const selectedMeeting = $derived(
+    meetings.find((meeting) => meeting.meetingId === selectedAudio?.meetingId) ?? null
   );
 
   $effect(() => {
@@ -128,42 +128,41 @@
     );
   }
 
-  async function refreshRecordings() {
-    if (recordingsLoading) return;
-    recordingsLoading = true;
+  async function refreshMeetings() {
+    if (meetingsLoading) return;
+    meetingsLoading = true;
     try {
-      recordings = await invoke<RecordedAudioSummary[]>("list_recorded_audio");
+      meetings = await invoke<RecentMeetingSummary[]>("list_recent_meetings");
     } catch (error) {
       showError(errorText(error));
     } finally {
-      recordingsLoading = false;
+      meetingsLoading = false;
     }
   }
 
-  async function selectRecording(recording: RecordedAudioSummary) {
+  async function selectMeeting(meeting: RecentMeetingSummary) {
     if (meetingBusy) return;
     meetingBusy = true;
     try {
-      selectedAudio = await invoke<SelectedAudioFile>("select_recorded_audio", {
-        recordingId: recording.id,
-        meetingId: recording.meetingId
+      selectedAudio = await invoke<SelectedAudioFile>("select_meeting_audio", {
+        meetingId: meeting.meetingId
       });
       await restoreSelectedTranscript();
       section = "meetings";
     } catch (error) {
       showError(errorText(error));
-      await refreshRecordings();
+      await refreshMeetings();
     } finally {
       meetingBusy = false;
     }
   }
 
-  async function revealRecording(recording: RecordedAudioSummary) {
+  async function revealMeeting(meeting: RecentMeetingSummary) {
     try {
-      await invoke("reveal_recorded_audio", { recordingId: recording.id });
+      await invoke("reveal_meeting_audio", { meetingId: meeting.meetingId });
     } catch (error) {
       showError(errorText(error));
-      await refreshRecordings();
+      await refreshMeetings();
     }
   }
 
@@ -277,20 +276,20 @@
             if (!cancelled) transcriptionProgress = payload;
           })
         ]);
-        const [nextProviders, session, pendingResult, nextRecordings] = await Promise.all([
+        const [nextProviders, session, pendingResult, nextMeetings] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
             .catch((error) => ({ action: null, error: errorText(error) })),
-          invoke<RecordedAudioSummary[]>("list_recorded_audio").catch((error) => {
+          invoke<RecentMeetingSummary[]>("list_recent_meetings").catch((error) => {
             showError(errorText(error));
             return [];
           })
         ]);
         if (cancelled) return;
         transcriptionProviders = nextProviders;
-        recordings = nextRecordings;
+        meetings = nextMeetings;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
         transcriptionProgress = session.progress;
@@ -334,7 +333,7 @@
         transcribing = false;
         if (selectedAudio) {
           await restoreSelectedTranscript();
-          await refreshRecordings();
+          await refreshMeetings();
         }
         await refreshUsage();
       } catch (error) {
@@ -421,7 +420,7 @@
       if (result.persistenceWarning) {
         showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
       }
-      await refreshRecordings();
+      await refreshMeetings();
       await refreshUsage();
       section = "meetings";
     } catch (error) {
@@ -448,7 +447,7 @@
   async function handleRecordedAudio(audio: SelectedAudioFile) {
     selectedAudio = audio;
     await restoreSelectedTranscript();
-    await refreshRecordings();
+    await refreshMeetings();
   }
 
   async function restoreSelectedTranscript(
@@ -505,12 +504,12 @@
 
     {#if section === "meetings" && libraryOpen}
       <MeetingLibrary
-        {recordings}
+        {meetings}
         selectedMeetingId={selectedAudio?.meetingId ?? null}
-        loading={recordingsLoading}
+        loading={meetingsLoading}
         busy={meetingBusy || busy}
-        onSelect={selectRecording}
-        onRefresh={refreshRecordings}
+        onSelect={selectMeeting}
+        onRefresh={refreshMeetings}
         onClose={() => libraryOpen = false}
       />
     {/if}
@@ -529,7 +528,7 @@
       {#if section === "meetings"}
         <MeetingWorkspace
           {selectedAudio}
-          recording={selectedRecording}
+          meeting={selectedMeeting}
           {transcript}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
@@ -542,7 +541,7 @@
           onOpenLibrary={() => libraryOpen = true}
           onTranscribe={transcribeAudio}
           onProviderChange={changeTranscriptionProvider}
-          onReveal={revealRecording}
+          onReveal={revealMeeting}
           onCreate={() => section = "new"}
           onOpenSettings={() => section = "settings"}
         />

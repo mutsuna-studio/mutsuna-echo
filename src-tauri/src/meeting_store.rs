@@ -46,6 +46,16 @@ struct LocalMeetingState {
     last_seen_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct StoredMeetingSummary {
+    pub(crate) meeting_id: String,
+    pub(crate) title: String,
+    pub(crate) file_name: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) updated_at_unix_ms: u64,
+    pub(crate) audio_available: bool,
+}
+
 pub(crate) fn resolve_or_create(app: &AppHandle, audio_path: &Path) -> Result<String, String> {
     let _guard = STORE_LOCK
         .lock()
@@ -153,6 +163,25 @@ pub(crate) fn local_audio_path(app: &AppHandle, meeting_id: &str) -> Result<Path
         return Err("Meetingの音声ファイルが変更されています。音声を選び直してください。".into());
     }
     Ok(canonical)
+}
+
+pub(crate) fn list_stored_meetings(app: &AppHandle) -> Result<Vec<StoredMeetingSummary>, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meeting一覧の確認を開始できませんでした。".to_string())?;
+    list_stored_meetings_in(&meetings_directory(app)?, &local_meetings_directory(app)?)
+}
+
+pub(crate) fn mark_updated(app: &AppHandle, meeting_id: &str) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの更新処理を開始できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let mut document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    document.updated_at = chrono::Utc::now().to_rfc3339();
+    write_json_atomic(&path, &document)
 }
 
 pub(crate) fn meetings_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -310,6 +339,52 @@ fn meeting_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+fn list_stored_meetings_in(
+    root: &Path,
+    local_root: &Path,
+) -> Result<Vec<StoredMeetingSummary>, String> {
+    let mut meetings = Vec::new();
+    for directory in meeting_directories(root)? {
+        let document_path = directory.join(MEETING_FILE);
+        let Ok(document) = read_json::<MeetingDocument>(&document_path) else {
+            continue;
+        };
+        if validate_document(&document).is_err() {
+            continue;
+        }
+        let local =
+            read_json::<LocalMeetingState>(&local_root.join(format!("{}.json", document.id)))
+                .ok()
+                .filter(|state| {
+                    state.schema_version == SCHEMA_VERSION && state.meeting_id == document.id
+                });
+        let audio_available = local.as_ref().is_some_and(|state| {
+            fs::metadata(&state.audio_path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.len() == state.size_bytes
+                    && modified_at_unix_ms(&metadata) == state.modified_at_unix_ms
+            })
+        });
+        meetings.push(StoredMeetingSummary {
+            meeting_id: document.id,
+            title: document.title,
+            file_name: document.audio.file_name,
+            size_bytes: document.audio.size_bytes,
+            updated_at_unix_ms: rfc3339_unix_ms(&document.updated_at),
+            audio_available,
+        });
+    }
+    meetings.sort_by_key(|meeting| std::cmp::Reverse(meeting.updated_at_unix_ms));
+    Ok(meetings)
+}
+
+fn rfc3339_unix_ms(value: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|timestamp| timestamp.timestamp_millis().try_into().ok())
+        .unwrap_or(0)
+}
+
 fn validate_document(document: &MeetingDocument) -> Result<(), String> {
     if document.schema_version != SCHEMA_VERSION {
         return Err("保存済みMeetingの形式に対応していません。".into());
@@ -412,8 +487,8 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::{
-        meeting_directory_in, read_json, resolve_or_create_in, validate_meeting_id,
-        LocalMeetingState,
+        list_stored_meetings_in, meeting_directory_in, read_json, resolve_or_create_in,
+        validate_meeting_id, LocalMeetingState,
     };
 
     #[test]
@@ -457,6 +532,34 @@ mod tests {
             local_state.audio_path,
             std::fs::canonicalize(&renamed).expect("canonical renamed path")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lists_stored_meetings_with_local_audio_availability() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-meeting-list-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let audio_root = root.join("audio");
+        let meetings = root.join("meetings");
+        let local = root.join("local").join("meetings");
+        std::fs::create_dir_all(&audio_root).expect("create fixture");
+        let audio = audio_root.join("imported.wav");
+        std::fs::write(&audio, b"audio bytes").expect("write fixture");
+        let meeting_id =
+            resolve_or_create_in(&meetings, &local, &audio).expect("create imported meeting");
+
+        let listed = list_stored_meetings_in(&meetings, &local).expect("list meetings");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].meeting_id, meeting_id);
+        assert_eq!(listed[0].file_name, "imported.wav");
+        assert!(listed[0].audio_available);
+
+        std::fs::remove_file(&audio).expect("remove linked audio");
+        let missing = list_stored_meetings_in(&meetings, &local).expect("list missing audio");
+        assert!(!missing[0].audio_available);
         let _ = std::fs::remove_dir_all(root);
     }
 }

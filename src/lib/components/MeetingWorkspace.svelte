@@ -14,13 +14,13 @@
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId
   } from "../providers";
-  import type { RecordedAudioSummary } from "../types/recording";
+  import type { RecentMeetingSummary } from "../types/recording";
   import type { SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
   import TranscriptView from "./TranscriptView.svelte";
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
-    recording: RecordedAudioSummary | null;
+    meeting: RecentMeetingSummary | null;
     transcript: Transcript | null;
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
@@ -33,14 +33,14 @@
     onOpenLibrary: () => void;
     onTranscribe: () => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
-    onReveal: (recording: RecordedAudioSummary) => void;
+    onReveal: (meeting: RecentMeetingSummary) => void;
     onCreate: () => void;
     onOpenSettings: () => void;
   };
 
   let {
     selectedAudio,
-    recording,
+    meeting,
     transcript,
     providers,
     provider,
@@ -63,8 +63,10 @@
 
   const title = $derived(selectedAudio?.name.replace(/\.[^.]+$/, "") ?? "会議を選択");
   const recordedAt = $derived(
-    recording
-      ? new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(recording.recordedAtUnixMs)
+    meeting
+      ? new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(
+          meeting.source === "recording" ? meeting.occurredAtUnixMs : meeting.updatedAtUnixMs
+        )
       : null
   );
   const transcriptionLabel = $derived.by(() => {
@@ -94,8 +96,8 @@
           </div>
         </div>
         <div class="header-actions">
-          {#if recording}
-            <Button size="sm" variant="ghost" type="button" icon={FolderOpen} onclick={() => onReveal(recording)}>場所を開く</Button>
+          {#if meeting?.audioAvailable}
+            <Button size="sm" variant="ghost" type="button" icon={FolderOpen} onclick={() => onReveal(meeting)}>場所を開く</Button>
           {/if}
         </div>
       </div>
@@ -152,7 +154,7 @@
       {:else}
         <dl class="meeting-info">
           <div><dt>ファイル名</dt><dd>{selectedAudio.name}</dd></div>
-          <div><dt>録音日時</dt><dd>{recordedAt ?? "読み込んだ音声"}</dd></div>
+          <div><dt>{meeting?.source === "recording" ? "録音日時" : "更新日時"}</dt><dd>{recordedAt ?? "読み込んだ音声"}</dd></div>
           <div><dt>長さ</dt><dd>{formatTimestamp(selectedAudio.durationMs)}</dd></div>
           <div><dt>ファイルサイズ</dt><dd>{formatFileSize(selectedAudio.sizeBytes)}</dd></div>
           <div><dt>Meeting ID</dt><dd class="meeting-id">{selectedAudio.meetingId}</dd></div>

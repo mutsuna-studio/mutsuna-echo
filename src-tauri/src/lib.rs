@@ -56,8 +56,11 @@ pub fn run() {
             commands::recording::cancel_recording,
             commands::recording::list_recoverable_recordings,
             commands::recording::list_recorded_audio,
+            commands::recording::list_recent_meetings,
             commands::recording::select_recorded_audio,
+            commands::recording::select_meeting_audio,
             commands::recording::reveal_recorded_audio,
+            commands::recording::reveal_meeting_audio,
             commands::recording::recover_recording,
             commands::recording::discard_recording,
             #[cfg(desktop)]

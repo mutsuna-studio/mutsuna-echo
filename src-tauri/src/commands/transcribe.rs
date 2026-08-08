@@ -582,7 +582,12 @@ pub(crate) async fn transcribe_selected_audio(
     )
     .await?;
     let persistence_warning =
-        crate::transcript_store::save(&app, &selected.descriptor.meeting_id, &transcript).err();
+        match crate::transcript_store::save(&app, &selected.descriptor.meeting_id, &transcript) {
+            Ok(()) => {
+                crate::meeting_store::mark_updated(&app, &selected.descriptor.meeting_id).err()
+            }
+            Err(error) => Some(error),
+        };
     Ok(TranscriptionResult {
         transcript,
         persistence_warning,

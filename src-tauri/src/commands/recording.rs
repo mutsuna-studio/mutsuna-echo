@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -20,6 +22,27 @@ use crate::{
 pub(crate) struct StopRecordingResult {
     status: RecordingStatus,
     audio: Option<SelectedAudioFile>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum MeetingAudioSource {
+    Recording,
+    Imported,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecentMeetingSummary {
+    meeting_id: String,
+    title: String,
+    file_name: String,
+    size_bytes: u64,
+    occurred_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+    audio_available: bool,
+    source: MeetingAudioSource,
+    transcript_providers: Vec<String>,
 }
 
 #[tauri::command]
@@ -180,6 +203,92 @@ pub(crate) async fn list_recorded_audio(
             .await
             .map_err(|error| format!("録音履歴のMeeting情報を準備できませんでした: {error}"))?
     }
+}
+
+#[tauri::command]
+pub(crate) async fn list_recent_meetings(
+    app: AppHandle,
+) -> Result<Vec<RecentMeetingSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_recent_meetings_sync(&app))
+        .await
+        .map_err(|error| format!("Meeting一覧の準備を完了できませんでした: {error}"))?
+}
+
+fn list_recent_meetings_sync(app: &AppHandle) -> Result<Vec<RecentMeetingSummary>, String> {
+    let transcript_index =
+        crate::transcript_store::TranscriptIndex::load(app).unwrap_or_else(|error| {
+            eprintln!("Could not index stored transcripts: {error}");
+            crate::transcript_store::TranscriptIndex::default()
+        });
+    let mut recordings_by_meeting = HashMap::new();
+
+    #[cfg(target_os = "android")]
+    for recording in recording::completed_recordings(app)? {
+        if !recording.meeting_id.is_empty() {
+            recordings_by_meeting.insert(recording.meeting_id.clone(), recording);
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    for (mut recording, path) in recording::completed_recordings_with_paths(app)? {
+        let meeting_id = crate::meeting_store::resolve_or_create(app, &path)?;
+        recording.meeting_id = meeting_id.clone();
+        recordings_by_meeting.insert(meeting_id, recording);
+    }
+
+    let mut meetings = Vec::new();
+    for stored in crate::meeting_store::list_stored_meetings(app)? {
+        let recording = recordings_by_meeting.remove(&stored.meeting_id);
+        let legacy_audio_path = recording
+            .as_ref()
+            .and_then(|_| crate::meeting_store::local_audio_path(app, &stored.meeting_id).ok());
+        let transcript_providers = transcript_index
+            .providers_for_meeting(&stored.meeting_id, legacy_audio_path.as_deref());
+        if recording.is_none() && transcript_providers.is_empty() {
+            continue;
+        }
+        let occurred_at_unix_ms = recording
+            .as_ref()
+            .map_or(stored.updated_at_unix_ms, |item| item.recorded_at_unix_ms);
+        meetings.push(RecentMeetingSummary {
+            meeting_id: stored.meeting_id,
+            title: stored.title,
+            file_name: stored.file_name,
+            size_bytes: stored.size_bytes,
+            occurred_at_unix_ms,
+            updated_at_unix_ms: stored.updated_at_unix_ms.max(occurred_at_unix_ms),
+            audio_available: stored.audio_available,
+            source: if recording.is_some() {
+                MeetingAudioSource::Recording
+            } else {
+                MeetingAudioSource::Imported
+            },
+            transcript_providers,
+        });
+    }
+    meetings.sort_by_key(|meeting| std::cmp::Reverse(meeting.occurred_at_unix_ms));
+    meetings.truncate(200);
+    Ok(meetings)
+}
+
+#[tauri::command]
+pub(crate) fn select_meeting_audio(
+    app: AppHandle,
+    meeting_id: String,
+) -> Result<SelectedAudioFile, String> {
+    crate::commands::transcribe::restore_selected_meeting(&app, &meeting_id)
+}
+
+#[tauri::command]
+pub(crate) fn reveal_meeting_audio(app: AppHandle, meeting_id: String) -> Result<(), String> {
+    let path = crate::meeting_store::local_audio_path(&app, &meeting_id)?;
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| {
+        if matches!(error, tauri_plugin_opener::Error::UnsupportedPlatform) {
+            "このOSでは音声ファイルの保存場所を開けません。".to_string()
+        } else {
+            format!("音声ファイルの保存場所を開けませんでした: {error}")
+        }
+    })
 }
 
 #[cfg(not(target_os = "android"))]

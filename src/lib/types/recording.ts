@@ -58,6 +58,18 @@ export interface RecordedAudioSummary {
   transcriptProviders: string[];
 }
 
+export interface RecentMeetingSummary {
+  meetingId: string;
+  title: string;
+  fileName: string;
+  sizeBytes: number;
+  occurredAtUnixMs: number;
+  updatedAtUnixMs: number;
+  audioAvailable: boolean;
+  source: "recording" | "imported";
+  transcriptProviders: string[];
+}
+
 export interface StopRecordingResult {
   status: RecordingStatus;
   audio: SelectedAudioFile | null;
