@@ -10,7 +10,6 @@
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Mic from "@lucide/svelte/icons/mic";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
-  import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import Square from "@lucide/svelte/icons/square";
   import Video from "@lucide/svelte/icons/video";
   import X from "@lucide/svelte/icons/x";
@@ -27,7 +26,7 @@
   import type { RecordingStatus, StopRecordingResult } from "../types/recording";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
-  const promptSize = { width: 360, height: 176 };
+  const promptSize = { width: 400, height: 60 };
   const controllerSize = { width: 310, height: 158 };
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
@@ -415,35 +414,34 @@
       </section>
     {:else if shownDetection}
       <section class="meeting-prompt" aria-label="会議検出">
-        <div class="prompt-topline">
-          <div class="brand-lockup">
-            <span class="brand-mark"><AudioWaveform aria-hidden="true" /></span>
-            <div><strong>Mutsuna Echo</strong><small>会議を検出</small></div>
-          </div>
-          <div class="prompt-badges">
-            <Badge variant="secondary">{shownDetection.providerLabel}</Badge>
-            {#if isPreview}<Badge variant="secondary">{previewRuntime?.badgeLabel}</Badge>{/if}
+        <div class="prompt-row">
+          {#if error}
+            <p class="detection-error" role="alert" title={error}>{error}</p>
+          {:else}
+            <div class="detection-context">
+              <Video aria-hidden="true" />
+              <strong>会議を検出</strong>
+            </div>
+            <div class="detection-badges">
+              <Badge variant="secondary">{shownDetection.providerLabel}</Badge>
+              {#if isPreview}<Badge variant="secondary">{previewRuntime?.badgeLabel}</Badge>{/if}
+            </div>
+          {/if}
+          <div class="detection-actions">
+            <Button
+              size="sm"
+              type="button"
+              icon={Mic}
+              title="参加者の同意を確認してから、手動で録音を開始します。"
+              aria-label="参加者の同意を確認して、録音を開始"
+              onclick={startRecording}
+              loading={starting}
+              disabled={loading}
+            >
+              {starting ? "準備中…" : "録音を開始"}
+            </Button>
             <Button type="button" size="icon-sm" variant="ghost" icon={X} aria-label="今は録音しない" onclick={dismiss} />
           </div>
-        </div>
-
-        <div class="meeting-copy">
-          <Video aria-hidden="true" />
-          <div>
-            <h1>この会議を録音しますか？</h1>
-            <p class="meeting-title" title={shownDetection.windowTitle}>{shownDetection.windowTitle}</p>
-          </div>
-        </div>
-
-        <div class="prompt-footer">
-          {#if error}
-            <p class="meeting-error" role="alert">{error}</p>
-          {:else}
-            <p class="meeting-consent"><ShieldCheck aria-hidden="true" />同意を確認して手動で開始</p>
-          {/if}
-          <Button size="sm" type="button" icon={Mic} onclick={startRecording} loading={starting} disabled={loading}>
-            {starting ? "準備中…" : "録音を開始"}
-          </Button>
         </div>
       </section>
     {:else if loading}
@@ -506,10 +504,9 @@
     z-index: 1;
   }
 
-  .meeting-prompt { display: grid; gap: 8px; }
+  .meeting-prompt { height: 100%; }
 
-  .prompt-topline,
-  .prompt-footer,
+  .prompt-row,
   .recording-summary,
   .controller-footer {
     display: flex;
@@ -518,85 +515,29 @@
     gap: 10px;
   }
 
-  .brand-lockup,
-  .brand-lockup > div,
-  .meeting-copy,
+  .detection-context,
+  .detection-badges,
+  .detection-actions,
   .phase-state,
   .audio-source,
   .overlay-vad,
-  .meeting-consent,
   .meeting-loading {
     display: flex;
     align-items: center;
   }
 
-  .brand-lockup { gap: 8px; }
-
-  .brand-lockup > div {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .brand-lockup strong { font-size: 0.76rem; letter-spacing: -0.01em; }
-  .brand-lockup small { color: var(--muted-foreground); font-size: 0.66rem; white-space: nowrap; }
-
-  .brand-mark {
-    display: grid;
-    width: 28px;
-    height: 28px;
-    place-items: center;
-    border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
-    border-radius: 10px;
-    color: var(--primary);
-    background: color-mix(in oklch, var(--primary) 10%, var(--background));
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 55%, transparent);
-  }
-
-  .brand-mark :global(svg) { width: 16px; height: 16px; }
-  .prompt-badges { display: flex; align-items: center; gap: 5px; }
-
-  .meeting-copy {
+  .prompt-row {
+    height: 100%;
     min-width: 0;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    border: 1px solid color-mix(in oklch, var(--border) 75%, transparent);
-    border-radius: 11px;
-    background: color-mix(in oklch, var(--background) 62%, transparent);
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 38%, transparent);
+    gap: 7px;
   }
 
-  .meeting-copy > :global(svg) { width: 16px; height: 16px; flex: none; margin-top: 1px; color: var(--primary); }
-  .meeting-copy > div { min-width: 0; }
-
-  h1 {
-    margin: 0 0 3px;
-    font-size: 0.88rem;
-    line-height: 1.25;
-    letter-spacing: -0.025em;
-  }
-
-  .meeting-title {
-    margin: 0;
-    overflow: hidden;
-    color: var(--muted-foreground);
-    font-size: 0.68rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .meeting-consent {
-    min-width: 0;
-    gap: 6px;
-    margin: -2px 0 0;
-    color: var(--muted-foreground);
-    font-size: 0.64rem;
-    line-height: 1.4;
-  }
-
-  .meeting-consent :global(svg) { width: 13px; height: 13px; flex: none; color: var(--primary); }
-  .meeting-error {
+  .detection-context { flex: none; gap: 6px; }
+  .detection-context > :global(svg) { width: 15px; height: 15px; color: var(--primary); }
+  .detection-context strong { font-size: 0.72rem; white-space: nowrap; }
+  .detection-badges { min-width: 0; flex: 1; gap: 5px; }
+  .detection-actions { flex: none; gap: 3px; }
+  .detection-error {
     min-width: 0;
     flex: 1;
     margin: 0;
@@ -606,7 +547,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .prompt-footer > :global(button) { flex: none; }
 
   .recording-controller { display: grid; min-width: 0; gap: 11px; }
   .phase-state { gap: 6px; color: var(--destructive); }
@@ -684,7 +624,7 @@
   .overlay-vad :global(svg) { width: 13px; height: 13px; flex: none; }
   .recording-result { color: var(--primary); }
   .compact-error { color: var(--destructive); }
-  .meeting-loading { justify-content: center; gap: 8px; min-height: calc(100vh - 36px); color: var(--muted-foreground); font-size: 0.76rem; }
+  .meeting-loading { justify-content: center; gap: 8px; min-height: calc(100vh - 28px); color: var(--muted-foreground); font-size: 0.76rem; }
   .meeting-loading :global(svg) { width: 16px; height: 16px; }
 
   :global(.spin) { animation: spin 900ms linear infinite; }

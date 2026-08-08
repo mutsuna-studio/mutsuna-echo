@@ -303,8 +303,8 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Ok(());
     }
 
-    let width = 360.0;
-    let height = 176.0;
+    let width = 400.0;
+    let height = 60.0;
     // メイン画面の設定を複製すると、開発時はdevUrl、本番時はfrontendDistが
     // Tauriによって同じように解決される。
     let mut config = app
@@ -320,9 +320,10 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.width = width;
     config.height = height;
     config.min_width = Some(300.0);
-    config.min_height = Some(128.0);
+    config.min_height = Some(height);
     config.max_width = Some(width);
-    config.max_height = Some(height);
+    // The recording controller switches to 310 x 158 in the same window.
+    config.max_height = Some(158.0);
     config.resizable = false;
     config.maximizable = false;
     config.minimizable = false;
