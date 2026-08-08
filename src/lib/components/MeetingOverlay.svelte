@@ -531,7 +531,7 @@
               {isPreview ? "閉じる" : handoffBusy ? "準備中…" : "文字起こしへ"}
             </Button>
           {:else if status?.phase === "failed"}
-            <Button size="sm" variant="outline" type="button" onclick={isPreview ? closePreview : closeOverlay}>閉じる</Button>
+            <Button class="overlay-error-close-button" size="sm" variant="ghost" type="button" onclick={isPreview ? closePreview : closeOverlay}>閉じる</Button>
           {:else}
             {#if status?.phase !== "finalizing"}
               <Button
@@ -886,6 +886,14 @@
   .controller-action :global(.minimize-controller-button:hover) {
     color: rgb(255 255 255);
     background: rgb(255 255 255 / 10%);
+  }
+  .controller-action :global(.overlay-error-close-button) {
+    color: rgb(209 218 213 / 76%);
+    background: rgb(255 255 255 / 6%);
+  }
+  .controller-action :global(.overlay-error-close-button:hover) {
+    color: rgb(242 247 244);
+    background: rgb(255 255 255 / 11%);
   }
 
   .recording-result,
