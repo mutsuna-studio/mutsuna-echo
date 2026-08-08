@@ -13,7 +13,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::transcription::{Transcript, TranscriptionProvider};
 
-const SCHEMA_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = 3;
+const PREVIOUS_SCHEMA_VERSION: u8 = 2;
 const MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -280,7 +281,11 @@ fn load_current_in(
         return Ok(None);
     };
     let stored = read_stored_transcript(&path)?;
-    if stored.schema_version != SCHEMA_VERSION || stored.meeting_id.as_deref() != Some(meeting_id) {
+    if !matches!(
+        stored.schema_version,
+        SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION
+    ) || stored.meeting_id.as_deref() != Some(meeting_id)
+    {
         return Err("保存済みの文字起こし形式またはMeeting IDが一致しません。".into());
     }
     validate_stored_provider(&stored, provider)?;
@@ -350,13 +355,26 @@ mod tests {
     use std::fs;
 
     use super::{audio_key, load_current_in, load_legacy_in, save_in, transcript_path_in};
-    use crate::transcription::{Transcript, TranscriptSegment, TranscriptionProvider};
+    use crate::transcription::{
+        TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+        TranscriptionProvider,
+    };
 
     fn fixture_transcript() -> Transcript {
         Transcript {
             provider: "elevenlabs".into(),
             model: "scribe_v2".into(),
             language: "ja".into(),
+            tokens: vec![TranscriptToken {
+                text: "テストです。".into(),
+                start_ms: Some(100),
+                end_ms: Some(500),
+                start_time_source: Some(TokenTimeSource::Provider),
+                end_time_source: Some(TokenTimeSource::Provider),
+                speaker: Some("Speaker 1".into()),
+                speaker_source: Some(TokenSpeakerSource::Provider),
+                confidence: None,
+            }],
             segments: vec![TranscriptSegment {
                 speaker: "Speaker 1".into(),
                 start_ms: 100,
@@ -398,6 +416,45 @@ mod tests {
         let elevenlabs = transcript_path_in(root, &meeting_id, "elevenlabs").expect("path");
         let assemblyai = transcript_path_in(root, &meeting_id, "assemblyai").expect("path");
         assert_ne!(elevenlabs, assemblyai);
+    }
+
+    #[test]
+    fn schema_v2_without_tokens_remains_readable() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-transcript-v2-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let meeting_id = uuid::Uuid::now_v7().to_string();
+        let directory = root.join("transcripts");
+        fs::create_dir_all(&directory).expect("create store");
+        let stored = serde_json::json!({
+            "schemaVersion": 2,
+            "meetingId": meeting_id,
+            "savedAt": "2026-08-08T00:00:00Z",
+            "transcript": {
+                "provider": "elevenlabs",
+                "model": "scribe_v2",
+                "language": "ja",
+                "segments": [{
+                    "speaker": "Speaker 1",
+                    "startMs": 100,
+                    "endMs": 500,
+                    "text": "旧データ"
+                }]
+            }
+        });
+        fs::write(
+            directory.join("elevenlabs.json"),
+            serde_json::to_vec(&stored).expect("serialize transcript"),
+        )
+        .expect("write transcript");
+        let loaded = load_current_in(&directory, &meeting_id, TranscriptionProvider::ElevenLabs)
+            .expect("load v2 transcript")
+            .expect("stored transcript");
+        assert!(loaded.tokens.is_empty());
+        assert_eq!(loaded.segments[0].text, "旧データ");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

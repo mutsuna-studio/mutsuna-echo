@@ -5,10 +5,25 @@ export type TranscriptSegment = {
   text: string;
 };
 
+export type TokenSpeakerSource = "provider" | "diarization" | "channel" | "user";
+export type TokenTimeSource = "provider" | "alignment" | "inferred" | "user";
+
+export type TranscriptToken = {
+  text: string;
+  startMs: number | null;
+  endMs: number | null;
+  startTimeSource: TokenTimeSource | null;
+  endTimeSource: TokenTimeSource | null;
+  speaker: string | null;
+  speakerSource: TokenSpeakerSource | null;
+  confidence: number | null;
+};
+
 export type Transcript = {
   provider: string;
   model: string;
   language: string;
+  tokens: TranscriptToken[];
   segments: TranscriptSegment[];
 };
 

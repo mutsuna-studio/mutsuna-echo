@@ -9,7 +9,11 @@ use std::path::Path;
 
 use tauri::AppHandle;
 
-pub use types::{Transcript, TranscriptSegment, TranscriptionProvider};
+pub(crate) use types::segments_from_tokens;
+pub use types::{
+    TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+    TranscriptionProvider,
+};
 
 pub(crate) async fn transcribe(
     app: &AppHandle,

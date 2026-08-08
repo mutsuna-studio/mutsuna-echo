@@ -1,12 +1,18 @@
 use std::{fs::File, path::Path};
 
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
+use sherpa_onnx::{
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult,
+    OfflineTransducerModelConfig,
+};
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
     formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
 
-use super::{local_models, Transcript, TranscriptSegment};
+use super::{
+    local_models, segments_from_tokens, TokenTimeSource, Transcript, TranscriptSegment,
+    TranscriptToken,
+};
 
 const ENCODER: &str = "encoder-epoch-99-avg-1.int8.onnx";
 const DECODER: &str = "decoder-epoch-99-avg-1.onnx";
@@ -42,27 +48,77 @@ pub(crate) fn transcribe(
     let result = stream
         .get_result()
         .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
-    let text = result.text.trim().to_string();
-    let segments = if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![TranscriptSegment {
-            speaker: "Speaker 1".into(),
-            start_ms: result
-                .timestamps
-                .as_ref()
-                .and_then(|values| values.first())
-                .map_or(0, |value| seconds_to_ms(*value)),
-            end_ms: duration_ms,
-            text,
-        }]
-    };
+    let (tokens, segments) = normalize_result(&result, duration_ms);
     Ok(Transcript {
         provider: "local".into(),
         model: local_models::REAZONSPEECH_MODEL_ID.into(),
         language: "ja".into(),
+        tokens,
         segments,
     })
+}
+
+fn normalize_result(
+    result: &OfflineRecognizerResult,
+    audio_duration_ms: u64,
+) -> (Vec<TranscriptToken>, Vec<TranscriptSegment>) {
+    let timestamps = result.timestamps.as_deref().unwrap_or_default();
+    let durations = result.durations.as_deref().unwrap_or_default();
+    let tokens: Vec<_> = result
+        .tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            let text = text.replace('▁', " ");
+            if text.is_empty() {
+                return None;
+            }
+            let start_ms = timestamps
+                .get(index)
+                .and_then(|value| valid_seconds_to_ms(*value))
+                .map(|value| value.min(audio_duration_ms));
+            let duration_ms = durations
+                .get(index)
+                .and_then(|value| valid_seconds_to_ms(*value));
+            let next_start_ms = timestamps
+                .get(index + 1)
+                .and_then(|value| valid_seconds_to_ms(*value));
+            let end_ms = start_ms.map(|start| {
+                duration_ms
+                    .map(|duration| start.saturating_add(duration))
+                    .or(next_start_ms)
+                    .unwrap_or(start)
+                    .clamp(start, audio_duration_ms)
+            });
+            let end_time_source = end_ms.map(|_| {
+                if duration_ms.is_some() {
+                    TokenTimeSource::Provider
+                } else {
+                    TokenTimeSource::Inferred
+                }
+            });
+            Some(TranscriptToken {
+                text,
+                start_ms,
+                end_ms,
+                start_time_source: start_ms.map(|_| TokenTimeSource::Provider),
+                end_time_source,
+                speaker: None,
+                speaker_source: None,
+                confidence: None,
+            })
+        })
+        .collect();
+    let mut segments = segments_from_tokens(&tokens);
+    if segments.is_empty() && !result.text.trim().is_empty() {
+        segments.push(TranscriptSegment {
+            speaker: "Speaker 1".into(),
+            start_ms: 0,
+            end_ms: audio_duration_ms,
+            text: result.text.trim().to_string(),
+        });
+    }
+    (tokens, segments)
 }
 
 fn feed_audio(stream: &sherpa_onnx::OfflineStream, path: &Path) -> Result<u64, String> {
@@ -143,10 +199,46 @@ fn available_threads() -> i32 {
         .unwrap_or(2)
 }
 
-fn seconds_to_ms(seconds: f32) -> u64 {
-    if seconds.is_finite() && seconds > 0.0 {
-        (seconds * 1_000.0).round() as u64
-    } else {
-        0
+fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {
+    (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1_000.0).round() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_result;
+    use sherpa_onnx::OfflineRecognizerResult;
+
+    #[test]
+    fn preserves_reazonspeech_token_timestamps_and_durations() {
+        let result = OfflineRecognizerResult {
+            text: "こんにちは。次です".into(),
+            tokens: vec!["こん".into(), "にちは。".into(), "次です".into()],
+            timestamps: Some(vec![0.12, 0.42, 1.8]),
+            durations: Some(vec![0.3, 0.5, 0.4]),
+        };
+        let (tokens, segments) = normalize_result(&result, 3_000);
+        assert_eq!(
+            (tokens[0].start_ms, tokens[0].end_ms),
+            (Some(120), Some(420))
+        );
+        assert_eq!(
+            (tokens[2].start_ms, tokens[2].end_ms),
+            (Some(1_800), Some(2_200))
+        );
+        assert_eq!(segments.len(), 2);
+        assert_eq!((segments[1].start_ms, segments[1].end_ms), (1_800, 2_200));
+    }
+
+    #[test]
+    fn infers_token_end_from_the_next_start_when_duration_is_missing() {
+        let result = OfflineRecognizerResult {
+            text: "前後".into(),
+            tokens: vec!["前".into(), "後".into()],
+            timestamps: Some(vec![0.1, 0.7]),
+            durations: None,
+        };
+        let (tokens, _) = normalize_result(&result, 2_000);
+        assert_eq!(tokens[0].end_ms, Some(700));
+        assert_eq!(tokens[1].end_ms, Some(700));
     }
 }

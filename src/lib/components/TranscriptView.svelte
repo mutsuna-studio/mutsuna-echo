@@ -38,7 +38,9 @@
         <article class="segment">
           <div class="segment-meta">
             <strong>{segment.speaker}</strong>
-            <time>{formatTimestamp(segment.startMs)}</time>
+            <time>
+              {formatTimestamp(segment.startMs)} – {formatTimestamp(segment.endMs)}
+            </time>
           </div>
           <p>{segment.text}</p>
         </article>

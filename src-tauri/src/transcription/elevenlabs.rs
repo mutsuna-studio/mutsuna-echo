@@ -5,7 +5,10 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Transcript, TranscriptSegment};
+use super::{
+    segments_from_tokens, TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment,
+    TranscriptToken,
+};
 
 pub(crate) mod client;
 
@@ -37,14 +40,6 @@ struct ElevenLabsWord {
     speaker_id: Option<String>,
 }
 
-#[derive(Default)]
-struct SegmentBuilder {
-    speaker_id: String,
-    start_ms: Option<u64>,
-    end_ms: Option<u64>,
-    text: String,
-}
-
 fn seconds_to_ms(value: Option<f64>) -> Option<u64> {
     value
         .filter(|value| value.is_finite() && *value >= 0.0)
@@ -58,57 +53,41 @@ fn speaker_label<'a>(speaker_id: &str, speakers: &'a mut HashMap<String, String>
         .or_insert_with(|| format!("Speaker {next_number}"))
 }
 
-fn finish_segment(
-    builder: SegmentBuilder,
-    speakers: &mut HashMap<String, String>,
-    segments: &mut Vec<TranscriptSegment>,
-) {
-    let text = builder.text.trim();
-    if text.is_empty() {
-        return;
-    }
-
-    segments.push(TranscriptSegment {
-        speaker: speaker_label(&builder.speaker_id, speakers).to_string(),
-        start_ms: builder.start_ms.unwrap_or(0),
-        end_ms: builder.end_ms.or(builder.start_ms).unwrap_or(0),
-        text: text.to_string(),
-    });
-}
-
 fn normalize(response: ElevenLabsTranscript) -> Transcript {
-    let mut segments = Vec::new();
     let mut speakers = HashMap::new();
-    let mut current = SegmentBuilder::default();
-
-    for word in response.words {
-        let speaker_id = word.speaker_id.unwrap_or_else(|| {
-            if current.speaker_id.is_empty() {
-                "speaker_0".to_string()
-            } else {
-                current.speaker_id.clone()
-            }
-        });
-
-        if !current.speaker_id.is_empty() && current.speaker_id != speaker_id {
-            finish_segment(current, &mut speakers, &mut segments);
-            current = SegmentBuilder::default();
+    let mut previous_speaker_id = String::new();
+    let mut tokens = Vec::with_capacity(response.words.len());
+    let mut upcoming_speaker_ids = vec![None; response.words.len()];
+    let mut upcoming_speaker_id = None;
+    for (index, word) in response.words.iter().enumerate().rev() {
+        if word.speaker_id.is_some() {
+            upcoming_speaker_id.clone_from(&word.speaker_id);
         }
-
-        if current.speaker_id.is_empty() {
-            current.speaker_id = speaker_id;
-        }
-
-        if let Some(start_ms) = seconds_to_ms(word.start) {
-            current.start_ms.get_or_insert(start_ms);
-        }
-        if let Some(end_ms) = seconds_to_ms(word.end) {
-            current.end_ms = Some(current.end_ms.map_or(end_ms, |current| current.max(end_ms)));
-        }
-        current.text.push_str(&word.text);
+        upcoming_speaker_ids[index].clone_from(&upcoming_speaker_id);
     }
 
-    finish_segment(current, &mut speakers, &mut segments);
+    for (index, word) in response.words.into_iter().enumerate() {
+        let speaker_id = word
+            .speaker_id
+            .or_else(|| (!previous_speaker_id.is_empty()).then(|| previous_speaker_id.clone()))
+            .or_else(|| upcoming_speaker_ids[index].clone())
+            .unwrap_or_else(|| "speaker_0".to_string());
+        previous_speaker_id.clone_from(&speaker_id);
+        let start_ms = seconds_to_ms(word.start);
+        let end_ms = seconds_to_ms(word.end).map(|end| end.max(start_ms.unwrap_or(0)));
+        tokens.push(TranscriptToken {
+            text: word.text,
+            start_ms,
+            end_ms,
+            start_time_source: start_ms.map(|_| TokenTimeSource::Provider),
+            end_time_source: end_ms.map(|_| TokenTimeSource::Provider),
+            speaker: Some(speaker_label(&speaker_id, &mut speakers).to_string()),
+            speaker_source: Some(TokenSpeakerSource::Provider),
+            confidence: None,
+        });
+    }
+
+    let mut segments = segments_from_tokens(&tokens);
 
     if segments.is_empty() && !response.text.trim().is_empty() {
         segments.push(TranscriptSegment {
@@ -127,6 +106,7 @@ fn normalize(response: ElevenLabsTranscript) -> Transcript {
         } else {
             response.language_code
         },
+        tokens,
         segments,
     }
 }
@@ -236,6 +216,10 @@ mod tests {
 
         assert_eq!(transcript.provider, "elevenlabs");
         assert_eq!(transcript.model, "scribe_v2");
+        assert_eq!(transcript.tokens.len(), 2);
+        assert_eq!(transcript.tokens[0].start_ms, Some(1200));
+        assert_eq!(transcript.tokens[0].end_ms, Some(1800));
+        assert_eq!(transcript.tokens[1].speaker.as_deref(), Some("Speaker 2"));
         assert_eq!(transcript.segments.len(), 2);
         assert_eq!(transcript.segments[0].speaker, "Speaker 1");
         assert_eq!(transcript.segments[0].start_ms, 1200);
@@ -271,7 +255,35 @@ mod tests {
             ],
         };
 
-        assert_eq!(normalize(response).segments[0].text, "Hello world");
+        let transcript = normalize(response);
+        assert_eq!(transcript.segments[0].text, "Hello world");
+        assert_eq!(transcript.tokens[1].text, " ");
+        assert_eq!(transcript.tokens[1].start_ms, None);
+    }
+
+    #[test]
+    fn leading_spacing_inherits_the_next_provider_speaker() {
+        let response = ElevenLabsTranscript {
+            language_code: "ja".into(),
+            text: " こんにちは".into(),
+            words: vec![
+                ElevenLabsWord {
+                    text: " ".into(),
+                    start: None,
+                    end: None,
+                    speaker_id: None,
+                },
+                ElevenLabsWord {
+                    text: "こんにちは".into(),
+                    start: Some(0.1),
+                    end: Some(0.6),
+                    speaker_id: Some("speaker_7".into()),
+                },
+            ],
+        };
+        let transcript = normalize(response);
+        assert_eq!(transcript.tokens[0].speaker.as_deref(), Some("Speaker 1"));
+        assert_eq!(transcript.tokens[1].speaker.as_deref(), Some("Speaker 1"));
     }
 
     #[test]
