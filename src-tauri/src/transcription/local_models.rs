@@ -235,24 +235,35 @@ async fn download_reazonspeech(app: &AppHandle) -> Result<(), String> {
 
     let result = download_files(app, &temporary).await.and_then(|_| {
         let manifest = reazonspeech_manifest();
-        let bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| format!("モデル情報を作成できませんでした: {error}"))?;
-        let mut file = fs::File::create(temporary.join(MANIFEST_FILE))
-            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
-        if final_directory.exists() {
-            fs::remove_dir_all(&final_directory)
-                .map_err(|error| format!("古いモデルを置き換えられませんでした: {error}"))?;
-        }
-        fs::rename(&temporary, &final_directory)
-            .map_err(|error| format!("モデルをインストールできませんでした: {error}"))
+        install_downloaded_model(&temporary, &final_directory, &manifest)
     });
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
     result
+}
+
+fn install_downloaded_model(
+    temporary: &Path,
+    final_directory: &Path,
+    manifest: &LocalModelManifest,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|error| format!("モデル情報を作成できませんでした: {error}"))?;
+    {
+        let mut file = fs::File::create(temporary.join(MANIFEST_FILE))
+            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
+    }
+
+    if final_directory.exists() {
+        fs::remove_dir_all(final_directory)
+            .map_err(|error| format!("古いモデルを置き換えられませんでした: {error}"))?;
+    }
+    fs::rename(temporary, final_directory)
+        .map_err(|error| format!("モデルをインストールできませんでした: {error}"))
 }
 
 fn remove_stale_downloads(model_root: &Path) {
@@ -569,8 +580,9 @@ fn is_safe_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        list_installed_in, reazonspeech_manifest, total_download_bytes, LocalModelFile,
-        LocalModelManifest, MANIFEST_SCHEMA_VERSION, REAZONSPEECH_MODEL_ID,
+        install_downloaded_model, list_installed_in, reazonspeech_manifest, total_download_bytes,
+        LocalModelFile, LocalModelManifest, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION,
+        REAZONSPEECH_MODEL_ID,
     };
 
     #[test]
@@ -636,5 +648,24 @@ mod tests {
             }],
         };
         assert!(super::validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn closes_manifest_before_installing_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-local-model-install-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let temporary = root.join("download");
+        let installation = root.join("installed");
+        std::fs::create_dir_all(&temporary).expect("create temporary model directory");
+
+        install_downloaded_model(&temporary, &installation, &reazonspeech_manifest())
+            .expect("install model directory after closing manifest");
+
+        assert!(!temporary.exists());
+        assert!(installation.join(MANIFEST_FILE).is_file());
+        std::fs::remove_dir_all(root).expect("remove model fixture");
     }
 }
