@@ -4,7 +4,6 @@
   import { LogicalSize, PhysicalPosition, type PhysicalSize } from "@tauri-apps/api/dpi";
   import { currentMonitor, monitorFromPoint, type Monitor } from "@tauri-apps/api/window";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import AudioWaveform from "@lucide/svelte/icons/audio-waveform";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
@@ -518,9 +517,7 @@
                 aria-label={status?.systemAudio ? "システム音声: 青" : "システム音声なし"}
               />
             </div>
-            <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status" title={voiceActivityLabel}>
-              <AudioWaveform aria-hidden="true" /><span>{voiceActivityLabel}</span>
-            </p>
+            <span class="overlay-vad-status" role="status">{voiceActivityLabel}</span>
           </div>
         {:else if completionMessage}
           <p class="recording-result controller-message" role="status">{completionMessage}</p>
@@ -756,7 +753,6 @@
   .detection-actions,
   .phase-state,
   .waveform-with-legend,
-  .overlay-vad,
   .meeting-loading {
     display: flex;
     align-items: center;
@@ -890,7 +886,6 @@
     background: rgb(255 255 255 / 10%);
   }
 
-  .overlay-vad,
   .recording-result,
   .compact-error {
     min-width: 0;
@@ -901,10 +896,7 @@
     white-space: nowrap;
   }
 
-  .overlay-vad { flex: none; gap: 4px; color: rgb(209 218 213 / 62%); }
-  .overlay-vad.speaking { color: rgb(102 222 156); font-weight: 700; }
-  .overlay-vad :global(svg) { width: 13px; height: 13px; flex: none; }
-  .overlay-vad span {
+  .overlay-vad-status {
     position: absolute;
     width: 1px;
     height: 1px;
