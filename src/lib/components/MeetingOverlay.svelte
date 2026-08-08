@@ -26,7 +26,7 @@
   import type { RecordingStatus, StopRecordingResult } from "../types/recording";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
-  const promptSize = { width: 400, height: 60 };
+  const promptSize = { width: 320, height: 60 };
   const controllerSize = { width: 310, height: 158 };
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
@@ -418,13 +418,10 @@
           {#if error}
             <p class="detection-error" role="alert" title={error}>{error}</p>
           {:else}
-            <div class="detection-context">
+            <div class="detection-identity">
               <Video aria-hidden="true" />
-              <strong>会議を検出</strong>
-            </div>
-            <div class="detection-badges">
-              <Badge variant="outline" class="overlay-tool-badge">{shownDetection.providerLabel}</Badge>
-              {#if isPreview}<Badge variant="outline" class="overlay-tool-badge">{previewRuntime?.badgeLabel}</Badge>{/if}
+              <strong>{shownDetection.providerLabel}</strong>
+              {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
             </div>
           {/if}
           <div class="detection-actions">
@@ -482,6 +479,26 @@
       inset 0 -1px 0 color-mix(in oklch, var(--foreground) 3%, transparent);
   }
 
+  .meeting-overlay:not(.compact) {
+    padding: 12px 13px;
+    color: rgb(247 250 248);
+    background: rgb(31 35 33 / 88%);
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 16px;
+    box-shadow:
+      0 8px 24px rgb(0 0 0 / 18%),
+      inset 0 1px 0 rgb(255 255 255 / 7%);
+    backdrop-filter: blur(18px) saturate(120%);
+  }
+
+  :global(html.transparent-overlay) .meeting-overlay:not(.compact) {
+    background: rgb(31 35 33 / 88%);
+    border-color: rgb(255 255 255 / 8%);
+    box-shadow:
+      0 8px 24px rgb(0 0 0 / 18%),
+      inset 0 1px 0 rgb(255 255 255 / 7%);
+  }
+
   .meeting-overlay.compact {
     display: grid;
     min-width: 0;
@@ -510,6 +527,11 @@
     filter: none;
   }
 
+  .meeting-overlay:not(.compact) .glass-highlight,
+  :global(html.transparent-overlay) .meeting-overlay:not(.compact) .glass-highlight {
+    background: rgb(255 255 255 / 3%);
+  }
+
   .meeting-prompt,
   .recording-controller {
     position: relative;
@@ -527,8 +549,7 @@
     gap: 10px;
   }
 
-  .detection-context,
-  .detection-badges,
+  .detection-identity,
   .detection-actions,
   .phase-state,
   .audio-source,
@@ -544,37 +565,50 @@
     gap: 7px;
   }
 
-  .detection-context { flex: none; gap: 6px; }
-  .detection-context > :global(svg) { width: 15px; height: 15px; color: color-mix(in oklch, var(--primary) 68%, var(--foreground)); }
-  .detection-context strong { color: color-mix(in oklch, var(--foreground) 76%, transparent); font-size: 0.72rem; font-weight: 650; white-space: nowrap; }
-  .detection-badges { min-width: 0; flex: 1; gap: 5px; }
-  .detection-actions { flex: none; gap: 3px; }
-  .detection-badges :global(.overlay-tool-badge) {
-    border-color: color-mix(in oklch, var(--foreground) 10%, transparent);
-    color: color-mix(in oklch, var(--foreground) 78%, transparent);
-    background: rgb(255 255 255 / 10%);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 9%);
+  .detection-identity { min-width: 0; flex: 1; gap: 7px; }
+  .detection-identity > :global(svg) { width: 15px; height: 15px; flex: none; color: rgb(102 222 156); }
+  .detection-identity strong {
+    min-width: 0;
+    overflow: hidden;
+    color: rgb(247 250 248);
+    font-size: 0.75rem;
+    font-weight: 680;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+  .preview-label {
+    flex: none;
+    padding-left: 7px;
+    border-left: 1px solid rgb(255 255 255 / 14%);
+    color: rgb(209 218 213 / 72%);
+    font-size: 0.57rem;
+    font-weight: 680;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .detection-actions { flex: none; gap: 3px; }
 
   .detection-actions :global(.overlay-record-button) {
-    border-color: color-mix(in oklch, var(--primary) 25%, transparent);
-    color: color-mix(in oklch, var(--primary) 58%, var(--foreground));
-    background: color-mix(in oklch, var(--primary) 18%, transparent);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 10%);
+    border-color: rgb(120 232 167 / 18%);
+    color: rgb(246 255 249);
+    background: rgb(29 148 86 / 92%);
+    box-shadow:
+      0 2px 8px rgb(0 0 0 / 14%),
+      inset 0 1px 0 rgb(255 255 255 / 14%);
   }
 
   .detection-actions :global(.overlay-record-button:hover) {
-    background: color-mix(in oklch, var(--primary) 25%, transparent);
+    background: rgb(35 168 99 / 96%);
   }
 
   .detection-actions :global(.overlay-dismiss-button) {
-    color: color-mix(in oklch, var(--foreground) 62%, transparent);
+    color: rgb(226 233 229 / 68%);
     background: transparent;
   }
 
   .detection-actions :global(.overlay-dismiss-button:hover) {
-    color: var(--foreground);
-    background: rgb(255 255 255 / 9%);
+    color: rgb(255 255 255);
+    background: rgb(255 255 255 / 10%);
   }
 
   .detection-error {
@@ -694,6 +728,13 @@
         radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 16%, transparent), transparent 45%),
         linear-gradient(145deg, rgb(255 255 255 / 10%), rgb(255 255 255 / 5%)),
         linear-gradient(145deg, color-mix(in oklch, var(--background) 72%, transparent), color-mix(in oklch, var(--background) 64%, var(--primary) 8%, transparent));
+    }
+
+    .meeting-overlay:not(.compact),
+    :global(html.transparent-overlay) .meeting-overlay:not(.compact) {
+      color: rgb(247 250 248);
+      background: rgb(31 35 33 / 88%);
+      border-color: rgb(255 255 255 / 8%);
     }
   }
 

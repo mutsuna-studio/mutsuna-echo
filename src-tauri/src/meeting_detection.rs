@@ -303,7 +303,7 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Ok(());
     }
 
-    let width = 400.0;
+    let width = 320.0;
     let height = 60.0;
     // メイン画面の設定を複製すると、開発時はdevUrl、本番時はfrontendDistが
     // Tauriによって同じように解決される。
