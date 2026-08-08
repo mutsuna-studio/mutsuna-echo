@@ -423,14 +423,16 @@
               <strong>会議を検出</strong>
             </div>
             <div class="detection-badges">
-              <Badge variant="secondary">{shownDetection.providerLabel}</Badge>
-              {#if isPreview}<Badge variant="secondary">{previewRuntime?.badgeLabel}</Badge>{/if}
+              <Badge variant="outline" class="overlay-tool-badge">{shownDetection.providerLabel}</Badge>
+              {#if isPreview}<Badge variant="outline" class="overlay-tool-badge">{previewRuntime?.badgeLabel}</Badge>{/if}
             </div>
           {/if}
           <div class="detection-actions">
             <Button
               size="sm"
               type="button"
+              variant="ghost"
+              class="overlay-record-button"
               icon={Mic}
               title="参加者の同意を確認してから、手動で録音を開始します。"
               aria-label="参加者の同意を確認して、録音を開始"
@@ -440,7 +442,7 @@
             >
               {starting ? "準備中…" : "録音を開始"}
             </Button>
-            <Button type="button" size="icon-sm" variant="ghost" icon={X} aria-label="今は録音しない" onclick={dismiss} />
+            <Button class="overlay-dismiss-button" type="button" size="icon-sm" variant="ghost" icon={X} aria-label="今は録音しない" onclick={dismiss} />
           </div>
         </div>
       </section>
@@ -543,10 +545,38 @@
   }
 
   .detection-context { flex: none; gap: 6px; }
-  .detection-context > :global(svg) { width: 15px; height: 15px; color: var(--primary); }
-  .detection-context strong { font-size: 0.72rem; white-space: nowrap; }
+  .detection-context > :global(svg) { width: 15px; height: 15px; color: color-mix(in oklch, var(--primary) 68%, var(--foreground)); }
+  .detection-context strong { color: color-mix(in oklch, var(--foreground) 76%, transparent); font-size: 0.72rem; font-weight: 650; white-space: nowrap; }
   .detection-badges { min-width: 0; flex: 1; gap: 5px; }
   .detection-actions { flex: none; gap: 3px; }
+  .detection-badges :global(.overlay-tool-badge) {
+    border-color: color-mix(in oklch, var(--foreground) 10%, transparent);
+    color: color-mix(in oklch, var(--foreground) 78%, transparent);
+    background: rgb(255 255 255 / 10%);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 9%);
+  }
+
+  .detection-actions :global(.overlay-record-button) {
+    border-color: color-mix(in oklch, var(--primary) 25%, transparent);
+    color: color-mix(in oklch, var(--primary) 58%, var(--foreground));
+    background: color-mix(in oklch, var(--primary) 18%, transparent);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 10%);
+  }
+
+  .detection-actions :global(.overlay-record-button:hover) {
+    background: color-mix(in oklch, var(--primary) 25%, transparent);
+  }
+
+  .detection-actions :global(.overlay-dismiss-button) {
+    color: color-mix(in oklch, var(--foreground) 62%, transparent);
+    background: transparent;
+  }
+
+  .detection-actions :global(.overlay-dismiss-button:hover) {
+    color: var(--foreground);
+    background: rgb(255 255 255 / 9%);
+  }
+
   .detection-error {
     min-width: 0;
     flex: 1;
