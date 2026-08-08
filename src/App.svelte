@@ -11,6 +11,7 @@
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
+  import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import type { TranscriptionProviderId } from "./lib/providers";
@@ -44,6 +45,9 @@
   let lastErrorToastAt = $state(0);
   let pendingActionPromise: Promise<void> | null = null;
   let pendingActionId = "";
+  let lastAcknowledgedActionId = "";
+  let pendingActionProblem = $state<{ action: PendingAction | null; message: string } | null>(null);
+  let pendingActionBusy = $state(false);
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
@@ -74,9 +78,12 @@
   }
 
   function receivePendingAction(action: PendingAction): Promise<void> {
+    if (action.id === lastAcknowledgedActionId) return Promise.resolve();
     if (pendingActionPromise && pendingActionId === action.id) return pendingActionPromise;
     if (pendingActionPromise) {
-      return pendingActionPromise.then(() => receivePendingAction(action));
+      return pendingActionPromise
+        .catch(() => undefined)
+        .then(() => receivePendingAction(action));
     }
     pendingActionId = action.id;
     pendingActionPromise = applyPendingAction(action).finally(() => {
@@ -94,10 +101,58 @@
     await restoreSelectedTranscript();
     await focusTranscriptionAction();
     await invoke("acknowledge_pending_action", { actionId: action.id });
+    lastAcknowledgedActionId = action.id;
+    pendingActionProblem = null;
     showSuccessToast(
       "録音を保存しました。",
       "音声を選択しました。設定を確認して文字起こしを開始できます。"
     );
+  }
+
+  async function handlePendingAction(action: PendingAction) {
+    try {
+      await receivePendingAction(action);
+    } catch (error) {
+      const message = errorText(error);
+      pendingActionProblem = { action, message };
+      showError(message);
+    }
+  }
+
+  async function retryPendingAction() {
+    if (pendingActionBusy) return;
+    pendingActionBusy = true;
+    try {
+      const action = await invoke<PendingAction | null>("get_pending_action");
+      if (!action) {
+        pendingActionProblem = null;
+        showWarningToast("文字起こし待ちの録音はありません。");
+        return;
+      }
+      await handlePendingAction(action);
+    } catch (error) {
+      const message = errorText(error);
+      pendingActionProblem = { action: null, message };
+      showError(message);
+    } finally {
+      pendingActionBusy = false;
+    }
+  }
+
+  async function discardPendingAction() {
+    if (pendingActionBusy) return;
+    pendingActionBusy = true;
+    try {
+      await invoke("discard_pending_action", {
+        actionId: pendingActionProblem?.action?.id ?? null
+      });
+      pendingActionProblem = null;
+      showSuccessToast("録音の引き渡し情報を解除しました。", "録音ファイルは削除されていません。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      pendingActionBusy = false;
+    }
   }
 
   async function focusTranscriptionAction() {
@@ -119,20 +174,25 @@
       try {
         unlisten = await listen<PendingAction>("pending-action-available", ({ payload }) => {
           if (!cancelled) {
-            void receivePendingAction(payload).catch((error) => showError(errorText(error)));
+            void handlePendingAction(payload);
           }
         });
-        const [nextHasApiKey, session, pendingAction] = await Promise.all([
+        const [nextHasApiKey, session, pendingResult] = await Promise.all([
           invoke<boolean>("has_api_key"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
+            .then((action) => ({ action, error: "" }))
+            .catch((error) => ({ action: null, error: errorText(error) }))
         ]);
         if (cancelled) return;
         hasApiKey = nextHasApiKey;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
-        if (pendingAction) {
-          await receivePendingAction(pendingAction);
+        if (pendingResult.error) {
+          pendingActionProblem = { action: null, message: pendingResult.error };
+          showError(pendingResult.error);
+        } else if (pendingResult.action) {
+          await handlePendingAction(pendingResult.action);
         } else if (selectedAudio) {
           await restoreSelectedTranscript();
         }
@@ -312,6 +372,16 @@
     <h1>会話を、読み返せる形へ。</h1>
     <p class="lead">音声ファイルを選択して、話者とタイムスタンプ付きで文字起こしします。</p>
   </header>
+
+  {#if pendingActionProblem}
+    <PendingActionNotice
+      action={pendingActionProblem.action}
+      message={pendingActionProblem.message}
+      busy={pendingActionBusy}
+      onRetry={retryPendingAction}
+      onDiscard={discardPendingAction}
+    />
+  {/if}
 
   <AudioInputPanel
     {selectedAudio}

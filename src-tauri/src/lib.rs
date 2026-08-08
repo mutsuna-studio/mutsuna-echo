@@ -30,6 +30,7 @@ pub fn run() {
             pending_action::get_pending_action,
             pending_action::receive_pending_action,
             pending_action::acknowledge_pending_action,
+            pending_action::discard_pending_action,
             commands::transcribe::select_audio_file,
             commands::transcribe::get_transcription_session,
             commands::transcribe::transcribe_selected_audio,

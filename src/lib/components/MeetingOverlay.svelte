@@ -98,6 +98,7 @@
       resolveAcknowledgement = resolve;
     });
     let timeoutId: number | undefined;
+    let pollingId: number | undefined;
     let unlisten: UnlistenFn | undefined;
     try {
       unlisten = await listen<string>("pending-action-acknowledged", ({ payload }) => {
@@ -107,6 +108,15 @@
       const action = await invoke<PendingAction>("prepare_transcription_handoff");
       actionId = action.id;
       if (acknowledged.has(actionId)) resolveAcknowledgement?.();
+      // イベントがOSやWebViewの終了タイミングで欠落しても、永続状態を正本として
+      // ACKを確認できるようにする。
+      pollingId = window.setInterval(() => {
+        void invoke<PendingAction | null>("get_pending_action")
+          .then((pending) => {
+            if (!pending || pending.id !== actionId) resolveAcknowledgement?.();
+          })
+          .catch(() => undefined);
+      }, 250);
       const timeout = new Promise<never>((_, reject) => {
         timeoutId = window.setTimeout(
           () => reject(new Error("メイン画面の準備確認がタイムアウトしました。")),
@@ -120,6 +130,7 @@
       error = `録音は保存されています。${errorText(cause)}`;
     } finally {
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      if (pollingId !== undefined) window.clearInterval(pollingId);
       unlisten?.();
       handoffBusy = false;
     }

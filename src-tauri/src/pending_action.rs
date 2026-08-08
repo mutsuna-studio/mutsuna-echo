@@ -93,8 +93,24 @@ pub(crate) fn acknowledge_pending_action(app: AppHandle, action_id: String) -> R
         return Err("画面引き渡し情報が更新されたため、完了できませんでした。".into());
     }
     remove_in(&path)?;
-    app.emit(ACKNOWLEDGED_EVENT, action_id)
-        .map_err(|error| format!("画面引き渡しの完了を通知できませんでした: {error}"))
+    // 永続状態の削除がACKの正本。イベントはオーバーレイを素早く閉じるための通知に留め、
+    // 配信失敗で受領済みの操作を未完了扱いへ戻さない。
+    if let Err(error) = app.emit(ACKNOWLEDGED_EVENT, action_id) {
+        eprintln!("Could not emit pending action acknowledgement: {error:?}");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn discard_pending_action(
+    app: AppHandle,
+    action_id: Option<String>,
+) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "画面引き渡し情報の解除処理を開始できませんでした。".to_string())?;
+    let path = pending_action_path(&app)?;
+    discard_in(&path, action_id.as_deref())
 }
 
 fn get_action_by_id(app: &AppHandle, action_id: &str) -> Result<PendingAction, String> {
@@ -180,6 +196,21 @@ fn remove_in(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn discard_in(path: &Path, expected_action_id: Option<&str>) -> Result<(), String> {
+    match (load_in(path), expected_action_id) {
+        (Ok(Some(action)), Some(expected)) if action.id == expected => remove_in(path),
+        (Ok(Some(_)), Some(_)) => {
+            Err("文字起こし待ちの録音が更新されています。画面を再読み込みしてください。".into())
+        }
+        (Ok(Some(_)), None) => {
+            Err("解除対象を確認できませんでした。画面を再読み込みしてください。".into())
+        }
+        (Ok(None), _) => Ok(()),
+        (Err(_), None) => remove_in(path),
+        (Err(error), Some(_)) => Err(error),
+    }
+}
+
 fn replace_with_backup(path: &Path, temporary: &Path, backup: &Path) -> Result<(), String> {
     if path.exists() {
         if backup.exists() {
@@ -219,7 +250,19 @@ fn validate_action(action: &PendingAction) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_in, remove_in, save_in, PendingAction, PendingActionKind, SCHEMA_VERSION};
+    use super::{
+        discard_in, load_in, remove_in, save_in, PendingAction, PendingActionKind, SCHEMA_VERSION,
+    };
+
+    fn fixture() -> PendingAction {
+        PendingAction {
+            schema_version: SCHEMA_VERSION,
+            id: uuid::Uuid::now_v7().to_string(),
+            kind: PendingActionKind::TranscribeMeeting,
+            meeting_id: uuid::Uuid::now_v7().to_string(),
+            created_at: "2026-08-08T00:00:00Z".into(),
+        }
+    }
 
     #[test]
     fn pending_action_round_trips_and_is_removed_after_acknowledgement() {
@@ -229,17 +272,36 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let path = root.join("pending-action.json");
-        let action = PendingAction {
-            schema_version: SCHEMA_VERSION,
-            id: uuid::Uuid::now_v7().to_string(),
-            kind: PendingActionKind::TranscribeMeeting,
-            meeting_id: uuid::Uuid::now_v7().to_string(),
-            created_at: "2026-08-08T00:00:00Z".into(),
-        };
+        let action = fixture();
         save_in(&path, &action).expect("save pending action");
         assert_eq!(load_in(&path).expect("load pending action"), Some(action));
         remove_in(&path).expect("remove pending action");
         assert_eq!(load_in(&path).expect("load removed action"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discard_requires_the_current_action_id_but_can_remove_corrupt_state() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-pending-action-discard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let path = root.join("pending-action.json");
+        let action = fixture();
+        save_in(&path, &action).expect("save pending action");
+        assert!(discard_in(&path, Some(&uuid::Uuid::now_v7().to_string())).is_err());
+        assert_eq!(
+            load_in(&path).expect("action remains"),
+            Some(action.clone())
+        );
+        discard_in(&path, Some(&action.id)).expect("discard matching action");
+        assert_eq!(load_in(&path).expect("load discarded action"), None);
+
+        std::fs::create_dir_all(&root).expect("create corrupt fixture directory");
+        std::fs::write(&path, b"not-json").expect("write corrupt pending action");
+        discard_in(&path, None).expect("discard corrupt pending action");
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }
