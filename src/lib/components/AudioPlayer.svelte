@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import FastForward from "@lucide/svelte/icons/fast-forward";
   import Pause from "@lucide/svelte/icons/pause";
   import Play from "@lucide/svelte/icons/play";
@@ -8,7 +9,8 @@
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { formatFileSize, formatTimestamp } from "../format";
-  import type { SelectedAudioFile } from "../types/transcript";
+  import type { AudioWaveform as AudioWaveformData, SelectedAudioFile } from "../types/transcript";
+  import AudioWaveform from "./AudioWaveform.svelte";
 
   type Props = {
     audio: SelectedAudioFile;
@@ -24,6 +26,8 @@
   let volume = $state(1);
   let previousVolume = $state(1);
   let playbackRateIndex = $state(0);
+  let waveformPeaks = $state.raw<number[]>([]);
+  let waveformLoading = $state(false);
   const playbackRates = [1, 1.25, 1.5, 2] as const;
   const playbackRate = $derived(playbackRates[playbackRateIndex]);
 
@@ -35,6 +39,24 @@
     if (!element) return;
     element.pause();
     element.load();
+  });
+
+  $effect(() => {
+    const meetingId = audio.meetingId;
+    let active = true;
+    waveformPeaks = [];
+    waveformLoading = true;
+    invoke<AudioWaveformData>("get_selected_audio_waveform", { meetingId, points: 320 })
+      .then((waveform) => {
+        if (active && waveform.meetingId === meetingId) waveformPeaks = waveform.peaks;
+      })
+      .catch((error) => {
+        if (active) onError(`音声波形を生成できませんでした: ${String(error)}`);
+      })
+      .finally(() => {
+        if (active) waveformLoading = false;
+      });
+    return () => { active = false; };
   });
 
   async function togglePlayback() {
@@ -56,12 +78,10 @@
     currentSeconds = element.currentTime;
   }
 
-  function seek(event: Event) {
-    if (!element || !(event.currentTarget instanceof HTMLInputElement)) return;
-    const seconds = Number(event.currentTarget.value);
-    if (!Number.isFinite(seconds)) return;
-    element.currentTime = seconds;
-    currentSeconds = seconds;
+  function seekTo(seconds: number) {
+    if (!element) return;
+    element.currentTime = Math.max(0, Math.min(durationSeconds, seconds));
+    currentSeconds = element.currentTime;
   }
 
   function changeVolume(event: Event) {
@@ -114,7 +134,7 @@
     </div>
     <div class="timeline-controls">
       <time>{formatTimestamp(currentSeconds * 1_000)}</time>
-      <input class="seek-bar" type="range" min="0" max={Math.max(durationSeconds, 0.1)} step="0.1" value={currentSeconds} aria-label="再生位置" oninput={seek} />
+      <AudioWaveform peaks={waveformPeaks} {currentSeconds} {durationSeconds} loading={waveformLoading} onseek={seekTo} />
       <time>{formatTimestamp(durationSeconds * 1_000)}</time>
     </div>
     <div class="playback-options">
@@ -136,8 +156,7 @@
   .transport-controls, .playback-options { display: flex; align-items: center; gap: 3px; }
   .timeline-controls { display: grid; min-width: 0; grid-template-columns: auto minmax(60px, 1fr) auto; align-items: center; gap: 7px; }
   .timeline-controls time { color: var(--muted-foreground); font-size: 0.7rem; font-variant-numeric: tabular-nums; }
-  .seek-bar, .volume-bar { min-width: 0; accent-color: var(--primary); cursor: pointer; }
-  .seek-bar { width: 100%; }
+  .volume-bar { min-width: 0; accent-color: var(--primary); cursor: pointer; }
   .volume-bar { width: 68px; }
   :global(.rate-button) { min-width: 46px; font-variant-numeric: tabular-nums; }
 

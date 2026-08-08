@@ -1,4 +1,5 @@
 mod audio_playback;
+mod audio_waveform;
 mod commands;
 mod credentials;
 #[cfg(desktop)]
@@ -56,6 +57,7 @@ pub fn run() {
             pending_action::discard_pending_action,
             commands::transcribe::select_audio_file,
             commands::transcribe::get_transcription_session,
+            audio_waveform::get_selected_audio_waveform,
             commands::transcribe::transcribe_selected_audio,
             commands::transcribe::get_selected_transcript,
             commands::usage::get_transcription_usage,

@@ -196,6 +196,25 @@ pub(crate) fn selected_audio_path_for_playback(
     Ok(selected.path.clone())
 }
 
+pub(crate) fn selected_audio_for_waveform(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<(PathBuf, u64), String> {
+    crate::meeting_store::validate_meeting_id(meeting_id)?;
+    let state = app.state::<AudioSelectionState>();
+    let selected = state
+        .selected
+        .lock()
+        .map_err(|_| "波形を生成する音声の状態を取得できませんでした。".to_string())?;
+    let selected = selected
+        .as_ref()
+        .ok_or_else(|| "波形を生成する音声が選択されていません。".to_string())?;
+    if selected.descriptor.meeting_id != meeting_id {
+        return Err("選択中のMeetingと波形生成対象が一致しません。".into());
+    }
+    Ok((selected.path.clone(), selected.descriptor.duration_ms))
+}
+
 fn set_selected_audio(
     app: &AppHandle,
     path: PathBuf,

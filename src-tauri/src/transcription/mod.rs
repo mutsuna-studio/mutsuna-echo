@@ -1,5 +1,4 @@
-#[cfg(desktop)]
-mod audio_decode;
+pub(crate) mod audio_decode;
 pub mod diarization;
 pub(crate) mod elevenlabs;
 #[cfg(desktop)]

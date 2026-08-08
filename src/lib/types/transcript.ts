@@ -40,6 +40,12 @@ export type SelectedAudioFile = {
   playbackUrl: string;
 };
 
+export type AudioWaveform = {
+  meetingId: string;
+  points: number;
+  peaks: number[];
+};
+
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
   transcribing: boolean;
