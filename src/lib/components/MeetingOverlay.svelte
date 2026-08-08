@@ -457,17 +457,14 @@
     min-height: 100vh;
     padding: 18px;
     overflow: hidden;
-    border: 1px solid color-mix(in oklch, var(--primary) 18%, var(--border));
-    border-radius: 18px;
+    /* The desktop compositor owns the window outline and rounded corners. */
     color: var(--foreground);
     background:
       radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 12%, transparent), transparent 42%),
       linear-gradient(145deg, color-mix(in oklch, var(--background) 96%, white), color-mix(in oklch, var(--background) 93%, var(--primary)));
     box-shadow:
       inset 0 1px 0 color-mix(in oklch, white 72%, transparent),
-      inset 0 -1px 0 color-mix(in oklch, var(--foreground) 4%, transparent),
-      0 20px 60px color-mix(in oklch, var(--foreground) 20%, transparent),
-      0 3px 12px color-mix(in oklch, var(--primary) 8%, transparent);
+      inset 0 -1px 0 color-mix(in oklch, var(--foreground) 4%, transparent);
     animation: overlay-enter 180ms ease-out;
   }
 
@@ -682,14 +679,10 @@
 
   @media (prefers-color-scheme: dark) {
     .meeting-overlay {
-      border-color: color-mix(in oklch, var(--primary) 24%, var(--border));
       background:
         radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 13%, transparent), transparent 43%),
         linear-gradient(145deg, color-mix(in oklch, var(--background) 93%, white), color-mix(in oklch, var(--background) 90%, var(--primary)));
-      box-shadow:
-        inset 0 1px 0 color-mix(in oklch, white 12%, transparent),
-        0 20px 60px color-mix(in oklch, black 40%, transparent),
-        0 3px 14px color-mix(in oklch, var(--primary) 10%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in oklch, white 12%, transparent);
     }
   }
 
