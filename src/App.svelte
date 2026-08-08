@@ -16,6 +16,7 @@
     SelectedAudioFile,
     Transcript,
     TranscriptionResult,
+    TranscriptionSession,
     TranscriptionUsage
   } from "./lib/types/transcript";
 
@@ -70,7 +71,14 @@
   $effect(() => {
     void (async () => {
       try {
-        hasApiKey = await invoke<boolean>("has_api_key");
+        const [nextHasApiKey, session] = await Promise.all([
+          invoke<boolean>("has_api_key"),
+          invoke<TranscriptionSession>("get_transcription_session")
+        ]);
+        hasApiKey = nextHasApiKey;
+        selectedAudio = session.selectedAudio;
+        transcribing = session.transcribing;
+        if (selectedAudio) await restoreSelectedTranscript();
         if (hasApiKey) await refreshUsage();
       } catch (error) {
         showError(errorText(error));
@@ -78,6 +86,37 @@
         loading = false;
       }
     })();
+  });
+
+  // WebViewを閉じている間に進んだ文字起こしを、再生成後に再同期する。
+  $effect(() => {
+    if (!transcribing || loading) return;
+    let cancelled = false;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const session = await invoke<TranscriptionSession>("get_transcription_session");
+        if (cancelled || session.transcribing) return;
+        selectedAudio = session.selectedAudio;
+        transcribing = false;
+        if (selectedAudio) {
+          await restoreSelectedTranscript();
+          transcriptRevision += 1;
+        }
+        await refreshUsage();
+      } catch (error) {
+        if (!cancelled) showError(errorText(error));
+      } finally {
+        polling = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   });
 
   async function saveApiKey(apiKey: string) {

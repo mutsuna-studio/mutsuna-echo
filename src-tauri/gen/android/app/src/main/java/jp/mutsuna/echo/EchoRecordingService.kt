@@ -43,12 +43,21 @@ class EchoRecordingService : Service() {
 
   private fun startCapture(intent: Intent) {
     createChannel()
+    val openIntent = PendingIntent.getActivity(
+      this,
+      0,
+      Intent(this, MainActivity::class.java).addFlags(
+        Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+      ),
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
     val stopIntent = PendingIntent.getService(this, 1, Intent(this, EchoRecordingService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val notification = NotificationCompat.Builder(this, CHANNEL)
       .setSmallIcon(R.mipmap.ic_launcher)
       .setContentTitle("Mutsuna Echoで録音中")
       .setContentText("タップせずに停止するには「録音を停止」を選択します。")
       .setOngoing(true)
+      .setContentIntent(openIntent)
       .addAction(0, "録音を停止", stopIntent)
       .build()
     if (Build.VERSION.SDK_INT >= 29) {

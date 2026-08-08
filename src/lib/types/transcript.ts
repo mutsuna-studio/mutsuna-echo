@@ -26,6 +26,11 @@ export type SelectedAudioFile = {
   pricingVerifiedOn: string;
 };
 
+export type TranscriptionSession = {
+  selectedAudio: SelectedAudioFile | null;
+  transcribing: boolean;
+};
+
 export type TranscriptionUsage = {
   availableDurationMs: number | null;
   usedDurationMs: number | null;

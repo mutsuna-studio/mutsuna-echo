@@ -192,6 +192,10 @@ object RecordingBridge {
 
   internal fun requiresSystemAudio(config: String): Boolean = JSONObject(config).optBoolean("systemAudio")
 
+  internal fun isActive(): Boolean = synchronized(lock) {
+    status.optString("phase") in setOf("starting", "recording", "finalizing")
+  }
+
   private fun defaultStatus() = """{
     "phase":"idle","sessionId":null,"elapsedMs":0,"microphone":false,"systemAudio":false,
     "microphoneLevel":0.0,"systemLevel":0.0,"outputPath":null,"stopReason":null,"warning":null,"error":null

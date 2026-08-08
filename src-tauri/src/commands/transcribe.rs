@@ -38,6 +38,13 @@ pub(crate) struct SelectedAudioFile {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptionSession {
+    selected_audio: Option<SelectedAudioFile>,
+    transcribing: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionResult {
     transcript: Transcript,
     persistence_warning: Option<String>,
@@ -84,6 +91,30 @@ pub(crate) fn set_selected_audio_path(
         .lock()
         .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
     Ok(selected)
+}
+
+#[tauri::command]
+pub(crate) fn get_transcription_session(
+    state: State<'_, AudioSelectionState>,
+) -> Result<TranscriptionSession, String> {
+    let selected_audio = {
+        let mut path = state
+            .path
+            .lock()
+            .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?;
+        match path.as_deref().map(describe_audio_path).transpose() {
+            Ok(selected) => selected,
+            Err(error) => {
+                eprintln!("Could not restore selected audio: {error}");
+                *path = None;
+                None
+            }
+        }
+    };
+    Ok(TranscriptionSession {
+        selected_audio,
+        transcribing: state.transcribing.load(Ordering::Acquire),
+    })
 }
 
 struct AudioEstimate {

@@ -37,6 +37,14 @@ class MainActivity : TauriActivity() {
     super.onDestroy()
   }
 
+  override fun onStop() {
+    super.onStop()
+    if (!isChangingConfigurations && pendingConfig == null && RecordingBridge.isActive()) {
+      // 録音はForeground Serviceが所有するため、非表示のWebViewを保持しない。
+      finishAndRemoveTask()
+    }
+  }
+
   fun requestRecording(config: String) {
     runOnUiThread {
       pendingConfig = config
