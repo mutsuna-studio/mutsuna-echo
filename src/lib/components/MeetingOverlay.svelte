@@ -469,15 +469,15 @@
   }
 
   :global(html.transparent-overlay) .meeting-overlay {
-    border: 1px solid color-mix(in oklch, var(--primary) 22%, var(--border));
+    border: 1px solid color-mix(in oklch, var(--foreground) 12%, transparent);
     border-radius: 16px;
     background:
       radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 15%, transparent), transparent 44%),
       linear-gradient(145deg, rgb(255 255 255 / 18%), rgb(255 255 255 / 10%)),
       linear-gradient(145deg, color-mix(in oklch, var(--background) 78%, transparent), color-mix(in oklch, var(--background) 70%, var(--primary) 8%, transparent));
     box-shadow:
-      inset 0 1px 0 color-mix(in oklch, white 68%, transparent),
-      inset 0 -1px 0 color-mix(in oklch, var(--foreground) 5%, transparent);
+      inset 0 1px 0 rgb(255 255 255 / 18%),
+      inset 0 -1px 0 color-mix(in oklch, var(--foreground) 3%, transparent);
   }
 
   .meeting-overlay.compact {
@@ -660,7 +660,6 @@
     }
 
     :global(html.transparent-overlay) .meeting-overlay {
-      border-color: color-mix(in oklch, var(--primary) 28%, var(--border));
       background:
         radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 16%, transparent), transparent 45%),
         linear-gradient(145deg, rgb(255 255 255 / 10%), rgb(255 255 255 / 5%)),
