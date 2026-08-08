@@ -10,5 +10,8 @@ if (!target) {
   throw new Error("App mount target was not found");
 }
 
-const component = getCurrentWebviewWindow().label === "meeting-overlay" ? MeetingOverlay : App;
+const isMeetingOverlay = getCurrentWebviewWindow().label === "meeting-overlay";
+document.body.classList.toggle("overlay-window", isMeetingOverlay);
+
+const component = isMeetingOverlay ? MeetingOverlay : App;
 mount(component, { target });

@@ -13,6 +13,17 @@ body {
   min-height: 100vh;
 }
 
+body.overlay-window {
+  min-width: 0;
+  overflow: hidden;
+}
+
+body.overlay-window #app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
 .meeting-overlay {
   box-sizing: border-box;
   min-height: 100vh;
