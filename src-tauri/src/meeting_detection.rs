@@ -352,9 +352,9 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.title = "Mutsuna Echo - 会議を検出".into();
     config.width = width;
     config.height = height;
-    config.min_width = Some(300.0);
-    config.min_height = Some(height);
-    // The recording controller switches to 380 x 64 in the same window.
+    config.min_width = Some(88.0);
+    config.min_height = Some(48.0);
+    // The recording controller switches between 380 x 64 and 88 x 48.
     config.max_width = Some(380.0);
     config.max_height = Some(64.0);
     config.resizable = false;

@@ -9,6 +9,7 @@
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Mic from "@lucide/svelte/icons/mic";
+  import Minimize2 from "@lucide/svelte/icons/minimize-2";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import Square from "@lucide/svelte/icons/square";
   import X from "@lucide/svelte/icons/x";
@@ -26,6 +27,7 @@
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const promptSize = { width: 320, height: 60 };
   const controllerSize = { width: 380, height: 64 };
+  const minimizedControllerSize = { width: 88, height: 48 };
   const snapStorageKey = "meeting-overlay-snap-position";
   const snapMargin = 20;
   const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
@@ -50,6 +52,7 @@
   let starting = $state(false);
   let stopping = $state(false);
   let controllerMode = $state(false);
+  let controllerMinimized = $state(false);
   let completionMessage = $state("");
   let error = $state("");
   let handoffBusy = $state(false);
@@ -195,8 +198,8 @@
     await getCurrentWebviewWindow().destroy();
   }
 
-  async function resizeOverlay(compact: boolean) {
-    const size = compact ? controllerSize : promptSize;
+  async function resizeOverlay(compact: boolean, minimized = controllerMinimized) {
+    const size = compact ? (minimized ? minimizedControllerSize : controllerSize) : promptSize;
     const overlay = getCurrentWebviewWindow();
     await overlay.setSize(new LogicalSize(size.width, size.height));
     await applySnap(snapPosition);
@@ -204,8 +207,14 @@
 
   async function enterController(nextStatus: RecordingStatus) {
     status = nextStatus;
+    if (!controllerMode) controllerMinimized = false;
     controllerMode = true;
     await resizeOverlay(true);
+  }
+
+  async function minimizeController() {
+    controllerMinimized = true;
+    await resizeOverlay(true, true);
   }
 
   async function applyPreviewMode(mode: OverlayPreviewMode) {
@@ -218,6 +227,13 @@
     previewSnapshot = snapshot;
     status = snapshot.status;
     controllerMode = snapshot.controllerMode;
+    if (
+      !snapshot.controllerMode ||
+      snapshot.status?.phase === "completed" ||
+      snapshot.status?.phase === "failed"
+    ) {
+      controllerMinimized = false;
+    }
     completionMessage = snapshot.completionMessage;
     error = snapshot.error;
     await resizeOverlay(snapshot.controllerMode);
@@ -303,8 +319,12 @@
     }
     if (!controllerMode) return;
     if (nextStatus.phase === "completed") {
+      controllerMinimized = false;
+      await resizeOverlay(true, false);
       await handoffToMain();
     } else if (nextStatus.phase === "failed") {
+      controllerMinimized = false;
+      await resizeOverlay(true, false);
       error = nextStatus.error ?? "録音を完了できませんでした。";
     }
   }
@@ -426,12 +446,30 @@
 <ThemeProvider theme={echoTheme}>
   <main
     class:compact={controllerMode}
+    class:minimized={controllerMode && controllerMinimized}
     class:preview={isPreview}
     class="meeting-overlay"
     aria-busy={loading || starting || stopping}
   >
     <div class="glass-highlight" aria-hidden="true"></div>
-    {#if controllerMode}
+    {#if controllerMode && controllerMinimized}
+      <section class="minimized-controller" aria-label="最小化された録音コントローラー" aria-live="polite">
+        <Button
+          class="minimized-stop-button"
+          size="sm"
+          variant="destructive"
+          type="button"
+          icon={Square}
+          aria-label={status?.phase === "finalizing" ? "録音を保存中" : "録音を停止"}
+          title={status?.phase === "finalizing" ? "録音を保存しています" : "録音を停止"}
+          onclick={stopRecording}
+          loading={stopping}
+          disabled={!active || status?.phase === "finalizing"}
+        >
+          {status?.phase === "finalizing" ? "保存中" : "停止"}
+        </Button>
+      </section>
+    {:else if controllerMode}
       <section class="recording-controller" aria-label="録音コントローラー" aria-live="polite">
         <button class="recording-summary overlay-drag-handle" type="button" aria-label="オーバーレイを移動" title="ドラッグして位置を移動" onpointerdown={startOverlayDrag}>
           <div class:error-state={status?.phase === "failed"} class:success-state={status?.phase === "completed"} class="phase-state">
@@ -496,6 +534,17 @@
           {:else if status?.phase === "failed"}
             <Button size="sm" variant="outline" type="button" onclick={isPreview ? closePreview : closeOverlay}>閉じる</Button>
           {:else}
+            <Button
+              class="minimize-controller-button"
+              size="icon-sm"
+              variant="ghost"
+              type="button"
+              icon={Minimize2}
+              aria-label="停止ボタンだけに最小化"
+              title="停止ボタンだけに最小化"
+              onclick={minimizeController}
+              disabled={!active || status?.phase === "finalizing"}
+            />
             <Button
               size="sm"
               variant="destructive"
@@ -617,6 +666,11 @@
     backdrop-filter: blur(18px) saturate(120%);
   }
 
+  .meeting-overlay.minimized {
+    padding: 0 7px;
+    border-radius: 14px;
+  }
+
   :global(html.transparent-overlay) .meeting-overlay.compact {
     background: rgb(31 35 33 / 88%);
     border-color: rgb(255 255 255 / 8%);
@@ -658,6 +712,13 @@
     position: relative;
     z-index: 1;
   }
+  .minimized-controller {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    width: 100%;
+  }
+  .minimized-controller :global(.minimized-stop-button) { width: 100%; }
 
   .meeting-prompt { height: 100%; }
   .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
@@ -827,7 +888,12 @@
   }
 
   .controller-message { flex: 1; }
-  .controller-action { flex: none; }
+  .controller-action { display: flex; flex: none; align-items: center; gap: 3px; }
+  .controller-action :global(.minimize-controller-button) { color: rgb(226 233 229 / 66%); }
+  .controller-action :global(.minimize-controller-button:hover) {
+    color: rgb(255 255 255);
+    background: rgb(255 255 255 / 10%);
+  }
 
   .overlay-vad,
   .recording-result,
