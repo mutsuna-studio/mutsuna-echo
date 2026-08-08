@@ -5,17 +5,34 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(debug_assertions)]
+use serde::Deserialize;
 use serde::Serialize;
 use tauri::{
     plugin::{Builder as PluginBuilder, TauriPlugin},
     AppHandle, Manager, Runtime, WebviewWindowBuilder,
 };
+#[cfg(debug_assertions)]
+use tauri::{Emitter, RunEvent, WindowEvent};
 
 use crate::recording::{types::RecordingPhase, RecordingService};
 
 const OVERLAY_LABEL: &str = "meeting-overlay";
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const REQUIRED_CONSECUTIVE_SCANS: u8 = 2;
+#[cfg(debug_assertions)]
+const PREVIEW_CHANGED_EVENT: &str = "overlay-preview-mode-changed";
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverlayPreviewMode {
+    Detection,
+    Recording,
+    Finalizing,
+    Completed,
+    Error,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,9 +75,20 @@ struct DetectionTracker {
     suppressed_provider: Option<MeetingProvider>,
 }
 
-#[derive(Default)]
 pub struct MeetingDetectionState {
     tracker: Mutex<DetectionTracker>,
+    #[cfg(debug_assertions)]
+    preview_mode: Mutex<Option<OverlayPreviewMode>>,
+}
+
+impl Default for MeetingDetectionState {
+    fn default() -> Self {
+        Self {
+            tracker: Mutex::new(DetectionTracker::default()),
+            #[cfg(debug_assertions)]
+            preview_mode: Mutex::new(None),
+        }
+    }
 }
 
 impl MeetingDetectionState {
@@ -129,6 +157,22 @@ impl MeetingDetectionState {
             .active
             .clone()
     }
+
+    #[cfg(debug_assertions)]
+    fn set_preview_mode(&self, mode: Option<OverlayPreviewMode>) {
+        *self
+            .preview_mode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+    }
+
+    #[cfg(debug_assertions)]
+    fn preview_mode(&self) -> Option<OverlayPreviewMode> {
+        *self
+            .preview_mode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
@@ -136,6 +180,19 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .setup(|app, _| {
             start_watcher(app.clone());
             Ok(())
+        })
+        .on_event(|_app, _event| {
+            #[cfg(debug_assertions)]
+            if matches!(
+                _event,
+                RunEvent::WindowEvent {
+                    label,
+                    event: WindowEvent::Destroyed,
+                    ..
+                } if label == OVERLAY_LABEL
+            ) {
+                _app.state::<MeetingDetectionState>().set_preview_mode(None);
+            }
         })
         .build()
 }
@@ -152,11 +209,49 @@ pub fn dismiss_meeting_overlay(state: tauri::State<'_, MeetingDetectionState>) {
     state.suppress(None);
 }
 
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn show_overlay_preview(
+    app: AppHandle,
+    state: tauri::State<'_, MeetingDetectionState>,
+    mode: OverlayPreviewMode,
+) -> Result<(), String> {
+    state.set_preview_mode(Some(mode));
+    if let Err(error) = show_overlay(&app) {
+        state.set_preview_mode(None);
+        return Err(error);
+    }
+    app.emit(PREVIEW_CHANGED_EVENT, mode)
+        .map_err(|error| format!("プレビュー状態を通知できませんでした: {error}"))
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn get_overlay_preview_mode(
+    state: tauri::State<'_, MeetingDetectionState>,
+) -> Option<OverlayPreviewMode> {
+    state.preview_mode()
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn close_overlay_preview(state: tauri::State<'_, MeetingDetectionState>) {
+    state.set_preview_mode(None);
+}
+
 fn start_watcher<R: Runtime>(app: AppHandle<R>) {
     if let Err(error) = std::thread::Builder::new()
         .name("mutsuna-meeting-detection".into())
         .spawn(move || loop {
             std::thread::sleep(SCAN_INTERVAL);
+            #[cfg(debug_assertions)]
+            if app
+                .state::<MeetingDetectionState>()
+                .preview_mode()
+                .is_some()
+            {
+                continue;
+            }
             let candidate = detect_meeting();
             let recording_active = matches!(
                 app.state::<RecordingService>().status().phase,
@@ -439,6 +534,8 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
+    use super::OverlayPreviewMode;
     use super::{
         classify_window, DetectionTracker, MeetingCandidate, MeetingDetectionState, MeetingProvider,
     };
@@ -469,6 +566,8 @@ mod tests {
     fn requires_two_scans_and_suppresses_until_the_meeting_disappears() {
         let state = MeetingDetectionState {
             tracker: std::sync::Mutex::new(DetectionTracker::default()),
+            #[cfg(debug_assertions)]
+            preview_mode: std::sync::Mutex::new(None),
         };
         let candidate = MeetingCandidate {
             provider: MeetingProvider::Zoom,
@@ -479,6 +578,24 @@ mod tests {
         state.suppress(None);
         assert!(state.observe(Some(candidate.clone())).is_none());
         assert!(state.observe(None).is_none());
+        assert!(state.observe(Some(candidate.clone())).is_none());
+        assert!(state.observe(Some(candidate)).is_some());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn preview_mode_is_isolated_and_normal_detection_resumes_after_closing() {
+        let state = MeetingDetectionState::default();
+        state.set_preview_mode(Some(OverlayPreviewMode::Recording));
+        assert_eq!(state.preview_mode(), Some(OverlayPreviewMode::Recording));
+
+        state.set_preview_mode(None);
+        assert_eq!(state.preview_mode(), None);
+
+        let candidate = MeetingCandidate {
+            provider: MeetingProvider::Zoom,
+            window_title: "Zoom Meeting".into(),
+        };
         assert!(state.observe(Some(candidate.clone())).is_none());
         assert!(state.observe(Some(candidate)).is_some());
     }

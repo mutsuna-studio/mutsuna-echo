@@ -64,6 +64,12 @@ pub fn run() {
             meeting_detection::get_meeting_detection,
             #[cfg(desktop)]
             meeting_detection::dismiss_meeting_overlay,
+            #[cfg(all(desktop, debug_assertions))]
+            meeting_detection::show_overlay_preview,
+            #[cfg(all(desktop, debug_assertions))]
+            meeting_detection::get_overlay_preview_mode,
+            #[cfg(all(desktop, debug_assertions))]
+            meeting_detection::close_overlay_preview,
             #[cfg(desktop)]
             resident::prepare_transcription_handoff
         ])

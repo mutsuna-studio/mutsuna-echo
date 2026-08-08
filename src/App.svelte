@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { tick } from "svelte";
+  import { tick, type Component } from "svelte";
   import {
     Toaster,
     showErrorToast,
@@ -54,6 +54,7 @@
   let lastAcknowledgedActionId = "";
   let pendingActionProblem = $state<{ action: PendingAction | null; message: string } | null>(null);
   let pendingActionBusy = $state(false);
+  let OverlayPreviewControls = $state<Component | null>(null);
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
@@ -65,6 +66,17 @@
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
+
+  $effect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    void import("./lib/components/OverlayPreviewControls.svelte").then(({ default: component }) => {
+      if (!cancelled) OverlayPreviewControls = component;
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
@@ -411,7 +423,12 @@
   <Toaster position="top-right" closeButton />
   <main class="shell">
   <header class="hero">
-    <p class="eyebrow">Mutsuna Echo</p>
+    <div class="hero-toolbar">
+      <p class="eyebrow">Mutsuna Echo</p>
+      {#if OverlayPreviewControls}
+        <OverlayPreviewControls />
+      {/if}
+    </div>
     <h1>会話を、読み返せる形へ。</h1>
     <p class="lead">音声ファイルを選択して、話者とタイムスタンプ付きで文字起こしします。</p>
   </header>
