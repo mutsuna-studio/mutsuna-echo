@@ -16,6 +16,7 @@
   import X from "@lucide/svelte/icons/x";
   import { Button } from "@mutsuna/ui/button";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
+  import AudioLevelWaveform from "./AudioLevelWaveform.svelte";
   import type { MeetingDetection } from "../types/meeting";
   import type {
     OverlayPreviewMode,
@@ -96,10 +97,6 @@
     const minutes = Math.floor((seconds % 3_600) / 60);
     const rest = seconds % 60;
     return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${rest.toString().padStart(2, "0")}`;
-  }
-
-  function levelStyle(level: number): string {
-    return `--audio-level: ${Math.max(0, Math.min(1, level)) * 100}%`;
   }
 
   function snapPoint(position: OverlaySnapPosition, monitor: Monitor, windowSize: PhysicalSize): PhysicalPosition {
@@ -504,31 +501,22 @@
 
         {#if active}
           <div class="audio-sources">
-            <div class:enabled={status?.microphone} class="audio-source" title={status?.microphone ? "マイク入力" : "マイク入力なし"}>
-              <Mic aria-hidden="true" />
-              <i
-                class="level-track"
-                role="meter"
-                aria-label="マイク音量"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow={Math.round((status?.microphoneLevel ?? 0) * 100)}
-              >
-                <b style={levelStyle(status?.microphoneLevel ?? 0)}></b>
-              </i>
-            </div>
-            <div class:enabled={status?.systemAudio} class="audio-source" title={status?.systemAudio ? "システム音声" : "システム音声なし"}>
-              <MonitorSpeaker aria-hidden="true" />
-              <i
-                class="level-track"
-                role="meter"
-                aria-label="システム音量"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow={Math.round((status?.systemLevel ?? 0) * 100)}
-              >
-                <b style={levelStyle(status?.systemLevel ?? 0)}></b>
-              </i>
+            <div class="waveform-with-legend">
+              <Mic
+                class={`microphone-legend${status?.microphone ? " enabled" : ""}`}
+                aria-label={status?.microphone ? "マイク入力: 緑" : "マイク入力なし"}
+              />
+              <AudioLevelWaveform
+                microphoneLevel={status?.microphoneLevel ?? 0}
+                systemLevel={status?.systemLevel ?? 0}
+                microphoneEnabled={status?.microphone ?? false}
+                systemEnabled={status?.systemAudio ?? false}
+                elapsedMs={status?.elapsedMs ?? 0}
+              />
+              <MonitorSpeaker
+                class={`system-legend${status?.systemAudio ? " enabled" : ""}`}
+                aria-label={status?.systemAudio ? "システム音声: 青" : "システム音声なし"}
+              />
             </div>
             <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status">
               <AudioWaveform aria-hidden="true" /><span>{voiceActivityLabel}</span>
@@ -767,7 +755,7 @@
   .detection-identity,
   .detection-actions,
   .phase-state,
-  .audio-source,
+  .waveform-with-legend,
   .overlay-vad,
   .meeting-loading {
     display: flex;
@@ -872,41 +860,18 @@
     min-width: 0;
     flex: 1;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
 
-  .audio-source {
-    width: 43px;
+  .waveform-with-legend {
     min-width: 0;
     flex: none;
-    gap: 5px;
-    padding: 0;
-    border: 0;
-    color: rgb(209 218 213 / 45%);
-    background: transparent;
+    gap: 4px;
   }
 
-  .audio-source.enabled { color: rgb(102 222 156); }
-  .audio-source > :global(svg) { width: 13px; height: 13px; flex: none; color: currentColor; }
-
-  .level-track {
-    display: block;
-    height: 4px;
-    min-width: 22px;
-    flex: 1;
-    overflow: hidden;
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--muted-foreground) 17%, transparent);
-  }
-
-  .level-track b {
-    display: block;
-    width: var(--audio-level);
-    height: 100%;
-    border-radius: inherit;
-    background: linear-gradient(90deg, color-mix(in oklch, var(--primary) 70%, white), var(--primary));
-    transition: width 110ms linear;
-  }
+  .waveform-with-legend > :global(svg) { width: 12px; height: 12px; flex: none; opacity: 0.32; }
+  .waveform-with-legend > :global(.microphone-legend.enabled) { color: rgb(102 222 156); opacity: 0.9; }
+  .waveform-with-legend > :global(.system-legend.enabled) { color: rgb(101 201 243); opacity: 0.9; }
 
   .controller-message { flex: 1; }
   .controller-action { display: flex; flex: none; align-items: center; gap: 3px; }
@@ -984,6 +949,5 @@
     .meeting-overlay,
     .rec-dot,
     :global(.spin) { animation: none; }
-    .level-track b { transition: none; }
   }
 </style>
