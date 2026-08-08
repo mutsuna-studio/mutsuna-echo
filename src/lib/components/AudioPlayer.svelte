@@ -10,16 +10,18 @@
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { formatFileSize, formatTimestamp } from "../format";
-  import type { AudioWaveform as AudioWaveformData, AudioWaveformProgress, SelectedAudioFile } from "../types/transcript";
+  import type { AudioSeekRequest, AudioWaveform as AudioWaveformData, AudioWaveformProgress, SelectedAudioFile } from "../types/transcript";
   import AudioWaveform from "./AudioWaveform.svelte";
 
   type Props = {
     audio: SelectedAudioFile;
     source?: "recording" | "imported";
+    seekRequest: AudioSeekRequest | null;
+    onPositionChange: (positionMs: number) => void;
     onError: (message: string) => void;
   };
 
-  let { audio, source, onError }: Props = $props();
+  let { audio, source, seekRequest, onPositionChange, onError }: Props = $props();
   let element = $state<HTMLAudioElement | null>(null);
   let playing = $state(false);
   let currentSeconds = $state(0);
@@ -30,6 +32,7 @@
   let waveformPeaks = $state.raw<number[]>([]);
   let waveformLoading = $state(false);
   let waveformCompletedPoints = $state(0);
+  let processedSeekRequestId = $state(0);
   const playbackRates = [1, 1.25, 1.5, 2] as const;
   const playbackRate = $derived(playbackRates[playbackRateIndex]);
 
@@ -37,10 +40,18 @@
     audio.playbackUrl;
     durationSeconds = audio.durationMs / 1_000;
     currentSeconds = 0;
+    processedSeekRequestId = 0;
     playing = false;
     if (!element) return;
     element.pause();
     element.load();
+  });
+
+  $effect(() => {
+    seekRequest;
+    audio.meetingId;
+    element;
+    applySeekRequest();
   });
 
   $effect(() => {
@@ -98,14 +109,38 @@
 
   function seekBy(seconds: number) {
     if (!element) return;
-    element.currentTime = Math.max(0, Math.min(durationSeconds, element.currentTime + seconds));
-    currentSeconds = element.currentTime;
+    seekTo(element.currentTime + seconds);
   }
 
-  function seekTo(seconds: number) {
-    if (!element) return;
-    element.currentTime = Math.max(0, Math.min(durationSeconds, seconds));
-    currentSeconds = element.currentTime;
+  function seekTo(seconds: number): boolean {
+    if (!element) return false;
+    try {
+      element.currentTime = Math.max(0, Math.min(durationSeconds, seconds));
+    } catch {
+      return false;
+    }
+    updatePosition(element.currentTime);
+    return true;
+  }
+
+  function applySeekRequest() {
+    const request = seekRequest;
+    if (!request || request.meetingId !== audio.meetingId || !element || request.requestId === processedSeekRequestId) return;
+    if (seekTo(request.positionMs / 1_000)) processedSeekRequestId = request.requestId;
+  }
+
+  function updatePosition(seconds: number) {
+    currentSeconds = seconds;
+    onPositionChange(Math.round(seconds * 1_000));
+  }
+
+  function handleTimeUpdate() {
+    updatePosition(element?.currentTime ?? 0);
+  }
+
+  function handleLoadedMetadata() {
+    durationSeconds = Number.isFinite(element?.duration) ? element!.duration : audio.durationMs / 1_000;
+    applySeekRequest();
   }
 
   function changeVolume(event: Event) {
@@ -133,9 +168,9 @@
     bind:this={element}
     src={audio.playbackUrl}
     preload="metadata"
-    onloadedmetadata={() => durationSeconds = Number.isFinite(element?.duration) ? element!.duration : audio.durationMs / 1_000}
+    onloadedmetadata={handleLoadedMetadata}
     ondurationchange={() => durationSeconds = Number.isFinite(element?.duration) ? element!.duration : durationSeconds}
-    ontimeupdate={() => currentSeconds = element?.currentTime ?? 0}
+    ontimeupdate={handleTimeUpdate}
     onplay={() => playing = true}
     onpause={() => playing = false}
     onended={() => playing = false}

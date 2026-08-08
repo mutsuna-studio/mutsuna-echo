@@ -52,6 +52,12 @@ export type AudioWaveformProgress = {
   completedPoints: number;
 };
 
+export type AudioSeekRequest = {
+  meetingId: string;
+  requestId: number;
+  positionMs: number;
+};
+
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
   transcribing: boolean;

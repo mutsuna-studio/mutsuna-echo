@@ -14,7 +14,7 @@
     type TranscriptionProviderId
   } from "../providers";
   import type { RecentMeetingSummary } from "../types/recording";
-  import type { SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
+  import type { AudioSeekRequest, SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
   import AudioPlayer from "./AudioPlayer.svelte";
   import TranscriptView from "./TranscriptView.svelte";
 
@@ -61,6 +61,9 @@
   }: Props = $props();
 
   let detailTab = $state<"transcript" | "info">("transcript");
+  let playbackPositionMs = $state(0);
+  let seekRequest = $state.raw<AudioSeekRequest | null>(null);
+  let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
 
   const title = $derived(selectedAudio?.name.replace(/\.[^.]+$/, "") ?? "会議を選択");
@@ -78,8 +81,21 @@
     return "文字起こし中…";
   });
 
+  $effect(() => {
+    selectedAudio?.meetingId;
+    playbackPositionMs = 0;
+    seekRequest = null;
+    seekRequestId = 0;
+  });
+
   function selectProvider(value: string) {
     if (isTranscriptionProviderId(value)) onProviderChange(value);
+  }
+
+  function seekFromTranscript(positionMs: number) {
+    if (!selectedAudio) return;
+    playbackPositionMs = positionMs;
+    seekRequest = { meetingId: selectedAudio.meetingId, requestId: ++seekRequestId, positionMs };
   }
 </script>
 
@@ -106,7 +122,13 @@
     </header>
 
     <div class="audio-player-wrap">
-      <AudioPlayer audio={selectedAudio} source={meeting?.source} {onError} />
+      <AudioPlayer
+        audio={selectedAudio}
+        source={meeting?.source}
+        {seekRequest}
+        onPositionChange={(positionMs) => playbackPositionMs = positionMs}
+        {onError}
+      />
     </div>
 
     <section class="transcription-toolbar" aria-label="文字起こしモデルと実行">
@@ -140,7 +162,7 @@
     <div class="detail-content">
       {#if detailTab === "transcript"}
         {#if transcript}
-          <TranscriptView {transcript} />
+          <TranscriptView {transcript} currentPositionMs={playbackPositionMs} onSeek={seekFromTranscript} />
         {:else}
           <div class="empty-transcript">
             <FileAudio aria-hidden="true" />
