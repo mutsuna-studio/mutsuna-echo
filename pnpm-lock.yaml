@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@fontsource-variable/inter':
+        specifier: 5.3.0
+        version: 5.3.0
       '@mutsuna/ui':
         specifier: ^0.3.1
         version: 0.3.1(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(tailwindcss@4.3.3)(typescript@5.6.3)
