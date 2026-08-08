@@ -4,14 +4,17 @@ use serde::{Deserialize, Serialize};
 pub enum TranscriptionProvider {
     #[serde(rename = "elevenlabs")]
     ElevenLabs,
+    #[serde(rename = "local")]
+    Local,
 }
 
 impl TranscriptionProvider {
-    pub const ALL: [Self; 1] = [Self::ElevenLabs];
+    pub const ALL: [Self; 2] = [Self::ElevenLabs, Self::Local];
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::ElevenLabs => "elevenlabs",
+            Self::Local => "local",
         }
     }
 }

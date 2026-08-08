@@ -14,7 +14,11 @@
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
-  import type { TranscriptionProviderId } from "./lib/providers";
+  import {
+    getTranscriptionProvider,
+    type TranscriptionProviderDefinition,
+    type TranscriptionProviderId
+  } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type {
     SelectedAudioFile,
@@ -26,7 +30,6 @@
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
 
-  let hasApiKey = $state(false);
   let loading = $state(true);
   let saving = $state(false);
   let deleting = $state(false);
@@ -36,6 +39,7 @@
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>("elevenlabs");
+  let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>([]);
   // Transcriptは読み取り専用の大きな値なので、深いProxy化を避ける。
   let transcript = $state.raw<Transcript | null>(null);
   let transcriptRevision = $state(0);
@@ -51,9 +55,13 @@
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
-  const providerConfigured = $derived(
-    transcriptionProvider === "elevenlabs" && hasApiKey
+  const currentProvider = $derived(
+    getTranscriptionProvider(transcriptionProviders, transcriptionProvider)
   );
+  const hasApiKey = $derived(
+    transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
+  );
+  const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
 
   function errorText(error: unknown): string {
@@ -75,6 +83,12 @@
     } finally {
       usageLoading = false;
     }
+  }
+
+  async function refreshProviders() {
+    transcriptionProviders = await invoke<TranscriptionProviderDefinition[]>(
+      "get_transcription_providers"
+    );
   }
 
   function receivePendingAction(action: PendingAction): Promise<void> {
@@ -177,15 +191,15 @@
             void handlePendingAction(payload);
           }
         });
-        const [nextHasApiKey, session, pendingResult] = await Promise.all([
-          invoke<boolean>("has_api_key"),
+        const [nextProviders, session, pendingResult] = await Promise.all([
+          invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
             .catch((error) => ({ action: null, error: errorText(error) }))
         ]);
         if (cancelled) return;
-        hasApiKey = nextHasApiKey;
+        transcriptionProviders = nextProviders;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
         if (pendingResult.error) {
@@ -245,7 +259,7 @@
 
     try {
       const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey });
-      hasApiKey = true;
+      await refreshProviders();
       if (modelsAccessible) {
         showSuccessToast("APIキーを確認し、安全に保存しました。");
       } else {
@@ -263,7 +277,7 @@
     deleting = true;
     try {
       await invoke("delete_api_key");
-      hasApiKey = false;
+      await refreshProviders();
       transcriptionUsage = null;
       usageError = "";
       showSuccessToast("APIキーを削除しました。");
@@ -296,7 +310,10 @@
     transcript = null;
     try {
       const result = await invoke<TranscriptionResult>("transcribe_selected_audio", {
-        request: { provider: transcriptionProvider }
+        request: {
+          provider: transcriptionProvider,
+          modelId: currentProvider?.modelId ?? null
+        }
       });
       transcript = result.transcript;
       if (transcript.segments.length > 0) {
@@ -385,6 +402,7 @@
 
   <AudioInputPanel
     {selectedAudio}
+    providers={transcriptionProviders}
     provider={transcriptionProvider}
     {selecting}
     {transcribing}
@@ -392,7 +410,6 @@
     {transcriptRevision}
     {busy}
     {recordingDisabled}
-    {providerConfigured}
     {canTranscribe}
     onSelect={selectAudioFile}
     onTranscribe={transcribeAudio}

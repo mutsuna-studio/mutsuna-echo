@@ -1,39 +1,64 @@
-export type TranscriptionProviderId = "elevenlabs";
+export type TranscriptionProviderId = "elevenlabs" | "local";
+export type TranscriptionProviderKind = "cloud" | "local";
+export type TranscriptionProviderSetup = "apiKey" | "modelDownload";
+export type TranscriptionProviderAvailability =
+  | "ready"
+  | "apiKeyRequired"
+  | "modelRequired"
+  | "engineUnavailable"
+  | "unavailable";
 
 export type TranscriptionProviderDefinition = {
   id: TranscriptionProviderId;
   label: string;
-  modelId: string;
+  kind: TranscriptionProviderKind;
+  setup: TranscriptionProviderSetup;
+  availability: TranscriptionProviderAvailability;
+  ready: boolean;
+  configured: boolean;
+  modelId: string | null;
   modelLabel: string;
   capabilitySummary: string;
-  pricingLabel: string;
+  statusMessage: string;
+  pricingUsdPerHour: number | null;
+  pricingVerifiedOn: string | null;
 };
 
-export const transcriptionProviders: readonly TranscriptionProviderDefinition[] = [
-  {
-    id: "elevenlabs",
-    label: "ElevenLabs",
-    modelId: "scribe_v2",
-    modelLabel: "Scribe v2",
-    capabilitySummary: "日本語・話者分離・単語タイムスタンプ",
-    pricingLabel: "公開時間単価"
-  }
-];
-
-export const transcriptionProviderOptions = transcriptionProviders.map((provider) => ({
-  value: provider.id,
-  label: provider.label,
-  description: provider.modelLabel
-}));
+export type InstalledLocalSttModel = {
+  modelId: string;
+  version: string;
+  engine: string;
+  displayName: string;
+  languageCodes: string[];
+  sizeBytes: number;
+};
 
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
-  return transcriptionProviders.some((provider) => provider.id === value);
+  return value === "elevenlabs" || value === "local";
 }
 
-export function getTranscriptionProvider(id: TranscriptionProviderId): TranscriptionProviderDefinition {
-  return transcriptionProviders.find((provider) => provider.id === id) ?? transcriptionProviders[0];
+export function getTranscriptionProvider(
+  providers: readonly TranscriptionProviderDefinition[],
+  id: TranscriptionProviderId
+): TranscriptionProviderDefinition | null {
+  return providers.find((provider) => provider.id === id) ?? providers[0] ?? null;
 }
 
-export function transcriptionProviderLabel(id: string): string {
-  return transcriptionProviders.find((provider) => provider.id === id)?.label ?? id;
+export function transcriptionProviderOptions(
+  providers: readonly TranscriptionProviderDefinition[]
+) {
+  return providers.map((provider) => ({
+    value: provider.id,
+    label: provider.label,
+    description: provider.modelLabel
+  }));
+}
+
+export function transcriptionProviderLabel(
+  id: string,
+  providers: readonly TranscriptionProviderDefinition[] = []
+): string {
+  return providers.find((provider) => provider.id === id)?.label
+    ?? ({ elevenlabs: "ElevenLabs", local: "ローカルSTT" } as Record<string, string>)[id]
+    ?? id;
 }

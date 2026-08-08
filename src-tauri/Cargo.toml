@@ -1,7 +1,7 @@
 [package]
 name = "mutsuna-echo"
 version = "0.1.0"
-description = "A cross-platform recording and transcription app powered by ElevenLabs Scribe v2"
+description = "A cross-platform recording and pluggable transcription app"
 authors = ["Mutsuna Studio"]
 edition = "2021"
 

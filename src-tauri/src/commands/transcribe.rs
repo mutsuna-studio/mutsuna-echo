@@ -15,9 +15,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use crate::transcription::{Transcript, TranscriptionProvider};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac"];
-const ELEVENLABS_MAX_FILE_SIZE: u64 = 5_000_000_000;
-const ELEVENLABS_STT_USD_PER_HOUR: f64 = 0.22;
-const PRICING_VERIFIED_ON: &str = "2026-08-08";
+const MAX_AUDIO_FILE_SIZE: u64 = 5_000_000_000;
 
 #[derive(Default)]
 pub(crate) struct AudioSelectionState {
@@ -38,9 +36,6 @@ pub(crate) struct SelectedAudioFile {
     name: String,
     size_bytes: u64,
     duration_ms: u64,
-    estimated_cost_usd: f64,
-    pricing_rate_usd_per_hour: f64,
-    pricing_verified_on: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +56,7 @@ pub(crate) struct TranscriptionResult {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionRequest {
     provider: TranscriptionProvider,
+    model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +67,7 @@ pub(crate) struct StoredTranscriptRequest {
 
 fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioFile, String> {
     let size_bytes = validate_audio_file(path)?;
-    let estimate = estimate_audio_cost(path)?;
+    let audio = inspect_audio(path)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -81,16 +77,13 @@ fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioF
         meeting_id,
         name,
         size_bytes,
-        duration_ms: estimate.duration_ms,
-        estimated_cost_usd: estimate.estimated_cost_usd,
-        pricing_rate_usd_per_hour: ELEVENLABS_STT_USD_PER_HOUR,
-        pricing_verified_on: PRICING_VERIFIED_ON,
+        duration_ms: audio.duration_ms,
     })
 }
 
 pub(crate) fn validate_audio_path(path: &Path) -> Result<(), String> {
     validate_audio_file(path)?;
-    estimate_audio_cost(path)?;
+    inspect_audio(path)?;
     Ok(())
 }
 
@@ -172,9 +165,8 @@ pub(crate) fn get_transcription_session(
     })
 }
 
-struct AudioEstimate {
+struct AudioMetadata {
     duration_ms: u64,
-    estimated_cost_usd: f64,
 }
 
 struct TranscriptionGuard<'a>(&'a AtomicBool);
@@ -209,14 +201,14 @@ fn validate_audio_file(path: &Path) -> Result<u64, String> {
         return Err("選択した音声ファイルが空です。".to_string());
     }
 
-    if metadata.len() >= ELEVENLABS_MAX_FILE_SIZE {
+    if metadata.len() >= MAX_AUDIO_FILE_SIZE {
         return Err("音声ファイルは5GB未満にしてください。".to_string());
     }
 
     Ok(metadata.len())
 }
 
-fn estimate_audio_cost(path: &Path) -> Result<AudioEstimate, String> {
+fn inspect_audio(path: &Path) -> Result<AudioMetadata, String> {
     let tagged_file = Probe::open(path)
         .and_then(|probe| probe.options(ParseOptions::new().read_tags(false)).read())
         .map_err(|error| {
@@ -239,12 +231,7 @@ fn estimate_audio_cost(path: &Path) -> Result<AudioEstimate, String> {
 
     let duration_ms = u64::try_from(duration.as_millis())
         .map_err(|_| "音声の再生時間が長すぎます。".to_string())?;
-    let estimated_cost_usd = duration.as_secs_f64() / 3600.0 * ELEVENLABS_STT_USD_PER_HOUR;
-
-    Ok(AudioEstimate {
-        duration_ms,
-        estimated_cost_usd,
-    })
+    Ok(AudioMetadata { duration_ms })
 }
 
 #[derive(Default)]
@@ -521,12 +508,13 @@ pub(crate) async fn transcribe_selected_audio(
 
     validate_audio_file(&selected.path)?;
 
-    let transcript = match request.provider {
-        TranscriptionProvider::ElevenLabs => {
-            let api_key = crate::commands::api_key::load_api_key(&app)?;
-            crate::transcription::elevenlabs::transcribe(&selected.path, &api_key).await?
-        }
-    };
+    let transcript = crate::transcription::transcribe(
+        &app,
+        &selected.path,
+        request.provider,
+        request.model_id.as_deref(),
+    )
+    .await?;
     let persistence_warning =
         crate::transcript_store::save(&app, &selected.meeting_id, &transcript).err();
     Ok(TranscriptionResult {
@@ -554,9 +542,7 @@ pub(crate) fn get_selected_transcript(
 mod tests {
     use std::{fs::File, io::Write, path::Path};
 
-    use super::{
-        estimate_audio_cost, validate_audio_file, TranscriptionRequest, ELEVENLABS_STT_USD_PER_HOUR,
-    };
+    use super::{inspect_audio, validate_audio_file, TranscriptionRequest};
 
     fn write_one_second_wav(path: &Path) {
         const SAMPLE_RATE: u32 = 8_000;
@@ -606,16 +592,15 @@ mod tests {
     }
 
     #[test]
-    fn estimates_cost_from_local_audio_duration() {
+    fn reads_local_audio_duration() {
         let path =
             std::env::temp_dir().join(format!("mutsuna-echo-duration-{}.wav", std::process::id()));
         write_one_second_wav(&path);
 
-        let estimate = estimate_audio_cost(&path).expect("estimate WAV cost");
+        let audio = inspect_audio(&path).expect("inspect WAV audio");
         let _ = std::fs::remove_file(path);
 
-        assert_eq!(estimate.duration_ms, 1_000);
-        assert!((estimate.estimated_cost_usd - ELEVENLABS_STT_USD_PER_HOUR / 3600.0).abs() < 1e-9);
+        assert_eq!(audio.duration_ms, 1_000);
     }
 
     #[test]
@@ -623,6 +608,12 @@ mod tests {
         assert!(
             serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
                 "provider": "elevenlabs"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
+                "provider": "local"
             }))
             .is_ok()
         );

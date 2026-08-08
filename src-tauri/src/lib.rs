@@ -27,6 +27,8 @@ pub fn run() {
             commands::api_key::save_api_key,
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,
+            transcription::providers::get_transcription_providers,
+            transcription::providers::list_installed_local_stt_models,
             pending_action::get_pending_action,
             pending_action::receive_pending_action,
             pending_action::acknowledge_pending_action,

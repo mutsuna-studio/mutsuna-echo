@@ -7,6 +7,7 @@ Svelte 5 + TypeScript + Tauri 2 + Rustで作る、マルチOS対応の録音・�
 - MP3 / M4A / WAV / FLACの選択
 - 再生時間のローカル解析と送信前のコスト概算
 - ElevenLabs Scribe v2による日本語文字起こし
+- クラウド／ローカル共通の文字起こしProvider基盤
 - 話者分離とタイムスタンプ表示
 - ElevenLabs APIキーの安全なローカル保存
   - Windows: ユーザー単位のDPAPI
@@ -38,6 +39,18 @@ pnpm tauri dev
 
 APIキーはSvelte/WebViewへ返さず、Rust側のElevenLabs通信だけで使用します。
 AndroidではAndroid Keystoreで生成した端末内AES-GCM鍵を使用します。
+
+## ローカルSTT基盤
+
+ローカルSTTは、アプリ本体とモデルを分離する前提でProvider契約と保存領域だけを実装しています。現在の版には推論エンジン、モデルカタログ、モデルダウンロードUIは含まれていないため、ローカル文字起こしはまだ実行できません。
+
+将来ダウンロードされたモデルは、OSごとのアプリローカルデータ領域にある `local-stt/models/<model-id>/<version>/` へ配置します。各導入単位は次の情報を持つ `manifest.json` で管理します。
+
+- schema version、Provider、model ID、version、推論engine
+- 表示名、対応言語
+- 各モデルファイルの相対パス、サイズ、SHA-256
+
+manifestと実ファイルが揃い、ID・保存パス・サイズなどの検証を通ったモデルだけを導入済みとして認識します。次段階のダウンローダーは、一時領域へのダウンロード、SHA-256検証、ディレクトリのatomic切り替えを行ってからこの保存領域へ公開します。
 
 ## 録音について
 
