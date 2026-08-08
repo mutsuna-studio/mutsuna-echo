@@ -473,6 +473,7 @@
     border-radius: 16px;
     background:
       radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 15%, transparent), transparent 44%),
+      linear-gradient(145deg, rgb(255 255 255 / 18%), rgb(255 255 255 / 10%)),
       linear-gradient(145deg, color-mix(in oklch, var(--background) 78%, transparent), color-mix(in oklch, var(--background) 70%, var(--primary) 8%, transparent));
     box-shadow:
       inset 0 1px 0 color-mix(in oklch, white 68%, transparent),
@@ -653,6 +654,7 @@
       border-color: color-mix(in oklch, var(--primary) 28%, var(--border));
       background:
         radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 16%, transparent), transparent 45%),
+        linear-gradient(145deg, rgb(255 255 255 / 10%), rgb(255 255 255 / 5%)),
         linear-gradient(145deg, color-mix(in oklch, var(--background) 72%, transparent), color-mix(in oklch, var(--background) 64%, var(--primary) 8%, transparent));
     }
   }
