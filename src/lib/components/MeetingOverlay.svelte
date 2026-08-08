@@ -27,7 +27,7 @@
   import type { RecordingStatus, StopRecordingResult } from "../types/recording";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
-  const promptSize = { width: 390, height: 230 };
+  const promptSize = { width: 360, height: 176 };
   const controllerSize = { width: 310, height: 158 };
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
@@ -435,10 +435,12 @@
           </div>
         </div>
 
-        <p class="meeting-consent"><ShieldCheck aria-hidden="true" />録音前に参加者の同意を確認してください。自動では開始しません。</p>
-        {#if error}<p class="meeting-error" role="alert">{error}</p>{/if}
+        {#if error}
+          <p class="meeting-error" role="alert">{error}</p>
+        {:else}
+          <p class="meeting-consent"><ShieldCheck aria-hidden="true" />参加者の同意を確認してください。自動では開始しません。</p>
+        {/if}
         <div class="meeting-actions">
-          <Button variant="ghost" size="sm" type="button" onclick={dismiss} disabled={starting}>今はしない</Button>
           <Button size="sm" type="button" icon={Mic} onclick={startRecording} loading={starting} disabled={loading}>
             {starting ? "準備中…" : "録音を開始"}
           </Button>
@@ -455,9 +457,9 @@
     box-sizing: border-box;
     position: relative;
     min-height: 100vh;
-    padding: 18px;
+    padding: 14px;
     overflow: hidden;
-    /* The desktop compositor owns the window outline and rounded corners. */
+    /* Opaque platform windows keep their compositor-owned outline and corners. */
     color: var(--foreground);
     background:
       radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 12%, transparent), transparent 42%),
@@ -466,6 +468,17 @@
       inset 0 1px 0 color-mix(in oklch, white 72%, transparent),
       inset 0 -1px 0 color-mix(in oklch, var(--foreground) 4%, transparent);
     animation: overlay-enter 180ms ease-out;
+  }
+
+  :global(html.transparent-overlay) .meeting-overlay {
+    border: 1px solid color-mix(in oklch, var(--primary) 22%, var(--border));
+    border-radius: 16px;
+    background:
+      radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 15%, transparent), transparent 44%),
+      linear-gradient(145deg, color-mix(in oklch, var(--background) 78%, transparent), color-mix(in oklch, var(--background) 70%, var(--primary) 8%, transparent));
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklch, white 68%, transparent),
+      inset 0 -1px 0 color-mix(in oklch, var(--foreground) 5%, transparent);
   }
 
   .meeting-overlay.compact {
@@ -493,7 +506,7 @@
     z-index: 1;
   }
 
-  .meeting-prompt { display: grid; gap: 13px; }
+  .meeting-prompt { display: grid; gap: 8px; }
 
   .prompt-topline,
   .recording-summary,
@@ -516,7 +529,7 @@
     align-items: center;
   }
 
-  .brand-lockup { gap: 9px; }
+  .brand-lockup { gap: 8px; }
 
   .brand-lockup > div {
     align-items: flex-start;
@@ -529,8 +542,8 @@
 
   .brand-mark {
     display: grid;
-    width: 31px;
-    height: 31px;
+    width: 28px;
+    height: 28px;
     place-items: center;
     border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
     border-radius: 10px;
@@ -539,26 +552,26 @@
     box-shadow: inset 0 1px 0 color-mix(in oklch, white 55%, transparent);
   }
 
-  .brand-mark :global(svg) { width: 17px; height: 17px; }
+  .brand-mark :global(svg) { width: 16px; height: 16px; }
   .prompt-badges { display: flex; align-items: center; gap: 5px; }
 
   .meeting-copy {
     min-width: 0;
     align-items: flex-start;
-    gap: 10px;
-    padding: 11px 12px;
+    gap: 8px;
+    padding: 8px 10px;
     border: 1px solid color-mix(in oklch, var(--border) 75%, transparent);
-    border-radius: 13px;
+    border-radius: 11px;
     background: color-mix(in oklch, var(--background) 62%, transparent);
     box-shadow: inset 0 1px 0 color-mix(in oklch, white 38%, transparent);
   }
 
-  .meeting-copy > :global(svg) { width: 17px; height: 17px; flex: none; margin-top: 2px; color: var(--primary); }
+  .meeting-copy > :global(svg) { width: 16px; height: 16px; flex: none; margin-top: 1px; color: var(--primary); }
   .meeting-copy > div { min-width: 0; }
 
   h1 {
     margin: 0 0 3px;
-    font-size: 0.95rem;
+    font-size: 0.88rem;
     line-height: 1.25;
     letter-spacing: -0.025em;
   }
@@ -567,7 +580,7 @@
     margin: 0;
     overflow: hidden;
     color: var(--muted-foreground);
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -576,13 +589,20 @@
     gap: 6px;
     margin: -2px 0 0;
     color: var(--muted-foreground);
-    font-size: 0.68rem;
+    font-size: 0.64rem;
     line-height: 1.4;
   }
 
   .meeting-consent :global(svg) { width: 13px; height: 13px; flex: none; color: var(--primary); }
-  .meeting-error { margin: -6px 0 0; color: var(--destructive); font-size: 0.7rem; }
-  .meeting-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: -2px; }
+  .meeting-error {
+    margin: 0;
+    overflow: hidden;
+    color: var(--destructive);
+    font-size: 0.66rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meeting-actions { display: flex; justify-content: flex-end; }
 
   .recording-controller { display: grid; min-width: 0; gap: 11px; }
   .phase-state { gap: 6px; color: var(--destructive); }
@@ -683,6 +703,13 @@
         radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 13%, transparent), transparent 43%),
         linear-gradient(145deg, color-mix(in oklch, var(--background) 93%, white), color-mix(in oklch, var(--background) 90%, var(--primary)));
       box-shadow: inset 0 1px 0 color-mix(in oklch, white 12%, transparent);
+    }
+
+    :global(html.transparent-overlay) .meeting-overlay {
+      border-color: color-mix(in oklch, var(--primary) 28%, var(--border));
+      background:
+        radial-gradient(circle at 8% 0%, color-mix(in oklch, var(--primary) 16%, transparent), transparent 45%),
+        linear-gradient(145deg, color-mix(in oklch, var(--background) 72%, transparent), color-mix(in oklch, var(--background) 64%, var(--primary) 8%, transparent));
     }
   }
 

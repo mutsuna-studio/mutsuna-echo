@@ -10,7 +10,10 @@ if (!target) {
 const mountTarget = target;
 
 const isMeetingOverlay = getCurrentWebviewWindow().label === "meeting-overlay";
+const isWindowsOverlay = isMeetingOverlay && navigator.userAgent.includes("Windows");
 document.body.classList.toggle("overlay-window", isMeetingOverlay);
+document.documentElement.classList.toggle("transparent-overlay", isWindowsOverlay);
+document.body.classList.toggle("transparent-overlay", isWindowsOverlay);
 
 async function bootstrap() {
   const component = isMeetingOverlay

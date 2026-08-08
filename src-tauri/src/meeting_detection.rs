@@ -303,8 +303,8 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Ok(());
     }
 
-    let width = 390.0;
-    let height = 230.0;
+    let width = 360.0;
+    let height = 176.0;
     // メイン画面の設定を複製すると、開発時はdevUrl、本番時はfrontendDistが
     // Tauriによって同じように解決される。
     let mut config = app
@@ -330,6 +330,19 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.always_on_top = true;
     config.skip_taskbar = true;
     config.focus = false;
+    #[cfg(target_os = "windows")]
+    {
+        // Acrylic is designed for transient surfaces such as this prompt. The
+        // transparent WebView lets the CSS tint remain readable over the effect.
+        config.transparent = true;
+        config.background_color = Some(tauri::utils::config::Color(0, 0, 0, 0));
+        config.shadow = false;
+        config.window_effects = Some(
+            tauri::window::EffectsBuilder::new()
+                .effect(tauri::utils::WindowEffect::Acrylic)
+                .build(),
+        );
+    }
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let scale = monitor.scale_factor();
         let size = monitor.size();

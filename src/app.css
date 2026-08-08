@@ -18,6 +18,11 @@ body.overlay-window {
   overflow: hidden;
 }
 
+html.transparent-overlay,
+body.transparent-overlay {
+  background: transparent;
+}
+
 body.overlay-window #app {
   width: 100vw;
   height: 100vh;
