@@ -70,6 +70,14 @@ export type LocalVadModelStatus = {
   runtimeSupported: boolean;
 };
 
+export type VadPreset = "softVoice" | "standard" | "noiseReduction";
+
+export const VAD_PRESET_OPTIONS = [
+  { value: "softVoice", label: "小声を優先", description: "小さな声を拾いやすくします" },
+  { value: "standard", label: "標準", description: "会議音声向けの推奨設定" },
+  { value: "noiseReduction", label: "ノイズ抑制を優先", description: "環境音の誤検出を抑えます" }
+] as const;
+
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
   return value === "elevenlabs" || value === "local";
 }

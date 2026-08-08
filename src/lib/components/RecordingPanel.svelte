@@ -16,6 +16,7 @@
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
   import RecordingHistory from "./RecordingHistory.svelte";
+  import { VAD_PRESET_OPTIONS, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
@@ -59,12 +60,21 @@
   let pendingDiscard = $state<RecoverableRecording | null>(null);
   let observedTranscriptRevision = $state(0);
   let statusEventsAvailable = $state(false);
+  let vadPreset = $state<VadPreset>("standard");
+  let vadPresetBusy = $state(false);
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
   );
   const canStart = $derived(
     Boolean(capabilities?.supported) && (microphone || systemAudio) && !disabled && !actionBusy && !active
+  );
+  const voiceActivityLabel = $derived(
+    status?.voiceActivity === "speechDetected"
+      ? "Speech detected"
+      : status?.voiceActivity === "listening"
+        ? "Listening…"
+        : "VAD unavailable"
   );
   const microphoneOptions = $derived([
     { value: "", label: "OSの既定マイク" },
@@ -157,14 +167,15 @@
         } catch (error) {
           console.error("Could not subscribe to recording status events", error);
         }
-        const [nextCapabilities, nextStatus, nextRecoverable, nextRecordedAudio] = await Promise.all([
+        const [nextCapabilities, nextStatus, nextRecoverable, nextRecordedAudio, nextVadPreset] = await Promise.all([
           invoke<RecordingCapabilities>("get_recording_capabilities"),
           invoke<RecordingStatus>("get_recording_status"),
           invoke<RecoverableRecording[]>("list_recoverable_recordings"),
           invoke<RecordedAudioSummary[]>("list_recorded_audio").catch((error) => {
             onError(errorText(error));
             return [];
-          })
+          }),
+          invoke<VadPreset>("get_vad_preset")
         ]);
         if (cancelled) return;
         capabilities = nextCapabilities;
@@ -174,6 +185,7 @@
         systemAudio = nextCapabilities.systemAudioSupported;
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
+        vadPreset = nextVadPreset;
         await acceptStatus(nextStatus);
       } catch (error) {
         onError(errorText(error));
@@ -215,6 +227,22 @@
       onError(errorText(error));
     } finally {
       actionBusy = false;
+    }
+  }
+
+  async function changeVadPreset(value: string) {
+    if (!(VAD_PRESET_OPTIONS as readonly { value: string }[]).some((option) => option.value === value)) return;
+    const previous = vadPreset;
+    vadPreset = value as VadPreset;
+    vadPresetBusy = true;
+    try {
+      await invoke("set_vad_preset", { preset: vadPreset });
+      onMessage("音声検出の感度を更新しました。");
+    } catch (error) {
+      vadPreset = previous;
+      onError(errorText(error));
+    } finally {
+      vadPresetBusy = false;
     }
   }
 
@@ -367,11 +395,27 @@
     </div>
   </div>
 
+  <div class="vad-setting">
+    <span>音声検出</span>
+    <Select
+      value={vadPreset}
+      options={VAD_PRESET_OPTIONS}
+      onValueChange={changeVadPreset}
+      disabled={active || disabled || vadPresetBusy}
+      ariaLabel="録音中の音声検出感度"
+    />
+  </div>
+
   <div class:active class="recorder">
     <span class="record-dot" aria-hidden="true"></span>
     <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
     <small>48 kHz · mono · AAC-LC · 64 kbps</small>
   </div>
+  {#if active}
+    <p class:speaking={status?.voiceActivity === "speechDetected"} class="voice-activity" role="status">
+      <span aria-hidden="true"></span>{voiceActivityLabel}
+    </p>
+  {/if}
 
   {#if active && status?.warning}
     <p class="capture-warning" role="status">{status.warning}</p>
@@ -430,14 +474,20 @@
   .meter { height: 5px; overflow: hidden; border-radius: 99px; background: #dfe6e1; }
   .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 100ms linear; }
   .recorder { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: #f3f6f4; }
+  .vad-setting { display: grid; grid-template-columns: auto minmax(180px, 280px); align-items: center; justify-content: end; gap: 10px; margin-top: 12px; color: #68746c; font-size: 0.82rem; }
   .recorder strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
   .recorder small { margin-left: auto; color: #68746c; }
   .record-dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca7a0; }
   .recorder.active .record-dot { background: #dc4438; box-shadow: 0 0 0 5px rgb(220 68 56 / 12%); }
   .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; font-size: 0.84rem; }
+  .voice-activity { display: flex; align-items: center; gap: 7px; margin: 9px 2px 0; color: #68746c; font-size: 0.82rem; }
+  .voice-activity span { width: 7px; height: 7px; border-radius: 50%; background: #9ca7a0; }
+  .voice-activity.speaking { color: #256b4a; font-weight: 700; }
+  .voice-activity.speaking span { background: #2c8058; box-shadow: 0 0 0 4px rgb(44 128 88 / 12%); }
   .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
   @media (max-width: 600px) {
     .sources { grid-template-columns: 1fr; }
+    .vad-setting { grid-template-columns: 1fr; justify-content: stretch; }
     .recorder { flex-wrap: wrap; }
     .recorder small { width: 100%; margin-left: 20px; }
     .record-actions :global(button) { flex: 1; }

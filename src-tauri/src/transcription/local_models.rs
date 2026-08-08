@@ -186,7 +186,8 @@ pub(crate) async fn download_local_stt_model(
         return Err("選択したローカルSTTモデルには対応していません。".into());
     }
     let _guard = DownloadGuard::acquire()?;
-    download_reazonspeech(&app).await
+    download_reazonspeech(&app).await?;
+    super::vad_models::download_local_vad_model(app).await
 }
 
 #[tauri::command]

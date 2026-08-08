@@ -3,11 +3,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
+  import { Select } from "@mutsuna/ui/select";
   import { formatFileSize } from "../format";
+  import { VAD_PRESET_OPTIONS } from "../providers";
   import type {
     LocalSttModelCatalogEntry,
     LocalSttModelDownloadProgress,
-    LocalVadModelStatus
+    LocalVadModelStatus,
+    VadPreset
   } from "../providers";
 
   interface Props {
@@ -25,6 +28,9 @@
   let vadModel = $state.raw<LocalVadModelStatus | null>(null);
   let vadWorking = $state(false);
   let vadProgress = $state<LocalSttModelDownloadProgress | null>(null);
+  let vadPreset = $state<VadPreset>("standard");
+  let presetWorking = $state(false);
+  let autoInstallAttempted = $state(false);
 
   const model = $derived(models[0] ?? null);
   const progressPercent = $derived(
@@ -45,9 +51,10 @@
   }
 
   async function refresh() {
-    [models, vadModel] = await Promise.all([
+    [models, vadModel, vadPreset] = await Promise.all([
       invoke<LocalSttModelCatalogEntry[]>("list_local_stt_model_catalog"),
-      invoke<LocalVadModelStatus>("get_local_vad_model_status")
+      invoke<LocalVadModelStatus>("get_local_vad_model_status"),
+      invoke<VadPreset>("get_vad_preset")
     ]);
     working = models.some((entry) => entry.downloading);
     vadWorking = vadModel.downloading;
@@ -67,7 +74,15 @@
         const unlistenVad = await listen<LocalSttModelDownloadProgress>(
           "local-vad-model-download-progress",
           ({ payload }) => {
-            if (!cancelled) vadProgress = payload;
+            if (!cancelled) {
+              vadWorking = true;
+              vadProgress = payload;
+              if (payload.totalBytes > 0 && payload.downloadedBytes >= payload.totalBytes) {
+                window.setTimeout(() => {
+                  if (!cancelled) void refresh().catch((error) => onError(errorText(error)));
+                }, 300);
+              }
+            }
           }
         );
         const unlistenStt = unlisten;
@@ -76,6 +91,10 @@
           unlistenVad();
         };
         if (!cancelled) await refresh();
+        if (!cancelled && !autoInstallAttempted && models[0]?.installed && vadModel && !vadModel.installed && !vadModel.downloading && vadModel.runtimeSupported) {
+          autoInstallAttempted = true;
+          await downloadVad(true);
+        }
       } catch (error) {
         if (!cancelled) onError(errorText(error));
       } finally {
@@ -96,7 +115,7 @@
       await invoke("download_local_stt_model", { modelId: model.modelId });
       await refresh();
       await onChanged();
-      onMessage("ReazonSpeech K2をインストールしました。");
+      onMessage("ReazonSpeech K2とSilero VADをインストールしました。");
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -129,20 +148,38 @@
     }
   }
 
-  async function downloadVad() {
+  async function downloadVad(automatic = false) {
     if (!vadModel || vadWorking) return;
     vadWorking = true;
     vadProgress = { modelId: vadModel.modelId, downloadedBytes: 0, totalBytes: vadModel.sizeBytes };
     try {
       await invoke("download_local_vad_model");
       await refresh();
-      onMessage("Silero VADをインストールしました。次回のローカル文字起こしから無音区間を除外します。");
+      onMessage(automatic
+        ? "Silero VADを標準機能として追加しました。"
+        : "Silero VADをインストールしました。次回のローカル文字起こしから無音区間を除外します。");
     } catch (error) {
       onError(errorText(error));
     } finally {
       vadWorking = false;
       vadProgress = null;
       try { await refresh(); } catch { /* 次回表示時に再取得する */ }
+    }
+  }
+
+  async function changePreset(value: string) {
+    if (!(["softVoice", "standard", "noiseReduction"] as string[]).includes(value)) return;
+    const previous = vadPreset;
+    vadPreset = value as VadPreset;
+    presetWorking = true;
+    try {
+      await invoke("set_vad_preset", { preset: vadPreset });
+      onMessage("VADの検出感度を更新しました。次の録音・文字起こしから反映します。");
+    } catch (error) {
+      vadPreset = previous;
+      onError(errorText(error));
+    } finally {
+      presetWorking = false;
     }
   }
 
@@ -154,19 +191,6 @@
     }
   }
 
-  async function removeVad() {
-    if (!vadModel || vadWorking || !window.confirm("Silero VADを端末から削除しますか？")) return;
-    vadWorking = true;
-    try {
-      await invoke("delete_local_vad_model");
-      await refresh();
-      onMessage("Silero VADを削除しました。ローカル文字起こしは従来の全音声処理に戻ります。");
-    } catch (error) {
-      onError(errorText(error));
-    } finally {
-      vadWorking = false;
-    }
-  }
 </script>
 
 <div class="local-model-manager" aria-busy={loading || working}>
@@ -213,6 +237,15 @@
       音声区間検出 · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"} · 元音声の時刻を保持
     </small>
     <small>ローカルSTTの無音区間を除外して処理時間を短縮します。録音の自動停止には使用しません。</small>
+    {#if vadModel?.installed}
+      <Select
+        value={vadPreset}
+        options={VAD_PRESET_OPTIONS}
+        onValueChange={changePreset}
+        disabled={disabled || vadWorking || presetWorking}
+        ariaLabel="VADの検出感度"
+      />
+    {/if}
     {#if vadModel && !vadModel.runtimeSupported}
       <small>このOS向けのVAD推論エンジンは準備中です。</small>
     {/if}
@@ -221,14 +254,10 @@
       <small>{formatFileSize(vadProgress.downloadedBytes)} / {formatFileSize(vadProgress.totalBytes)}</small>
     {/if}
   </div>
-  {#if vadModel?.installed}
-    <Button variant="outline" type="button" onclick={removeVad} disabled={disabled || vadWorking}>
-      削除
-    </Button>
-  {:else if vadWorking}
+  {#if vadWorking && !vadModel?.installed}
     <Button variant="outline" type="button" onclick={cancelVadDownload}>キャンセル</Button>
-  {:else}
-    <Button type="button" onclick={downloadVad} disabled={disabled || loading || !vadModel || !vadModel.runtimeSupported}>
+  {:else if !vadModel?.installed}
+    <Button type="button" onclick={() => downloadVad()} disabled={disabled || loading || !vadModel || !vadModel.runtimeSupported}>
       ダウンロード
     </Button>
   {/if}

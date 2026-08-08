@@ -9,7 +9,7 @@ use std::{
 
 use lofty::{config::ParseOptions, file::AudioFile, probe::Probe};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::transcription::{Transcript, TranscriptionProvider};
@@ -21,7 +21,10 @@ const MAX_AUDIO_FILE_SIZE: u64 = 5_000_000_000;
 pub(crate) struct AudioSelectionState {
     selected: Mutex<Option<SelectedAudio>>,
     transcribing: AtomicBool,
+    progress: Mutex<Option<TranscriptionProgress>>,
 }
+
+const TRANSCRIPTION_PROGRESS_EVENT: &str = "transcription-progress";
 
 #[derive(Debug, Clone)]
 struct SelectedAudio {
@@ -43,6 +46,48 @@ pub(crate) struct SelectedAudioFile {
 pub(crate) struct TranscriptionSession {
     selected_audio: Option<SelectedAudioFile>,
     transcribing: bool,
+    progress: Option<TranscriptionProgress>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TranscriptionStage {
+    Preparing,
+    DetectingSpeech,
+    Transcribing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptionProgress {
+    stage: TranscriptionStage,
+    completed_chunks: u32,
+    total_chunks: Option<u32>,
+}
+
+impl TranscriptionProgress {
+    pub(crate) const fn new(
+        stage: TranscriptionStage,
+        completed_chunks: u32,
+        total_chunks: Option<u32>,
+    ) -> Self {
+        Self {
+            stage,
+            completed_chunks,
+            total_chunks,
+        }
+    }
+}
+
+pub(crate) fn publish_transcription_progress(app: &AppHandle, progress: TranscriptionProgress) {
+    let state = app.state::<AudioSelectionState>();
+    *state
+        .progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(progress.clone());
+    if let Err(error) = app.emit(TRANSCRIPTION_PROGRESS_EVENT, progress) {
+        eprintln!("Could not emit transcription progress: {error:?}");
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +206,11 @@ pub(crate) fn get_transcription_session(
     Ok(TranscriptionSession {
         selected_audio,
         transcribing: state.transcribing.load(Ordering::Acquire),
+        progress: state
+            .progress
+            .lock()
+            .map_err(|_| "文字起こし進捗を取得できませんでした。".to_string())?
+            .clone(),
     })
 }
 
@@ -168,11 +218,16 @@ struct AudioMetadata {
     duration_ms: u64,
 }
 
-struct TranscriptionGuard<'a>(&'a AtomicBool);
+struct TranscriptionGuard<'a>(&'a AudioSelectionState);
 
 impl Drop for TranscriptionGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.transcribing.store(false, Ordering::Release);
+        *self
+            .0
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -496,7 +551,11 @@ pub(crate) async fn transcribe_selected_audio(
     {
         return Err("文字起こしはすでに実行中です。".to_string());
     }
-    let _guard = TranscriptionGuard(&state.transcribing);
+    let _guard = TranscriptionGuard(&state);
+    publish_transcription_progress(
+        &app,
+        TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None),
+    );
 
     let selected = state
         .selected
@@ -509,6 +568,12 @@ pub(crate) async fn transcribe_selected_audio(
     // the actual file once more at the boundary where it is consumed.
     validate_audio_path(&selected.path)?;
 
+    if request.provider == TranscriptionProvider::ElevenLabs {
+        publish_transcription_progress(
+            &app,
+            TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
+        );
+    }
     let transcript = crate::transcription::transcribe(
         &app,
         &selected.path,

@@ -27,6 +27,15 @@ pub enum StopReason {
     CaptureError,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceActivityState {
+    #[default]
+    Unavailable,
+    Listening,
+    SpeechDetected,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartRecordingRequest {
@@ -81,6 +90,8 @@ pub struct RecordingStatus {
     pub system_level: f32,
     pub microphone: bool,
     pub system_audio: bool,
+    #[serde(default)]
+    pub voice_activity: VoiceActivityState,
     pub output_path: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub warning: Option<String>,
@@ -97,6 +108,7 @@ impl Default for RecordingStatus {
             system_level: 0.0,
             microphone: false,
             system_audio: false,
+            voice_activity: VoiceActivityState::Unavailable,
             output_path: None,
             stop_reason: None,
             warning: None,

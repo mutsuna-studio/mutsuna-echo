@@ -23,6 +23,7 @@
   import type {
     SelectedAudioFile,
     Transcript,
+    TranscriptionProgress,
     TranscriptionResult,
     TranscriptionSession,
     TranscriptionUsage
@@ -35,6 +36,7 @@
   let deleting = $state(false);
   let selecting = $state(false);
   let transcribing = $state(false);
+  let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let usageLoading = $state(false);
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
@@ -183,14 +185,18 @@
 
   $effect(() => {
     let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
+    let unlistenPending: UnlistenFn | undefined;
+    let unlistenProgress: UnlistenFn | undefined;
     void (async () => {
       try {
-        unlisten = await listen<PendingAction>("pending-action-available", ({ payload }) => {
-          if (!cancelled) {
-            void handlePendingAction(payload);
-          }
-        });
+        [unlistenPending, unlistenProgress] = await Promise.all([
+          listen<PendingAction>("pending-action-available", ({ payload }) => {
+            if (!cancelled) void handlePendingAction(payload);
+          }),
+          listen<TranscriptionProgress>("transcription-progress", ({ payload }) => {
+            if (!cancelled) transcriptionProgress = payload;
+          })
+        ]);
         const [nextProviders, session, pendingResult] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
@@ -202,6 +208,7 @@
         transcriptionProviders = nextProviders;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
+        transcriptionProgress = session.progress;
         if (pendingResult.error) {
           pendingActionProblem = { action: null, message: pendingResult.error };
           showError(pendingResult.error);
@@ -211,6 +218,7 @@
           await restoreSelectedTranscript();
         }
         if (hasApiKey) await refreshUsage();
+        void ensureStandardVad();
       } catch (error) {
         showError(errorText(error));
       } finally {
@@ -219,7 +227,8 @@
     })();
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenPending?.();
+      unlistenProgress?.();
     };
   });
 
@@ -233,7 +242,9 @@
       polling = true;
       try {
         const session = await invoke<TranscriptionSession>("get_transcription_session");
-        if (cancelled || session.transcribing) return;
+        if (cancelled) return;
+        transcriptionProgress = session.progress;
+        if (session.transcribing) return;
         selectedAudio = session.selectedAudio;
         transcribing = false;
         if (selectedAudio) {
@@ -307,6 +318,7 @@
     if (!canTranscribe) return;
 
     transcribing = true;
+    transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
     transcript = null;
     try {
       const result = await invoke<TranscriptionResult>("transcribe_selected_audio", {
@@ -331,6 +343,20 @@
       showError(errorText(error));
     } finally {
       transcribing = false;
+      transcriptionProgress = null;
+    }
+  }
+
+  async function ensureStandardVad() {
+    try {
+      const status = await invoke<{ installed: boolean; downloading: boolean; runtimeSupported: boolean }>(
+        "get_local_vad_model_status"
+      );
+      if (!status.installed && !status.downloading && status.runtimeSupported) {
+        await invoke("download_local_vad_model");
+      }
+    } catch (error) {
+      console.warn("Could not install the standard VAD model", error);
     }
   }
 
@@ -406,6 +432,7 @@
     provider={transcriptionProvider}
     {selecting}
     {transcribing}
+    {transcriptionProgress}
     {recordingBusy}
     {transcriptRevision}
     {busy}

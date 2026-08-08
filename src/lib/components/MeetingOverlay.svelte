@@ -13,7 +13,7 @@
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const promptSize = { width: 390, height: 230 };
-  const controllerSize = { width: 310, height: 136 };
+  const controllerSize = { width: 310, height: 158 };
 
   let detection = $state<MeetingDetection | null>(null);
   let status = $state.raw<RecordingStatus | null>(null);
@@ -29,6 +29,13 @@
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
+  );
+  const voiceActivityLabel = $derived(
+    status?.voiceActivity === "speechDetected"
+      ? "Speech detected"
+      : status?.voiceActivity === "listening"
+        ? "Listening…"
+        : "VAD unavailable"
   );
 
   function errorText(value: unknown): string {
@@ -268,6 +275,11 @@
             </Button>
           {/if}
         </div>
+        {#if active}
+          <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status">
+            <span aria-hidden="true"></span>{voiceActivityLabel}
+          </p>
+        {/if}
         {#if completionMessage}<p class="recording-result" role="status">{completionMessage}</p>{/if}
         {#if error}<p class="meeting-error compact-error" role="alert">{error}</p>{/if}
       </section>

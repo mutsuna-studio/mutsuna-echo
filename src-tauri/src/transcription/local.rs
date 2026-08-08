@@ -1,8 +1,11 @@
 use std::path::Path;
 
 use super::{
-    audio_decode::decode_mono, local_models, segments_from_tokens, vad, vad_models,
+    audio_decode::decode_mono, local_models, segments_from_tokens, vad, vad_models, vad_settings,
     TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+};
+use crate::commands::transcribe::{
+    publish_transcription_progress, TranscriptionProgress, TranscriptionStage,
 };
 use sherpa_onnx::{
     OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult,
@@ -38,8 +41,17 @@ pub(crate) fn transcribe(
     let recognizer = OfflineRecognizer::create(&config)
         .ok_or_else(|| "ReazonSpeechの推論エンジンを初期化できませんでした。モデルを再インストールしてください。".to_string())?;
     let (tokens, segments) = match vad_models::installed_model_path(app)? {
-        Some(vad_model) => transcribe_speech_regions(&recognizer, audio_path, &vad_model)?,
-        None => transcribe_full_audio(&recognizer, audio_path)?,
+        Some(vad_model) => {
+            let preset = vad_settings::current_preset(app)?;
+            transcribe_speech_regions(app, &recognizer, audio_path, &vad_model, preset)?
+        }
+        None => {
+            publish_transcription_progress(
+                app,
+                TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
+            );
+            transcribe_full_audio(&recognizer, audio_path)?
+        }
     };
     Ok(Transcript {
         provider: "local".into(),
@@ -67,12 +79,29 @@ fn transcribe_full_audio(
 }
 
 fn transcribe_speech_regions(
+    app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,
     audio_path: &Path,
     vad_model: &Path,
+    preset: vad_settings::VadPreset,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(TranscriptionStage::DetectingSpeech, 0, None),
+    );
+    let mut total_chunks = 0u32;
+    vad::visit_speech_regions(audio_path, vad_model, preset, |_| {
+        total_chunks = total_chunks.saturating_add(1);
+        Ok(())
+    })?;
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, Some(total_chunks)),
+    );
+
     let mut tokens = Vec::new();
-    vad::visit_speech_regions(audio_path, vad_model, |region| {
+    let mut completed_chunks = 0u32;
+    vad::visit_speech_regions(audio_path, vad_model, preset, |region| {
         let stream = recognizer.create_stream();
         stream.accept_waveform(vad::SAMPLE_RATE as i32, &region.samples);
         recognizer.decode(&stream);
@@ -82,6 +111,15 @@ fn transcribe_speech_regions(
         let (mut region_tokens, _) =
             normalize_result(&result, region.duration_ms(), region.start_ms);
         tokens.append(&mut region_tokens);
+        completed_chunks = completed_chunks.saturating_add(1);
+        publish_transcription_progress(
+            app,
+            TranscriptionProgress::new(
+                TranscriptionStage::Transcribing,
+                completed_chunks,
+                Some(total_chunks),
+            ),
+        );
         Ok(())
     })?;
     let segments = segments_from_tokens(&tokens);

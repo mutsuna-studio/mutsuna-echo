@@ -37,6 +37,8 @@ pub fn run() {
             transcription::vad_models::download_local_vad_model,
             transcription::vad_models::cancel_local_vad_model_download,
             transcription::vad_models::delete_local_vad_model,
+            transcription::vad_settings::get_vad_preset,
+            transcription::vad_settings::set_vad_preset,
             pending_action::get_pending_action,
             pending_action::receive_pending_action,
             pending_action::acknowledge_pending_action,

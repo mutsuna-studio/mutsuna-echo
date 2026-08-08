@@ -2,6 +2,7 @@ import type { SelectedAudioFile } from "./transcript";
 
 export type RecordingPhase = "idle" | "starting" | "recording" | "finalizing" | "completed" | "failed";
 export type StopReason = "user" | "durationLimit" | "sourceDisconnected" | "sourceStalled" | "captureError";
+export type VoiceActivityState = "unavailable" | "listening" | "speechDetected";
 
 export interface AudioDevice {
   id: string;
@@ -33,6 +34,7 @@ export interface RecordingStatus {
   systemLevel: number;
   microphone: boolean;
   systemAudio: boolean;
+  voiceActivity: VoiceActivityState;
   outputPath: string | null;
   stopReason: StopReason | null;
   warning: string | null;

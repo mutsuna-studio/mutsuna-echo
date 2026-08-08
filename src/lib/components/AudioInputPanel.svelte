@@ -15,7 +15,7 @@
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId
   } from "../providers";
-  import type { SelectedAudioFile } from "../types/transcript";
+  import type { SelectedAudioFile, TranscriptionProgress } from "../types/transcript";
 
   interface Props {
     selectedAudio: SelectedAudioFile | null;
@@ -23,6 +23,7 @@
     provider: TranscriptionProviderId;
     selecting: boolean;
     transcribing: boolean;
+    transcriptionProgress: TranscriptionProgress | null;
     recordingBusy: boolean;
     transcriptRevision: number;
     busy: boolean;
@@ -44,6 +45,7 @@
     provider,
     selecting,
     transcribing,
+    transcriptionProgress,
     recordingBusy,
     transcriptRevision,
     busy,
@@ -67,6 +69,17 @@
       ? selectedAudio.durationMs / 3_600_000 * providerDefinition.pricingUsdPerHour
       : null
   );
+  const transcriptionStatus = $derived.by(() => {
+    if (!transcribing) return "文字起こし開始";
+    if (transcriptionProgress?.stage === "detectingSpeech") return "発話区間を検出中…";
+    if (transcriptionProgress?.stage === "transcribing") {
+      if (transcriptionProgress.totalChunks != null) {
+        return `文字起こし中 ${transcriptionProgress.completedChunks} / ${transcriptionProgress.totalChunks}`;
+      }
+      return "文字起こし中…";
+    }
+    return "準備中…";
+  });
 
   function selectProvider(value: string) {
     if (isTranscriptionProviderId(value)) onProviderChange(value);
@@ -172,7 +185,7 @@
         {providerDefinition?.statusMessage ?? "プロバイダー情報を確認しています。"}
       </p>
       <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>
-        {transcribing ? "文字起こし中…" : "文字起こし開始"}
+        {transcriptionStatus}
       </Button>
     </div>
   </div>

@@ -2,7 +2,10 @@ use std::path::Path;
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
-use super::audio_decode::decode_mono;
+use super::{
+    audio_decode::decode_mono,
+    vad_settings::{VadParameters, VadPreset},
+};
 
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
 
@@ -22,9 +25,10 @@ impl SpeechRegion {
 pub(crate) fn visit_speech_regions(
     audio_path: &Path,
     model_path: &Path,
+    preset: VadPreset,
     mut visit: impl FnMut(SpeechRegion) -> Result<(), String>,
 ) -> Result<u64, String> {
-    let detector = create_detector(model_path)?;
+    let detector = create_detector(model_path, preset.parameters())?;
     let mut resampler: Option<StreamingAreaResampler> = None;
     let duration_ms = decode_mono(audio_path, |sample_rate, samples| {
         let resampler =
@@ -41,15 +45,18 @@ pub(crate) fn visit_speech_regions(
     Ok(duration_ms)
 }
 
-fn create_detector(model_path: &Path) -> Result<VoiceActivityDetector, String> {
+fn create_detector(
+    model_path: &Path,
+    parameters: VadParameters,
+) -> Result<VoiceActivityDetector, String> {
     let config = VadModelConfig {
         silero_vad: SileroVadModelConfig {
             model: Some(model_path.to_string_lossy().into_owned()),
-            threshold: 0.25,
-            min_silence_duration: 0.5,
-            min_speech_duration: 0.25,
+            threshold: parameters.threshold,
+            min_silence_duration: parameters.min_silence_duration,
+            min_speech_duration: parameters.min_speech_duration,
             window_size: 512,
-            max_speech_duration: 30.0,
+            max_speech_duration: parameters.max_speech_duration,
         },
         sample_rate: SAMPLE_RATE as i32,
         num_threads: 1,
@@ -62,6 +69,36 @@ fn create_detector(model_path: &Path) -> Result<VoiceActivityDetector, String> {
             .to_string()
     })?;
     Ok(detector)
+}
+
+pub(crate) struct LiveVoiceActivityDetector {
+    detector: VoiceActivityDetector,
+    resampler: StreamingAreaResampler,
+}
+
+impl LiveVoiceActivityDetector {
+    pub(crate) fn create(
+        model_path: &Path,
+        source_sample_rate: u32,
+        preset: VadPreset,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            detector: create_detector(model_path, preset.parameters())?,
+            resampler: StreamingAreaResampler::new(source_sample_rate, SAMPLE_RATE),
+        })
+    }
+
+    pub(crate) fn accept_waveform(&mut self, samples: &[f32]) -> bool {
+        let output = self.resampler.process(samples);
+        if !output.is_empty() {
+            self.detector.accept_waveform(&output);
+        }
+        let detected = self.detector.detected();
+        while !self.detector.is_empty() {
+            self.detector.pop();
+        }
+        detected
+    }
 }
 
 fn drain(

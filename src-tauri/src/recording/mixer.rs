@@ -14,12 +14,14 @@ pub(super) fn drain_mix(
     mix_buffer: &mut Vec<f32>,
     request: &StartRecordingRequest,
     flush: bool,
+    mut on_mixed: impl FnMut(&[f32]),
 ) -> Result<(), String> {
     loop {
         if !request.microphone {
             let Some((_, samples)) = system.pop_front() else {
                 break;
             };
+            on_mixed(&samples);
             writer.write(&samples)?;
             continue;
         }
@@ -27,6 +29,7 @@ pub(super) fn drain_mix(
             let Some((_, samples)) = microphone.pop_front() else {
                 break;
             };
+            on_mixed(&samples);
             writer.write(&samples)?;
             continue;
         }
@@ -36,22 +39,27 @@ pub(super) fn drain_mix(
                 let (_, mic) = microphone.pop_front().expect("front checked");
                 let (_, sys) = system.pop_front().expect("front checked");
                 mix_with_limiter_into(&mic, &sys, mix_buffer);
+                on_mixed(mix_buffer);
                 writer.write(mix_buffer)?;
             }
             (Some((mic_pts, _)), Some((sys_pts, _))) if mic_pts < sys_pts => {
                 let (_, mic) = microphone.pop_front().expect("front checked");
+                on_mixed(&mic);
                 writer.write(&mic)?;
             }
             (Some(_), Some(_)) => {
                 let (_, sys) = system.pop_front().expect("front checked");
+                on_mixed(&sys);
                 writer.write(&sys)?;
             }
             (Some(_), None) if flush || microphone.len() > 3 => {
                 let (_, mic) = microphone.pop_front().expect("front checked");
+                on_mixed(&mic);
                 writer.write(&mic)?;
             }
             (None, Some(_)) if flush || system.len() > 3 => {
                 let (_, sys) = system.pop_front().expect("front checked");
+                on_mixed(&sys);
                 writer.write(&sys)?;
             }
             _ => break,

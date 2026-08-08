@@ -25,7 +25,10 @@ use super::{
     mixer::drain_mix,
     platform::M4aWriter,
     session::atomic_copy_to_output,
-    types::{StopReason, CHANNELS, FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE, SOURCE_BITRATE},
+    types::{
+        StopReason, VoiceActivityState, CHANNELS, FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
+        SOURCE_BITRATE,
+    },
 };
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -178,8 +181,16 @@ fn run_desktop_recording(
     };
     manifest.save(&paths.directory)?;
 
+    let mut live_vad = create_live_vad(app);
+    let mut voice_activity = if live_vad.is_some() {
+        VoiceActivityState::Listening
+    } else {
+        VoiceActivityState::Unavailable
+    };
+
     publish_status(app, status, |current| {
-        current.phase = RecordingPhase::Recording
+        current.phase = RecordingPhase::Recording;
+        current.voice_activity = voice_activity;
     });
     let _ = ready.send(Ok(()));
     let mut last_manifest = Instant::now();
@@ -192,7 +203,6 @@ fn run_desktop_recording(
     let mut stop_reason = StopReason::User;
     let mut microphone_stalled = false;
     let mut system_stalled = false;
-
     while !stop.load(Ordering::Acquire) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         if elapsed_ms >= MAX_DURATION_MS {
@@ -235,12 +245,22 @@ fn run_desktop_recording(
             &mut mix_buffer,
             request,
             false,
+            |samples| {
+                if let Some(detector) = live_vad.as_mut() {
+                    voice_activity = if detector.accept_waveform(samples) {
+                        VoiceActivityState::SpeechDetected
+                    } else {
+                        VoiceActivityState::Listening
+                    };
+                }
+            },
         )?;
         if last_status.elapsed() >= STATUS_INTERVAL {
             publish_status(app, status, |current| {
                 current.elapsed_ms = elapsed_ms;
                 current.microphone_level = microphone_level;
                 current.system_level = system_level;
+                current.voice_activity = voice_activity;
             });
             last_status = Instant::now();
         }
@@ -267,6 +287,11 @@ fn run_desktop_recording(
         &mut mix_buffer,
         request,
         true,
+        |samples| {
+            if let Some(detector) = live_vad.as_mut() {
+                let _ = detector.accept_waveform(samples);
+            }
+        },
     )?;
 
     if cancel.load(Ordering::Acquire) {
@@ -313,8 +338,38 @@ fn run_desktop_recording(
         current.warning = None;
         current.microphone_level = 0.0;
         current.system_level = 0.0;
+        current.voice_activity = VoiceActivityState::Unavailable;
     });
     Ok(())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn create_live_vad(
+    app: &AppHandle,
+) -> Option<crate::transcription::vad::LiveVoiceActivityDetector> {
+    let model = match crate::transcription::vad_models::installed_model_path(app) {
+        Ok(Some(path)) => path,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("Could not verify live VAD model: {error}");
+            return None;
+        }
+    };
+    let preset = match crate::transcription::vad_settings::current_preset(app) {
+        Ok(preset) => preset,
+        Err(error) => {
+            eprintln!("Could not read live VAD settings: {error}");
+            return None;
+        }
+    };
+    match crate::transcription::vad::LiveVoiceActivityDetector::create(&model, SAMPLE_RATE, preset)
+    {
+        Ok(detector) => Some(detector),
+        Err(error) => {
+            eprintln!("Could not initialize live VAD: {error}");
+            None
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

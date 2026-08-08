@@ -8,8 +8,9 @@ pub(crate) mod local_models;
 pub(crate) mod providers;
 pub mod types;
 #[cfg(desktop)]
-mod vad;
+pub(crate) mod vad;
 pub(crate) mod vad_models;
+pub(crate) mod vad_settings;
 
 use std::path::Path;
 

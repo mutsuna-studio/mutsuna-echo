@@ -42,6 +42,15 @@ export type SelectedAudioFile = {
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
   transcribing: boolean;
+  progress: TranscriptionProgress | null;
+};
+
+export type TranscriptionStage = "preparing" | "detectingSpeech" | "transcribing";
+
+export type TranscriptionProgress = {
+  stage: TranscriptionStage;
+  completedChunks: number;
+  totalChunks: number | null;
 };
 
 export type TranscriptionUsage = {
