@@ -89,7 +89,12 @@
     if (!controllerMode) return;
     if (nextStatus.phase === "completed") {
       completionMessage = "録音を保存しました";
-      window.setTimeout(() => void closeOverlay(), 1_200);
+      try {
+        await invoke("open_main_window_for_transcription");
+        await closeOverlay();
+      } catch (cause) {
+        error = `録音は保存しましたが、メイン画面を開けませんでした。${errorText(cause)}`;
+      }
     } else if (nextStatus.phase === "failed") {
       error = nextStatus.error ?? "録音を完了できませんでした。";
     }

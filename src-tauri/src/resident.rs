@@ -63,7 +63,7 @@ fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            MENU_OPEN => show_or_create_main_window(app),
+            MENU_OPEN => request_main_window(app),
             MENU_QUIT => quit_application(app),
             _ => {}
         })
@@ -76,7 +76,7 @@ fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     ..
                 }
             ) {
-                show_or_create_main_window(tray.app_handle());
+                request_main_window(tray.app_handle());
             }
         });
     if let Some(icon) = app.default_window_icon() {
@@ -107,12 +107,24 @@ fn destroy_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn show_or_create_main_window<R: Runtime>(app: &AppHandle<R>) {
+fn request_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = show_or_create_main_window(app) {
+        eprintln!("Could not request main webview window: {error}");
+    }
+}
+
+fn show_or_create_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-        return;
+        window
+            .unminimize()
+            .map_err(|error| format!("メイン画面を元のサイズへ戻せませんでした: {error}"))?;
+        window
+            .show()
+            .map_err(|error| format!("メイン画面を表示できませんでした: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("メイン画面を前面へ移動できませんでした: {error}"))?;
+        return Ok(());
     }
 
     let state = app.state::<ResidentState>();
@@ -121,7 +133,7 @@ fn show_or_create_main_window<R: Runtime>(app: &AppHandle<R>) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return;
+        return Ok(());
     }
 
     let app = app.clone();
@@ -159,8 +171,16 @@ fn show_or_create_main_window<R: Runtime>(app: &AppHandle<R>) {
             .state::<ResidentState>()
             .opening
             .store(false, Ordering::Release);
-        eprintln!("Could not start main window creation: {error}");
+        return Err(format!(
+            "メイン画面の起動処理を開始できませんでした: {error}"
+        ));
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_main_window_for_transcription(app: AppHandle) -> Result<(), String> {
+    show_or_create_main_window(&app)
 }
 
 fn quit_application<R: Runtime>(app: &AppHandle<R>) {

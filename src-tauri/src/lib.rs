@@ -46,7 +46,9 @@ pub fn run() {
             #[cfg(desktop)]
             meeting_detection::get_meeting_detection,
             #[cfg(desktop)]
-            meeting_detection::dismiss_meeting_overlay
+            meeting_detection::dismiss_meeting_overlay,
+            #[cfg(desktop)]
+            resident::open_main_window_for_transcription
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
