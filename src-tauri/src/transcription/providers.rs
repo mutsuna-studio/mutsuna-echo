@@ -59,7 +59,11 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
         ),
     };
     let local = match super::local_models::list_installed(app) {
-        Ok(models) => local_provider(models.first()),
+        Ok(models) => local_provider(
+            models
+                .iter()
+                .find(|model| model.model_id == super::local_models::REAZONSPEECH_MODEL_ID),
+        ),
         Err(error) => unavailable_provider(
             "local",
             "ローカルSTT",
@@ -126,21 +130,29 @@ fn elevenlabs(has_api_key: bool) -> TranscriptionProviderDescriptor {
 }
 
 fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProviderDescriptor {
+    let engine_available = cfg!(desktop);
     let (availability, configured, model_id, model_label, status_message) = match installed {
         Some(model) => (
-            ProviderAvailability::EngineUnavailable,
+            if engine_available {
+                ProviderAvailability::Ready
+            } else {
+                ProviderAvailability::EngineUnavailable
+            },
             true,
             Some(model.model_id.clone()),
             model.display_name.clone(),
-            "モデルを検出しました。ローカル推論エンジンは次の実装で有効になります。".into(),
+            if engine_available {
+                "端末内で日本語を文字起こしできます。話者分離には未対応です。".into()
+            } else {
+                "このOSではReazonSpeechの推論エンジンをまだ利用できません。".into()
+            },
         ),
         None => (
             ProviderAvailability::ModelRequired,
             false,
             None,
             "ダウンロードしたモデルを使用".into(),
-            "任意ダウンロード型モデルの管理基盤を準備済みです。ダウンロードUIはまだ利用できません。"
-                .into(),
+            "ReazonSpeech K2をダウンロードすると端末内で文字起こしできます。".into(),
         ),
     };
     TranscriptionProviderDescriptor {
@@ -149,7 +161,7 @@ fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProvi
         kind: ProviderKind::Local,
         setup: ProviderSetup::ModelDownload,
         availability,
-        ready: false,
+        ready: installed.is_some() && engine_available,
         configured,
         model_id,
         model_label,
@@ -176,7 +188,9 @@ pub(crate) fn list_installed_local_stt_models(
 
 #[cfg(test)]
 mod tests {
-    use super::{local_provider, ProviderAvailability, ProviderKind, ProviderSetup};
+    use super::{
+        local_provider, InstalledLocalModel, ProviderAvailability, ProviderKind, ProviderSetup,
+    };
 
     #[test]
     fn local_provider_requires_an_external_model() {
@@ -190,5 +204,20 @@ mod tests {
             ProviderAvailability::ModelRequired
         ));
         assert!(provider.pricing_usd_per_hour.is_none());
+    }
+
+    #[test]
+    fn installed_local_model_is_ready_on_desktop() {
+        let model = InstalledLocalModel {
+            model_id: super::super::local_models::REAZONSPEECH_MODEL_ID.into(),
+            version: "2024-08-01".into(),
+            engine: "sherpa-onnx-transducer".into(),
+            display_name: "ReazonSpeech K2 int8-fp32".into(),
+            language_codes: vec!["ja".into()],
+            size_bytes: 169_180_699,
+        };
+        let provider = local_provider(Some(&model));
+        assert_eq!(provider.ready, cfg!(desktop));
+        assert!(provider.configured);
     }
 }

@@ -2,7 +2,11 @@
   "bundle": {
     "macOS": {
       "minimumSystemVersion": "14.4",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "frameworks": [
+        "target/release/libsherpa-onnx-c-api.dylib",
+        "target/release/libonnxruntime.dylib"
+      ]
     }
   }
 }

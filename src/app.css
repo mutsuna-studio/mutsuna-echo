@@ -437,6 +437,34 @@ h3 {
 
 .provider-action { margin-top: 14px; }
 
+.local-model-manager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.local-model-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+}
+
+.local-model-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.local-model-copy small { color: var(--muted-foreground); }
+.local-model-copy progress { width: 100%; accent-color: var(--primary); }
+
 .credential-heading {
   display: flex;
   align-items: center;

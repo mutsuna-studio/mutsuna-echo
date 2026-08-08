@@ -6,6 +6,7 @@
   import { Select } from "@mutsuna/ui/select";
   import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
   import RecordingPanel from "./RecordingPanel.svelte";
+  import LocalModelManager from "./LocalModelManager.svelte";
   import { formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import {
     getTranscriptionProvider,
@@ -30,6 +31,7 @@
     onSelect: () => void;
     onTranscribe: () => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
+    onProvidersChanged: () => Promise<void>;
     onRecordedAudio: (audio: SelectedAudioFile) => void;
     onRecordingBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -50,6 +52,7 @@
     onSelect,
     onTranscribe,
     onProviderChange,
+    onProvidersChanged,
     onRecordedAudio,
     onRecordingBusyChange,
     onMessage,
@@ -156,6 +159,14 @@
         <small>{providerDefinition?.capabilitySummary ?? "プロバイダー情報を読み込んでいます"}</small>
       </div>
     </div>
+    {#if providerDefinition?.kind === "local"}
+      <LocalModelManager
+        disabled={busy}
+        onChanged={onProvidersChanged}
+        {onMessage}
+        {onError}
+      />
+    {/if}
     <div class="action-row provider-action" data-transcription-action>
       <p class="action-help">
         {providerDefinition?.statusMessage ?? "プロバイダー情報を確認しています。"}

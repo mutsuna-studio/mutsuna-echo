@@ -1,17 +1,75 @@
 use std::{
     collections::HashSet,
     fs,
-    io::BufReader,
+    io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MANIFEST_SCHEMA_VERSION: u8 = 1;
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_MODEL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+pub(crate) const REAZONSPEECH_MODEL_ID: &str = "reazonspeech-k2-int8-fp32";
+const REAZONSPEECH_VERSION: &str = "2024-08-01";
+const REAZONSPEECH_ENGINE: &str = "sherpa-onnx-transducer";
+const HF_REVISION: &str = "291488c8151be24d7da4bf7af26e533fad96e407";
+const DOWNLOAD_EVENT: &str = "local-stt-model-download-progress";
+static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+struct DownloadGuard;
+
+impl DownloadGuard {
+    fn acquire() -> Result<Self, String> {
+        if DOWNLOAD_ACTIVE.swap(true, Ordering::AcqRel) {
+            return Err("モデルをダウンロード中です。".into());
+        }
+        DOWNLOAD_CANCELLED.store(false, Ordering::Release);
+        Ok(Self)
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        DOWNLOAD_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CatalogFile {
+    path: &'static str,
+    size_bytes: u64,
+    sha256: &'static str,
+}
+
+const REAZONSPEECH_FILES: [CatalogFile; 4] = [
+    CatalogFile {
+        path: "encoder-epoch-99-avg-1.int8.onnx",
+        size_bytes: 154_670_139,
+        sha256: "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d",
+    },
+    CatalogFile {
+        path: "decoder-epoch-99-avg-1.onnx",
+        size_bytes: 11_767_836,
+        sha256: "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124",
+    },
+    CatalogFile {
+        path: "joiner-epoch-99-avg-1.int8.onnx",
+        size_bytes: 2_696_970,
+        sha256: "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4de",
+    },
+    CatalogFile {
+        path: "tokens.txt",
+        size_bytes: 45_754,
+        sha256: "2c3ac659818a48a0c04010e0593bbc4d7c8a24a054340b01131499c05fd52def",
+    },
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +103,27 @@ pub(crate) struct InstalledLocalModel {
     pub(crate) size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalModelCatalogEntry {
+    model_id: &'static str,
+    display_name: &'static str,
+    version: &'static str,
+    language_codes: [&'static str; 1],
+    size_bytes: u64,
+    installed: bool,
+    downloading: bool,
+    runtime_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    model_id: &'static str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
+
 pub(crate) fn list_installed(app: &AppHandle) -> Result<Vec<InstalledLocalModel>, String> {
     let root = models_directory(app)?;
     list_installed_in(&root)
@@ -55,6 +134,269 @@ pub(crate) fn models_directory(app: &AppHandle) -> Result<PathBuf, String> {
         .app_local_data_dir()
         .map(|path| path.join("local-stt").join("models"))
         .map_err(|error| format!("ローカルSTTモデルの保存先を取得できませんでした: {error}"))
+}
+
+pub(crate) fn installation_directory(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
+    if model_id != REAZONSPEECH_MODEL_ID {
+        return Err("選択したローカルSTTモデルには対応していません。".into());
+    }
+    Ok(models_directory(app)?
+        .join(model_id)
+        .join(REAZONSPEECH_VERSION))
+}
+
+pub(crate) fn verify_reazonspeech_installation(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = installation_directory(app, REAZONSPEECH_MODEL_ID)?;
+    let manifest = directory.join(MANIFEST_FILE);
+    read_installed_manifest(&directory, &manifest)?;
+    for expected in REAZONSPEECH_FILES {
+        verify_file(&directory.join(expected.path), expected)?;
+    }
+    Ok(directory)
+}
+
+#[tauri::command]
+pub(crate) fn list_local_stt_model_catalog(
+    app: AppHandle,
+) -> Result<Vec<LocalModelCatalogEntry>, String> {
+    let installed = list_installed(&app)?.iter().any(|model| {
+        model.model_id == REAZONSPEECH_MODEL_ID && model.version == REAZONSPEECH_VERSION
+    });
+    Ok(vec![LocalModelCatalogEntry {
+        model_id: REAZONSPEECH_MODEL_ID,
+        display_name: "ReazonSpeech K2 int8-fp32",
+        version: REAZONSPEECH_VERSION,
+        language_codes: ["ja"],
+        size_bytes: total_download_bytes(),
+        installed,
+        downloading: DOWNLOAD_ACTIVE.load(Ordering::Acquire),
+        runtime_supported: cfg!(desktop),
+    }])
+}
+
+#[tauri::command]
+pub(crate) async fn download_local_stt_model(
+    app: AppHandle,
+    model_id: String,
+) -> Result<(), String> {
+    if !cfg!(desktop) {
+        return Err("このOS向けのReazonSpeech推論エンジンは準備中です。".into());
+    }
+    if model_id != REAZONSPEECH_MODEL_ID {
+        return Err("選択したローカルSTTモデルには対応していません。".into());
+    }
+    let _guard = DownloadGuard::acquire()?;
+    download_reazonspeech(&app).await
+}
+
+#[tauri::command]
+pub(crate) fn cancel_local_stt_model_download() {
+    DOWNLOAD_CANCELLED.store(true, Ordering::Release);
+}
+
+#[tauri::command]
+pub(crate) fn delete_local_stt_model(app: AppHandle, model_id: String) -> Result<(), String> {
+    if DOWNLOAD_ACTIVE.load(Ordering::Acquire) {
+        return Err("ダウンロード中はモデルを削除できません。".into());
+    }
+    let installation = installation_directory(&app, &model_id)?;
+    if installation.exists() {
+        fs::remove_dir_all(&installation)
+            .map_err(|error| format!("ローカルSTTモデルを削除できませんでした: {error}"))?;
+    }
+    if let Some(parent) = installation.parent() {
+        if parent
+            .read_dir()
+            .is_ok_and(|mut entries| entries.next().is_none())
+        {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    Ok(())
+}
+
+async fn download_reazonspeech(app: &AppHandle) -> Result<(), String> {
+    let final_directory = installation_directory(app, REAZONSPEECH_MODEL_ID)?;
+    if final_directory.join(MANIFEST_FILE).exists() {
+        if verify_reazonspeech_installation(app).is_ok() {
+            return Ok(());
+        }
+        fs::remove_dir_all(&final_directory)
+            .map_err(|error| format!("破損したモデルを置き換えられませんでした: {error}"))?;
+    }
+    let model_root = final_directory.parent().ok_or("モデル保存先が不正です。")?;
+    fs::create_dir_all(model_root)
+        .map_err(|error| format!("モデル保存先を作成できませんでした: {error}"))?;
+    remove_stale_downloads(model_root);
+    let temporary = model_root.join(format!(".download-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&temporary)
+        .map_err(|error| format!("モデルの一時保存先を作成できませんでした: {error}"))?;
+
+    let result = download_files(app, &temporary).await.and_then(|_| {
+        let manifest = reazonspeech_manifest();
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("モデル情報を作成できませんでした: {error}"))?;
+        let mut file = fs::File::create(temporary.join(MANIFEST_FILE))
+            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("モデル情報を保存できませんでした: {error}"))?;
+        if final_directory.exists() {
+            fs::remove_dir_all(&final_directory)
+                .map_err(|error| format!("古いモデルを置き換えられませんでした: {error}"))?;
+        }
+        fs::rename(&temporary, &final_directory)
+            .map_err(|error| format!("モデルをインストールできませんでした: {error}"))
+    });
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result
+}
+
+fn remove_stale_downloads(model_root: &Path) {
+    let Ok(entries) = fs::read_dir(model_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let safe_temporary_directory = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".download-"))
+            && fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if safe_temporary_directory {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+async fn download_files(app: &AppHandle, directory: &Path) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .build()
+        .map_err(|error| format!("ダウンロードを準備できませんでした: {error}"))?;
+    let total = total_download_bytes();
+    let mut downloaded = 0u64;
+    emit_progress(app, downloaded, total);
+    for expected in REAZONSPEECH_FILES {
+        if DOWNLOAD_CANCELLED.load(Ordering::Acquire) {
+            return Err("モデルのダウンロードをキャンセルしました。".into());
+        }
+        let url = format!(
+            "https://huggingface.co/reazon-research/reazonspeech-k2-v2/resolve/{HF_REVISION}/{}?download=true",
+            expected.path
+        );
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("{}をダウンロードできませんでした: {error}", expected.path))?
+            .error_for_status()
+            .map_err(|error| format!("{}をダウンロードできませんでした: {error}", expected.path))?;
+        if response
+            .content_length()
+            .is_some_and(|size| size != expected.size_bytes)
+        {
+            return Err(format!("{}の配布サイズが変更されています。", expected.path));
+        }
+        let path = directory.join(expected.path);
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("{}を保存できませんでした: {error}", expected.path))?;
+        let mut hasher = Sha256::new();
+        let mut file_bytes = 0u64;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            if DOWNLOAD_CANCELLED.load(Ordering::Acquire) {
+                return Err("モデルのダウンロードをキャンセルしました。".into());
+            }
+            let chunk =
+                chunk.map_err(|error| format!("{}の受信に失敗しました: {error}", expected.path))?;
+            file_bytes = file_bytes
+                .checked_add(chunk.len() as u64)
+                .ok_or("ダウンロードサイズを確認できませんでした。")?;
+            if file_bytes > expected.size_bytes {
+                return Err(format!("{}が想定サイズを超えています。", expected.path));
+            }
+            output
+                .write_all(&chunk)
+                .map_err(|error| format!("{}を保存できませんでした: {error}", expected.path))?;
+            hasher.update(&chunk);
+            emit_progress(app, downloaded + file_bytes, total);
+        }
+        output
+            .sync_all()
+            .map_err(|error| format!("{}を確定できませんでした: {error}", expected.path))?;
+        if file_bytes != expected.size_bytes
+            || format!("{:x}", hasher.finalize()) != expected.sha256
+        {
+            return Err(format!(
+                "{}の整合性を確認できませんでした。再試行してください。",
+                expected.path
+            ));
+        }
+        downloaded += file_bytes;
+    }
+    Ok(())
+}
+
+fn emit_progress(app: &AppHandle, downloaded_bytes: u64, total_bytes: u64) {
+    let _ = app.emit(
+        DOWNLOAD_EVENT,
+        DownloadProgress {
+            model_id: REAZONSPEECH_MODEL_ID,
+            downloaded_bytes,
+            total_bytes,
+        },
+    );
+}
+
+fn total_download_bytes() -> u64 {
+    REAZONSPEECH_FILES.iter().map(|file| file.size_bytes).sum()
+}
+
+fn reazonspeech_manifest() -> LocalModelManifest {
+    LocalModelManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        provider: "local".into(),
+        model_id: REAZONSPEECH_MODEL_ID.into(),
+        version: REAZONSPEECH_VERSION.into(),
+        engine: REAZONSPEECH_ENGINE.into(),
+        display_name: "ReazonSpeech K2 int8-fp32".into(),
+        language_codes: vec!["ja".into()],
+        files: REAZONSPEECH_FILES
+            .iter()
+            .map(|file| LocalModelFile {
+                path: file.path.into(),
+                size_bytes: file.size_bytes,
+                sha256: file.sha256.into(),
+            })
+            .collect(),
+    }
+}
+
+fn verify_file(path: &Path, expected: CatalogFile) -> Result<(), String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("モデルファイルを読み込めませんでした: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("モデルファイルを検証できませんでした: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected.sha256 {
+        return Err(format!("モデルファイルが破損しています: {}", expected.path));
+    }
+    Ok(())
 }
 
 fn list_installed_in(root: &Path) -> Result<Vec<InstalledLocalModel>, String> {
@@ -225,7 +567,19 @@ fn is_safe_identifier(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_installed_in, LocalModelFile, LocalModelManifest, MANIFEST_SCHEMA_VERSION};
+    use super::{
+        list_installed_in, reazonspeech_manifest, total_download_bytes, LocalModelFile,
+        LocalModelManifest, MANIFEST_SCHEMA_VERSION, REAZONSPEECH_MODEL_ID,
+    };
+
+    #[test]
+    fn official_reazonspeech_catalog_is_a_valid_pinned_manifest() {
+        let manifest = reazonspeech_manifest();
+        super::validate_manifest(&manifest).expect("valid catalog manifest");
+        assert_eq!(manifest.model_id, REAZONSPEECH_MODEL_ID);
+        assert_eq!(manifest.files.len(), 4);
+        assert_eq!(total_download_bytes(), 169_180_699);
+    }
 
     #[test]
     fn discovers_only_complete_manifest_backed_models() {

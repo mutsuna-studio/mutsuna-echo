@@ -414,6 +414,7 @@
     onSelect={selectAudioFile}
     onTranscribe={transcribeAudio}
     onProviderChange={changeTranscriptionProvider}
+    onProvidersChanged={refreshProviders}
     onRecordedAudio={handleRecordedAudio}
     onRecordingBusyChange={(value) => recordingBusy = value}
     onMessage={showMessage}

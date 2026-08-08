@@ -28,6 +28,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-opener = "2"
 sha2 = "0.10.9"
 uuid = { version = "1", features = ["v7"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 jni = "0.21.1"
@@ -36,6 +37,10 @@ ndk-context = "0.1.1"
 [target."cfg(windows)".dependencies]
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_WinRT", "Win32_Media_MediaFoundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 flexaudio = "0.2.0"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+sherpa-onnx = { version = "1.13.4", default-features = false, features = ["shared"] }
+symphonia = { version = "0.5.5", features = ["aac", "flac", "isomp4", "mp3", "pcm", "wav"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 flexaudio = "0.2.0"

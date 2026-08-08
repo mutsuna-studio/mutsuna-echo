@@ -33,6 +33,23 @@ export type InstalledLocalSttModel = {
   sizeBytes: number;
 };
 
+export type LocalSttModelCatalogEntry = {
+  modelId: string;
+  displayName: string;
+  version: string;
+  languageCodes: string[];
+  sizeBytes: number;
+  installed: boolean;
+  downloading: boolean;
+  runtimeSupported: boolean;
+};
+
+export type LocalSttModelDownloadProgress = {
+  modelId: string;
+  downloadedBytes: number;
+  totalBytes: number;
+};
+
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
   return value === "elevenlabs" || value === "local";
 }

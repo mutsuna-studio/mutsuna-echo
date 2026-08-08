@@ -1,4 +1,6 @@
 pub(crate) mod elevenlabs;
+#[cfg(desktop)]
+mod local;
 pub(crate) mod local_models;
 pub(crate) mod providers;
 pub mod types;
@@ -27,13 +29,27 @@ pub(crate) async fn transcribe(
             let installed = local_models::list_installed(app)?;
             let model = match model_id {
                 Some(model_id) => installed.iter().find(|model| model.model_id == model_id),
-                None => installed.first(),
+                None => installed
+                    .iter()
+                    .find(|model| model.model_id == local_models::REAZONSPEECH_MODEL_ID),
             }
             .ok_or_else(|| "選択したローカルSTTモデルがインストールされていません。".to_string())?;
-            Err(format!(
-                "ローカルSTTモデル「{}」は検出されていますが、推論エンジンはまだ利用できません。",
-                model.display_name
-            ))
+            #[cfg(desktop)]
+            {
+                let app = app.clone();
+                let audio_path = audio_path.to_path_buf();
+                let model_id = model.model_id.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    local::transcribe(&app, &audio_path, &model_id)
+                })
+                .await
+                .map_err(|error| format!("ローカル文字起こし処理を完了できませんでした: {error}"))?
+            }
+            #[cfg(not(desktop))]
+            {
+                let _ = (audio_path, model);
+                Err("この端末ではReazonSpeechのローカル推論をまだ利用できません。".into())
+            }
         }
     }
 }
