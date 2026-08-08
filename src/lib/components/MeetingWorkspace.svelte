@@ -173,7 +173,7 @@
 </section>
 
 <style>
-  .meeting-workspace { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); background: var(--background); }
+  .meeting-workspace { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
   .workspace-header { padding: 25px 30px 18px; }
   .title-row { display: flex; min-width: 0; align-items: flex-start; gap: 12px; }
   .meeting-title { min-width: 0; flex: 1; }
@@ -207,7 +207,7 @@
   .detail-tabs button.active { color: var(--primary); }
   .detail-tabs button.active::after { background: var(--primary); }
   .detail-tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; }
-  .detail-content { min-height: 0; overflow-y: auto; padding: 0 30px 36px; }
+  .detail-content { min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 0 30px 36px; overscroll-behavior: contain; scrollbar-gutter: stable; }
 
   .empty-transcript, .workspace-empty { display: grid; place-items: center; align-content: center; text-align: center; }
   .empty-transcript { min-height: 360px; }
