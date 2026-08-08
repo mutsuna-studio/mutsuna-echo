@@ -40,7 +40,6 @@
 <Card class="card settings-card" aria-busy={loading || saving || deleting}>
   <div class="section-heading">
     <div>
-      <p class="step">Settings</p>
       <h2>プロバイダー設定</h2>
       <p class="help">文字起こしサービスごとに認証情報を管理します。</p>
     </div>

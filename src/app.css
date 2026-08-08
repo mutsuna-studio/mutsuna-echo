@@ -3,7 +3,7 @@
 :root {
   font-family: Inter, "Noto Sans JP", system-ui, sans-serif;
   color: var(--foreground);
-  background: color-mix(in oklch, var(--primary) 4%, var(--background));
+  background: var(--background);
   font-synthesis: none;
 }
 
@@ -11,7 +11,10 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  overflow: hidden;
 }
+
+#app { min-height: 100vh; }
 
 body.overlay-window {
   min-width: 0;
@@ -34,27 +37,47 @@ input {
   font: inherit;
 }
 
-.shell {
-  width: min(760px, calc(100% - 40px));
+.app-shell {
+  --library-left: 208px;
+  --library-top: 0px;
+  position: relative;
+  display: grid;
+  width: 100vw;
+  height: 100vh;
+  grid-template-columns: 208px minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--background);
+}
+
+.app-shell.with-library { grid-template-columns: 208px 282px minmax(0, 1fr); }
+.app-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+
+.page-view {
+  width: min(820px, calc(100% - 48px));
+  height: 100%;
   margin: 0 auto;
-  padding: 56px 0 72px;
+  padding: 38px 0 64px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
-.hero { margin-bottom: 30px; }
+.page-header { margin-bottom: 30px; }
+.page-header p { margin: 0 0 7px; color: var(--primary); font-size: 0.67rem; font-weight: 780; letter-spacing: 0.14em; }
+.page-header h1 { margin: 0 0 8px; font-size: 1.65rem; line-height: 1.2; letter-spacing: -0.035em; }
+.page-header span { color: var(--muted-foreground); font-size: 0.86rem; }
 
-.hero-toolbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
+.settings-section { margin-top: 18px; padding: 22px 24px; border: 1px solid var(--border); border-radius: 12px; }
+.settings-section-heading h2 { margin: 0; font-size: 1rem; }
+.settings-section-heading p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
+
+.dev-preview-dock { position: fixed; z-index: 50; right: 14px; bottom: 14px; }
 
 .overlay-preview-tools {
   display: flex;
   position: relative;
   align-items: center;
   gap: 7px;
-  margin-top: -10px;
+  margin: 0;
   padding: 7px;
   border: 1px dashed color-mix(in oklch, var(--primary) 30%, var(--border));
   border-radius: 12px;
@@ -78,7 +101,6 @@ input {
   white-space: nowrap;
 }
 
-.eyebrow,
 .step {
   margin: 0 0 7px;
   color: var(--primary);
@@ -94,11 +116,10 @@ h3,
 p { margin-top: 0; }
 
 h1 {
-  max-width: 650px;
   margin-bottom: 12px;
-  font-size: clamp(2.1rem, 6vw, 3.4rem);
-  line-height: 1.08;
-  letter-spacing: -0.05em;
+  font-size: 1.65rem;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
 }
 
 h2 {
@@ -111,22 +132,16 @@ h3 {
   font-size: 0.98rem;
 }
 
-.lead,
 .help,
 .action-help,
 .security-note,
 .empty-result { color: var(--muted-foreground); }
 
-.lead {
-  max-width: 610px;
-  margin-bottom: 0;
-}
-
 .card {
   margin-top: 18px;
-  padding: 26px;
-  border-radius: 18px;
-  box-shadow: 0 16px 42px color-mix(in oklch, var(--primary) 8%, transparent);
+  padding: 22px 24px;
+  border-radius: 12px;
+  box-shadow: none;
 }
 
 .section-heading,
@@ -354,41 +369,6 @@ h3 {
   border-top: 1px solid var(--border);
 }
 
-.transcript-badges {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.transcript-heading { margin-bottom: 4px; }
-.segments { margin-top: 22px; }
-
-.segment {
-  padding: 20px 0;
-  border-top: 1px solid var(--border);
-}
-
-.segment:first-child { border-top: 0; }
-.segment-meta { margin-bottom: 9px; }
-
-.segment-meta strong {
-  color: var(--primary);
-  font-size: 0.86rem;
-}
-
-.segment-meta time {
-  color: var(--muted-foreground);
-  font-size: 0.78rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.segment p {
-  margin-bottom: 0;
-  line-height: 1.8;
-  white-space: pre-wrap;
-}
-
 .settings-card { margin-top: 30px; }
 .settings-card form { margin-top: 22px; }
 
@@ -410,23 +390,30 @@ h3 {
   margin-top: 18px;
 }
 
-@media (max-width: 600px) {
-  .shell {
-    width: min(100% - 28px, 760px);
-    padding: 36px 0 52px;
+@media (max-width: 1040px) {
+  .app-shell.with-library { grid-template-columns: 208px minmax(0, 1fr); }
+  .app-shell.with-library .app-content { grid-column: 2; }
+}
+
+@media (max-width: 780px) {
+  .app-shell,
+  .app-shell.with-library {
+    --library-left: 0px;
+    --library-top: 63px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 63px minmax(0, 1fr);
   }
+  .app-content,
+  .app-shell.with-library .app-content { grid-column: 1; grid-row: 2; }
+  .page-view { width: min(100% - 36px, 820px); padding-top: 28px; }
+}
+
+@media (max-width: 600px) {
+  .card { padding: 20px; }
 
   .card { padding: 20px; }
 
-  .hero-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .overlay-preview-tools {
-    align-self: flex-start;
-    margin: 0 0 10px;
-  }
+  .dev-preview-dock { right: 8px; bottom: 8px; }
 
   .action-row,
   .input-row {
@@ -440,6 +427,4 @@ h3 {
   .usage-grid,
   .input-tabs,
   .provider-grid { grid-template-columns: 1fr; }
-
-  .transcript-badges { justify-content: flex-start; }
 }

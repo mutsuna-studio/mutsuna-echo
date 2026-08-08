@@ -10,9 +10,12 @@
   } from "@mutsuna/ui/sonner";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
+  import AppSidebar from "./lib/components/AppSidebar.svelte";
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
+  import LocalModelManager from "./lib/components/LocalModelManager.svelte";
+  import MeetingLibrary from "./lib/components/MeetingLibrary.svelte";
+  import MeetingWorkspace from "./lib/components/MeetingWorkspace.svelte";
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
-  import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
     getTranscriptionProvider,
@@ -20,6 +23,7 @@
     type TranscriptionProviderId
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
+  import type { RecordedAudioSummary } from "./lib/types/recording";
   import type {
     SelectedAudioFile,
     Transcript,
@@ -30,8 +34,14 @@
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
+  type AppSection = "meetings" | "new" | "settings";
 
   let loading = $state(true);
+  let section = $state<AppSection>("meetings");
+  let libraryOpen = $state(true);
+  let recordings = $state.raw<RecordedAudioSummary[]>([]);
+  let recordingsLoading = $state(false);
+  let meetingBusy = $state(false);
   let saving = $state(false);
   let deleting = $state(false);
   let selecting = $state(false);
@@ -44,7 +54,6 @@
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>([]);
   // Transcriptは読み取り専用の大きな値なので、深いProxy化を避ける。
   let transcript = $state.raw<Transcript | null>(null);
-  let transcriptRevision = $state(0);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let usageError = $state("");
   let lastErrorToast = $state("");
@@ -66,6 +75,9 @@
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
+  const selectedRecording = $derived(
+    recordings.find((recording) => recording.meetingId === selectedAudio?.meetingId) ?? null
+  );
 
   $effect(() => {
     if (!import.meta.env.DEV) return;
@@ -105,6 +117,50 @@
     );
   }
 
+  async function refreshRecordings() {
+    if (recordingsLoading) return;
+    recordingsLoading = true;
+    try {
+      recordings = await invoke<RecordedAudioSummary[]>("list_recorded_audio");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      recordingsLoading = false;
+    }
+  }
+
+  async function selectRecording(recording: RecordedAudioSummary) {
+    if (meetingBusy) return;
+    meetingBusy = true;
+    try {
+      selectedAudio = await invoke<SelectedAudioFile>("select_recorded_audio", {
+        recordingId: recording.id,
+        meetingId: recording.meetingId
+      });
+      await restoreSelectedTranscript();
+      section = "meetings";
+    } catch (error) {
+      showError(errorText(error));
+      await refreshRecordings();
+    } finally {
+      meetingBusy = false;
+    }
+  }
+
+  async function revealRecording(recording: RecordedAudioSummary) {
+    try {
+      await invoke("reveal_recorded_audio", { recordingId: recording.id });
+    } catch (error) {
+      showError(errorText(error));
+      await refreshRecordings();
+    }
+  }
+
+  function navigate(nextSection: AppSection) {
+    section = nextSection;
+    if (nextSection === "meetings") libraryOpen = true;
+  }
+
   function receivePendingAction(action: PendingAction): Promise<void> {
     if (action.id === lastAcknowledgedActionId) return Promise.resolve();
     if (pendingActionPromise && pendingActionId === action.id) return pendingActionPromise;
@@ -127,6 +183,7 @@
     });
     selectedAudio = audio;
     await restoreSelectedTranscript();
+    section = "new";
     await focusTranscriptionAction();
     await invoke("acknowledge_pending_action", { actionId: action.id });
     lastAcknowledgedActionId = action.id;
@@ -209,15 +266,20 @@
             if (!cancelled) transcriptionProgress = payload;
           })
         ]);
-        const [nextProviders, session, pendingResult] = await Promise.all([
+        const [nextProviders, session, pendingResult, nextRecordings] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
-            .catch((error) => ({ action: null, error: errorText(error) }))
+            .catch((error) => ({ action: null, error: errorText(error) })),
+          invoke<RecordedAudioSummary[]>("list_recorded_audio").catch((error) => {
+            showError(errorText(error));
+            return [];
+          })
         ]);
         if (cancelled) return;
         transcriptionProviders = nextProviders;
+        recordings = nextRecordings;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
         transcriptionProgress = session.progress;
@@ -261,7 +323,7 @@
         transcribing = false;
         if (selectedAudio) {
           await restoreSelectedTranscript();
-          transcriptRevision += 1;
+          await refreshRecordings();
         }
         await refreshUsage();
       } catch (error) {
@@ -347,10 +409,10 @@
       }
       if (result.persistenceWarning) {
         showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
-      } else {
-        transcriptRevision += 1;
       }
+      await refreshRecordings();
       await refreshUsage();
+      section = "meetings";
     } catch (error) {
       showError(errorText(error));
     } finally {
@@ -375,6 +437,7 @@
   async function handleRecordedAudio(audio: SelectedAudioFile) {
     selectedAudio = audio;
     await restoreSelectedTranscript();
+    await refreshRecordings();
   }
 
   async function restoreSelectedTranscript(
@@ -421,71 +484,109 @@
 
 <ThemeProvider theme={echoTheme}>
   <Toaster position="top-right" closeButton />
-  <main class="shell">
-  <header class="hero">
-    <div class="hero-toolbar">
-      <p class="eyebrow">Mutsuna Echo</p>
-      {#if OverlayPreviewControls}
-        <OverlayPreviewControls />
+  <main class:with-library={section === "meetings" && libraryOpen} class="app-shell">
+    <AppSidebar {section} onNavigate={navigate} />
+
+    {#if section === "meetings" && libraryOpen}
+      <MeetingLibrary
+        {recordings}
+        selectedMeetingId={selectedAudio?.meetingId ?? null}
+        loading={recordingsLoading}
+        busy={meetingBusy || busy}
+        onSelect={selectRecording}
+        onRefresh={refreshRecordings}
+        onClose={() => libraryOpen = false}
+      />
+    {/if}
+
+    <div class="app-content">
+      {#if pendingActionProblem}
+        <PendingActionNotice
+          action={pendingActionProblem.action}
+          message={pendingActionProblem.message}
+          busy={pendingActionBusy}
+          onRetry={retryPendingAction}
+          onDiscard={discardPendingAction}
+        />
+      {/if}
+
+      {#if section === "meetings"}
+        <MeetingWorkspace
+          {selectedAudio}
+          recording={selectedRecording}
+          {transcript}
+          providerLabel={currentProvider ? `${currentProvider.label} · ${currentProvider.modelLabel}` : "プロバイダーを確認中"}
+          providerStatus={currentProvider?.statusMessage ?? "文字起こしプロバイダーを確認しています。"}
+          {transcribing}
+          progress={transcriptionProgress}
+          {canTranscribe}
+          {libraryOpen}
+          onOpenLibrary={() => libraryOpen = true}
+          onTranscribe={transcribeAudio}
+          onReveal={revealRecording}
+          onCreate={() => section = "new"}
+          onOpenSettings={() => section = "settings"}
+        />
+      {:else if section === "new"}
+        <section class="page-view new-meeting-view">
+          <header class="page-header">
+            <p>NEW MEETING</p>
+            <h1>新しいMeeting</h1>
+            <span>録音を開始するか、既存の音声ファイルを読み込みます。</span>
+          </header>
+          <AudioInputPanel
+            {selectedAudio}
+            providers={transcriptionProviders}
+            provider={transcriptionProvider}
+            {selecting}
+            {transcribing}
+            {transcriptionProgress}
+            {recordingBusy}
+            {busy}
+            {recordingDisabled}
+            {canTranscribe}
+            onSelect={selectAudioFile}
+            onTranscribe={transcribeAudio}
+            onProviderChange={changeTranscriptionProvider}
+            onProvidersChanged={refreshProviders}
+            onRecordedAudio={handleRecordedAudio}
+            onRecordingBusyChange={(value) => recordingBusy = value}
+            onMessage={showMessage}
+            onError={showError}
+          />
+        </section>
+      {:else}
+        <section class="page-view settings-view">
+          <header class="page-header">
+            <p>SETTINGS</p>
+            <h1>設定</h1>
+            <span>文字起こしプロバイダー、ローカルモデル、利用状況を管理します。</span>
+          </header>
+          <div class="settings-section">
+            <div class="settings-section-heading">
+              <h2>ローカル文字起こし</h2>
+              <p>端末内で使用するモデルを管理します。</p>
+            </div>
+            <LocalModelManager disabled={busy} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
+          </div>
+          {#if hasApiKey}
+            <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
+          {/if}
+          <ApiKeySettings
+            {loading}
+            {saving}
+            {deleting}
+            {hasApiKey}
+            {busy}
+            onSave={saveApiKey}
+            onDelete={deleteApiKey}
+          />
+        </section>
       {/if}
     </div>
-    <h1>会話を、読み返せる形へ。</h1>
-    <p class="lead">音声ファイルを選択して、話者とタイムスタンプ付きで文字起こしします。</p>
-  </header>
-
-  {#if pendingActionProblem}
-    <PendingActionNotice
-      action={pendingActionProblem.action}
-      message={pendingActionProblem.message}
-      busy={pendingActionBusy}
-      onRetry={retryPendingAction}
-      onDiscard={discardPendingAction}
-    />
-  {/if}
-
-  <AudioInputPanel
-    {selectedAudio}
-    providers={transcriptionProviders}
-    provider={transcriptionProvider}
-    {selecting}
-    {transcribing}
-    {transcriptionProgress}
-    {recordingBusy}
-    {transcriptRevision}
-    {busy}
-    {recordingDisabled}
-    {canTranscribe}
-    onSelect={selectAudioFile}
-    onTranscribe={transcribeAudio}
-    onProviderChange={changeTranscriptionProvider}
-    onProvidersChanged={refreshProviders}
-    onRecordedAudio={handleRecordedAudio}
-    onRecordingBusyChange={(value) => recordingBusy = value}
-    onMessage={showMessage}
-    onError={showError}
-  />
-
-  {#if hasApiKey}
-    <UsagePanel
-      usage={transcriptionUsage}
-      loading={usageLoading}
-      error={usageError}
-      onRefresh={refreshUsage}
-    />
-  {/if}
-
-  {#if transcript}
-    <TranscriptView {transcript} />
-  {/if}
-
-  <ApiKeySettings
-    {loading}
-    {saving}
-    {deleting}
-    {hasApiKey}
-    {busy}
-    onSave={saveApiKey}
-    onDelete={deleteApiKey}
-  />
   </main>
+
+  {#if OverlayPreviewControls}
+    <div class="dev-preview-dock"><OverlayPreviewControls /></div>
+  {/if}
 </ThemeProvider>

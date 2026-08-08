@@ -18,7 +18,6 @@
 <Card class="card usage-card" aria-busy={loading}>
   <div class="section-heading">
     <div>
-      <p class="step">Usage</p>
       <h2>ElevenLabs 利用状況</h2>
     </div>
     <Button variant="outline" size="sm" type="button" onclick={onRefresh} disabled={loading} loading={loading}>

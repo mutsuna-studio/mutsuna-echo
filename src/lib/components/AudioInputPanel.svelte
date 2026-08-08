@@ -1,7 +1,6 @@
 <script lang="ts">
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
-  import { Card } from "@mutsuna/ui/card";
   import { Label } from "@mutsuna/ui/label";
   import { Select } from "@mutsuna/ui/select";
   import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
@@ -25,7 +24,6 @@
     transcribing: boolean;
     transcriptionProgress: TranscriptionProgress | null;
     recordingBusy: boolean;
-    transcriptRevision: number;
     busy: boolean;
     recordingDisabled: boolean;
     canTranscribe: boolean;
@@ -47,7 +45,6 @@
     transcribing,
     transcriptionProgress,
     recordingBusy,
-    transcriptRevision,
     busy,
     recordingDisabled,
     canTranscribe,
@@ -86,11 +83,11 @@
   }
 </script>
 
-<Card class="card transcription-card" aria-busy={selecting || transcribing}>
+<section class="creation-panel" aria-busy={selecting || transcribing}>
   <div class="section-heading">
     <div>
-      <p class="step">Step 1</p>
       <h2>音声を用意</h2>
+      <p class="section-description">ファイルを読み込むか、この端末で録音します。</p>
     </div>
     <Badge variant={selectedAudio ? "default" : "secondary"}>
       {recordingBusy ? "録音中" : selectedAudio ? "準備済み" : "未選択"}
@@ -119,7 +116,6 @@
   <TabsContent value="record">
     <RecordingPanel
       disabled={recordingDisabled}
-      {transcriptRevision}
       onAudioReady={onRecordedAudio}
       onBusyChange={onRecordingBusyChange}
       {onMessage}
@@ -151,7 +147,6 @@
 
   <div class="transcription-settings">
     <div class="transcription-settings-heading">
-      <p class="step">Step 2</p>
       <h2>文字起こし設定</h2>
     </div>
     <div class="provider-grid">
@@ -189,4 +184,9 @@
       </Button>
     </div>
   </div>
-</Card>
+</section>
+
+<style>
+  .creation-panel { padding: 0 0 36px; }
+  .section-description { margin: 7px 0 0; color: var(--muted-foreground); font-size: 0.82rem; }
+</style>

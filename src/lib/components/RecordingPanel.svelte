@@ -15,12 +15,10 @@
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
-  import RecordingHistory from "./RecordingHistory.svelte";
   import { VAD_PRESET_OPTIONS, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
-    RecordedAudioSummary,
     RecordingCapabilities,
     RecordingStatus,
     StopRecordingResult
@@ -28,7 +26,6 @@
 
   interface Props {
     disabled?: boolean;
-    transcriptRevision?: number;
     onAudioReady: (audio: SelectedAudioFile) => void;
     onBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -37,7 +34,6 @@
 
   let {
     disabled = false,
-    transcriptRevision = 0,
     onAudioReady,
     onBusyChange,
     onMessage,
@@ -47,7 +43,6 @@
   let capabilities = $state<RecordingCapabilities | null>(null);
   let status = $state<RecordingStatus | null>(null);
   let recoverable = $state<RecoverableRecording[]>([]);
-  let recordedAudio = $state<RecordedAudioSummary[]>([]);
   let microphone = $state(true);
   let systemAudio = $state(true);
   let microphoneDeviceId = $state("");
@@ -58,7 +53,6 @@
   let cancelDialogOpen = $state(false);
   let discardDialogOpen = $state(false);
   let pendingDiscard = $state<RecoverableRecording | null>(null);
-  let observedTranscriptRevision = $state(0);
   let statusEventsAvailable = $state(false);
   let vadPreset = $state<VadPreset>("standard");
   let vadPresetBusy = $state(false);
@@ -120,16 +114,6 @@
       deliveredOutput = nextStatus.outputPath;
       onAudioReady(audio);
       onMessage(stopMessage(nextStatus.stopReason));
-      await refreshRecordedAudio();
-    }
-  }
-
-  async function refreshRecordedAudio() {
-    try {
-      recordedAudio = await invoke<RecordedAudioSummary[]>("list_recorded_audio");
-    } catch (error) {
-      onError(errorText(error));
-      recordedAudio = [];
     }
   }
 
@@ -149,12 +133,6 @@
   });
 
   $effect(() => {
-    if (loading || transcriptRevision === observedTranscriptRevision) return;
-    observedTranscriptRevision = transcriptRevision;
-    void refreshRecordedAudio();
-  });
-
-  $effect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
     void (async () => {
@@ -167,20 +145,15 @@
         } catch (error) {
           console.error("Could not subscribe to recording status events", error);
         }
-        const [nextCapabilities, nextStatus, nextRecoverable, nextRecordedAudio, nextVadPreset] = await Promise.all([
+        const [nextCapabilities, nextStatus, nextRecoverable, nextVadPreset] = await Promise.all([
           invoke<RecordingCapabilities>("get_recording_capabilities"),
           invoke<RecordingStatus>("get_recording_status"),
           invoke<RecoverableRecording[]>("list_recoverable_recordings"),
-          invoke<RecordedAudioSummary[]>("list_recorded_audio").catch((error) => {
-            onError(errorText(error));
-            return [];
-          }),
           invoke<VadPreset>("get_vad_preset")
         ]);
         if (cancelled) return;
         capabilities = nextCapabilities;
         recoverable = nextRecoverable;
-        recordedAudio = nextRecordedAudio;
         microphone = nextCapabilities.microphoneSupported;
         systemAudio = nextCapabilities.systemAudioSupported;
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
@@ -256,7 +229,6 @@
       if (result.audio && deliveredOutput !== result.status.outputPath) {
         deliveredOutput = result.status.outputPath ?? "";
         onAudioReady(result.audio);
-        await refreshRecordedAudio();
       }
       onMessage(stopMessage(result.status.stopReason));
     } catch (error) {
@@ -309,31 +281,6 @@
     discardDialogOpen = true;
   }
 
-  async function selectRecordedAudio(recording: RecordedAudioSummary) {
-    actionBusy = true;
-    try {
-      const audio = await invoke<SelectedAudioFile>("select_recorded_audio", {
-        recordingId: recording.id,
-        meetingId: recording.meetingId
-      });
-      onAudioReady(audio);
-      onMessage(`${recording.fileName}を文字起こし対象に選択しました。`);
-    } catch (error) {
-      onError(errorText(error));
-      await refreshRecordedAudio();
-    } finally {
-      actionBusy = false;
-    }
-  }
-
-  async function revealRecordedAudio(recording: RecordedAudioSummary) {
-    try {
-      await invoke("reveal_recorded_audio", { recordingId: recording.id });
-    } catch (error) {
-      onError(errorText(error));
-      await refreshRecordedAudio();
-    }
-  }
 </script>
 
 {#if loading}
@@ -358,17 +305,6 @@
       {/each}
       </AlertDescription>
     </Alert>
-  {/if}
-
-  {#if !active}
-    <RecordingHistory
-      recordings={recordedAudio}
-      {disabled}
-      busy={actionBusy}
-      onRefresh={refreshRecordedAudio}
-      onSelect={selectRecordedAudio}
-      onReveal={revealRecordedAudio}
-    />
   {/if}
 
   <div class="sources" aria-disabled={active || disabled}>
