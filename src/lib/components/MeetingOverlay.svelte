@@ -11,7 +11,6 @@
   import Mic from "@lucide/svelte/icons/mic";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import Square from "@lucide/svelte/icons/square";
-  import Video from "@lucide/svelte/icons/video";
   import X from "@lucide/svelte/icons/x";
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
@@ -419,7 +418,6 @@
             <p class="detection-error" role="alert" title={error}>{error}</p>
           {:else}
             <div class="detection-identity">
-              <Video aria-hidden="true" />
               <strong>{shownDetection.providerLabel}</strong>
               {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
             </div>
@@ -480,7 +478,9 @@
   }
 
   .meeting-overlay:not(.compact) {
-    padding: 12px 13px;
+    display: grid;
+    padding: 0 13px;
+    align-items: center;
     color: rgb(247 250 248);
     background: rgb(31 35 33 / 88%);
     border: 1px solid rgb(255 255 255 / 8%);
@@ -539,6 +539,7 @@
   }
 
   .meeting-prompt { height: 100%; }
+  .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
 
   .prompt-row,
   .recording-summary,
@@ -560,13 +561,12 @@
   }
 
   .prompt-row {
-    height: 100%;
+    height: 34px;
     min-width: 0;
     gap: 7px;
   }
 
   .detection-identity { min-width: 0; flex: 1; gap: 7px; }
-  .detection-identity > :global(svg) { width: 15px; height: 15px; flex: none; color: rgb(102 222 156); }
   .detection-identity strong {
     min-width: 0;
     overflow: hidden;
@@ -589,6 +589,7 @@
   .detection-actions { flex: none; gap: 3px; }
 
   .detection-actions :global(.overlay-record-button) {
+    height: 34px;
     border-color: rgb(120 232 167 / 18%);
     color: rgb(246 255 249);
     background: rgb(29 148 86 / 92%);
