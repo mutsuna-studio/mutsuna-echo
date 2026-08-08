@@ -518,7 +518,7 @@
                 aria-label={status?.systemAudio ? "システム音声: 青" : "システム音声なし"}
               />
             </div>
-            <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status">
+            <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status" title={voiceActivityLabel}>
               <AudioWaveform aria-hidden="true" /><span>{voiceActivityLabel}</span>
             </p>
           </div>
@@ -833,6 +833,14 @@
     gap: 9px;
   }
   .recording-summary { flex: none; justify-content: flex-start; gap: 8px; }
+  .recording-controller .preview-label {
+    position: absolute;
+    top: -13px;
+    left: 17px;
+    padding: 0;
+    border: 0;
+    font-size: 0.48rem;
+  }
   .phase-state { gap: 6px; color: var(--destructive); }
   .phase-state.success-state { color: var(--primary); }
   .phase-state.error-state { color: var(--destructive); }
@@ -861,6 +869,7 @@
     flex: 1;
     align-items: center;
     gap: 6px;
+    overflow: hidden;
   }
 
   .waveform-with-legend {
@@ -874,7 +883,7 @@
   .waveform-with-legend > :global(.system-legend.enabled) { color: rgb(101 201 243); opacity: 0.9; }
 
   .controller-message { flex: 1; }
-  .controller-action { display: flex; flex: none; align-items: center; gap: 3px; }
+  .controller-action { position: relative; z-index: 2; display: flex; flex: none; align-items: center; gap: 3px; margin-left: 2px; }
   .controller-action :global(.minimize-controller-button) { color: rgb(226 233 229 / 66%); }
   .controller-action :global(.minimize-controller-button:hover) {
     color: rgb(255 255 255);
@@ -892,10 +901,20 @@
     white-space: nowrap;
   }
 
-  .overlay-vad { gap: 4px; color: rgb(209 218 213 / 62%); }
+  .overlay-vad { flex: none; gap: 4px; color: rgb(209 218 213 / 62%); }
   .overlay-vad.speaking { color: rgb(102 222 156); font-weight: 700; }
   .overlay-vad :global(svg) { width: 13px; height: 13px; flex: none; }
-  .overlay-vad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .overlay-vad span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .recording-result { color: rgb(102 222 156); }
   .compact-error { color: var(--destructive); }
   .meeting-loading { justify-content: center; gap: 8px; min-height: calc(100vh - 28px); color: var(--muted-foreground); font-size: 0.76rem; }

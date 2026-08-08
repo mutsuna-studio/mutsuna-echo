@@ -123,7 +123,7 @@
 <style>
   .audio-waveform {
     display: block;
-    width: 82px;
+    width: 72px;
     height: 22px;
   }
 
