@@ -8,6 +8,7 @@
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Maximize2 from "@lucide/svelte/icons/maximize-2";
   import Mic from "@lucide/svelte/icons/mic";
   import Minimize2 from "@lucide/svelte/icons/minimize-2";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
@@ -215,6 +216,11 @@
   async function minimizeController() {
     controllerMinimized = true;
     await resizeOverlay(true, true);
+  }
+
+  async function restoreController() {
+    controllerMinimized = false;
+    await resizeOverlay(true, false);
   }
 
   async function applyPreviewMode(mode: OverlayPreviewMode) {
@@ -455,8 +461,18 @@
     {#if controllerMode && controllerMinimized}
       <section class="minimized-controller" aria-label="最小化された録音コントローラー" aria-live="polite">
         <Button
+          class="restore-controller-button"
+          size="icon-sm"
+          variant="ghost"
+          type="button"
+          icon={Maximize2}
+          aria-label="通常サイズに戻す"
+          title="通常サイズに戻す"
+          onclick={restoreController}
+        />
+        <Button
           class="minimized-stop-button"
-          size="sm"
+          size="icon-sm"
           variant="destructive"
           type="button"
           icon={Square}
@@ -465,9 +481,7 @@
           onclick={stopRecording}
           loading={stopping}
           disabled={!active || status?.phase === "finalizing"}
-        >
-          {status?.phase === "finalizing" ? "保存中" : "停止"}
-        </Button>
+        />
       </section>
     {:else if controllerMode}
       <section class="recording-controller" aria-label="録音コントローラー" aria-live="polite">
@@ -715,10 +729,17 @@
   .minimized-controller {
     position: relative;
     z-index: 1;
-    display: grid;
+    display: flex;
     width: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
   }
-  .minimized-controller :global(.minimized-stop-button) { width: 100%; }
+  .minimized-controller :global(.restore-controller-button) { color: rgb(226 233 229 / 72%); }
+  .minimized-controller :global(.restore-controller-button:hover) {
+    color: rgb(255 255 255);
+    background: rgb(255 255 255 / 10%);
+  }
 
   .meeting-prompt { height: 100%; }
   .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
