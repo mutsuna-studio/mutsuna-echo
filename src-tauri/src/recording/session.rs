@@ -121,6 +121,7 @@ fn completed_recordings_in(directory: &Path) -> Result<Vec<RecordedAudioSummary>
                 file_name,
                 size_bytes: metadata.len(),
                 recorded_at_unix_ms,
+                has_transcript: false,
             })
         })
         .collect::<Vec<_>>();

@@ -12,6 +12,11 @@ export type Transcript = {
   segments: TranscriptSegment[];
 };
 
+export type TranscriptionResult = {
+  transcript: Transcript;
+  persistenceWarning: string | null;
+};
+
 export type SelectedAudioFile = {
   name: string;
   sizeBytes: number;

@@ -11,7 +11,12 @@
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
-  import type { SelectedAudioFile, Transcript, TranscriptionUsage } from "./lib/types/transcript";
+  import type {
+    SelectedAudioFile,
+    Transcript,
+    TranscriptionResult,
+    TranscriptionUsage
+  } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
 
@@ -25,6 +30,7 @@
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcript = $state<Transcript | null>(null);
+  let transcriptRevision = $state(0);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let usageError = $state("");
   let lastErrorToast = $state("");
@@ -108,7 +114,7 @@
       const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
       if (selected) {
         selectedAudio = selected;
-        transcript = null;
+        await restoreSelectedTranscript();
       }
     } catch (error) {
       showError(errorText(error));
@@ -123,11 +129,17 @@
     transcribing = true;
     transcript = null;
     try {
-      transcript = await invoke<Transcript>("transcribe_selected_audio");
+      const result = await invoke<TranscriptionResult>("transcribe_selected_audio");
+      transcript = result.transcript;
       if (transcript.segments.length > 0) {
         showSuccessToast("文字起こしが完了しました。");
       } else {
         showWarningToast("文字起こしは完了しました。", "発話を検出できませんでした。");
+      }
+      if (result.persistenceWarning) {
+        showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
+      } else {
+        transcriptRevision += 1;
       }
       await refreshUsage();
     } catch (error) {
@@ -137,9 +149,18 @@
     }
   }
 
-  function handleRecordedAudio(audio: SelectedAudioFile) {
+  async function handleRecordedAudio(audio: SelectedAudioFile) {
     selectedAudio = audio;
-    transcript = null;
+    await restoreSelectedTranscript();
+  }
+
+  async function restoreSelectedTranscript() {
+    try {
+      transcript = await invoke<Transcript | null>("get_selected_transcript");
+    } catch (error) {
+      transcript = null;
+      showError(errorText(error));
+    }
   }
 
   function showMessage(nextMessage: string) {
@@ -176,6 +197,7 @@
     {selecting}
     {transcribing}
     {recordingBusy}
+    {transcriptRevision}
     {busy}
     {recordingDisabled}
     {hasApiKey}

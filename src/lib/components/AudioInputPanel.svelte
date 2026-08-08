@@ -12,6 +12,7 @@
     selecting: boolean;
     transcribing: boolean;
     recordingBusy: boolean;
+    transcriptRevision: number;
     busy: boolean;
     recordingDisabled: boolean;
     hasApiKey: boolean;
@@ -29,6 +30,7 @@
     selecting,
     transcribing,
     recordingBusy,
+    transcriptRevision,
     busy,
     recordingDisabled,
     hasApiKey,
@@ -77,6 +79,7 @@
   <TabsContent value="record">
     <RecordingPanel
       disabled={recordingDisabled}
+      {transcriptRevision}
       onAudioReady={onRecordedAudio}
       onBusyChange={onRecordingBusyChange}
       {onMessage}

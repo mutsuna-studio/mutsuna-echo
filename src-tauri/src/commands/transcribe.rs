@@ -36,6 +36,13 @@ pub(crate) struct SelectedAudioFile {
     pricing_verified_on: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptionResult {
+    transcript: Transcript,
+    persistence_warning: Option<String>,
+}
+
 pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, String> {
     let size_bytes = validate_audio_file(path)?;
     let estimate = estimate_audio_cost(path)?;
@@ -398,7 +405,7 @@ fn selected_file_path(selected: FilePath) -> Result<PathBuf, String> {
 pub(crate) async fn transcribe_selected_audio(
     app: AppHandle,
     state: State<'_, AudioSelectionState>,
-) -> Result<Transcript, String> {
+) -> Result<TranscriptionResult, String> {
     if state
         .transcribing
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -418,7 +425,26 @@ pub(crate) async fn transcribe_selected_audio(
     validate_audio_file(&path)?;
     let api_key = crate::commands::api_key::load_api_key(&app)?;
 
-    crate::transcription::elevenlabs::transcribe(&path, &api_key).await
+    let transcript = crate::transcription::elevenlabs::transcribe(&path, &api_key).await?;
+    let persistence_warning = crate::transcript_store::save(&app, &path, &transcript).err();
+    Ok(TranscriptionResult {
+        transcript,
+        persistence_warning,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn get_selected_transcript(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+) -> Result<Option<Transcript>, String> {
+    let path = state
+        .path
+        .lock()
+        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
+        .clone()
+        .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
+    crate::transcript_store::load(&app, &path)
 }
 
 #[cfg(test)]

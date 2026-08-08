@@ -122,6 +122,8 @@ pub struct RecordedAudioSummary {
     pub file_name: String,
     pub size_bytes: u64,
     pub recorded_at_unix_ms: u64,
+    #[serde(default)]
+    pub has_transcript: bool,
 }
 
 #[cfg(test)]

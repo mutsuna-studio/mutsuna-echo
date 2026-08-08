@@ -1,6 +1,7 @@
 mod commands;
 mod credentials;
 mod recording;
+mod transcript_store;
 pub mod transcription;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,6 +16,7 @@ pub fn run() {
             commands::api_key::delete_api_key,
             commands::transcribe::select_audio_file,
             commands::transcribe::transcribe_selected_audio,
+            commands::transcribe::get_selected_transcript,
             commands::usage::get_transcription_usage,
             commands::recording::get_recording_capabilities,
             commands::recording::get_recording_status,

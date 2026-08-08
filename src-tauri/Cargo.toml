@@ -26,6 +26,7 @@ zeroize = "1.9.0"
 lofty = "0.24.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-opener = "2"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 jni = "0.21.1"

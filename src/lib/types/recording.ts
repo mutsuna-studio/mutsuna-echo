@@ -52,6 +52,7 @@ export interface RecordedAudioSummary {
   fileName: string;
   sizeBytes: number;
   recordedAtUnixMs: number;
+  hasTranscript: boolean;
 }
 
 export interface StopRecordingResult {

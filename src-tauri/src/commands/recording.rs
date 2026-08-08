@@ -155,7 +155,14 @@ pub(crate) fn list_recoverable_recordings(
 
 #[tauri::command]
 pub(crate) fn list_recorded_audio(app: AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
-    recording::completed_recordings(&app)
+    let mut recordings = recording::completed_recordings(&app)?;
+    #[cfg(not(target_os = "android"))]
+    for recording in &mut recordings {
+        if let Ok(path) = recording::completed_recording_path(&app, &recording.id) {
+            recording.has_transcript = crate::transcript_store::exists(&app, &path);
+        }
+    }
+    Ok(recordings)
 }
 
 #[tauri::command]

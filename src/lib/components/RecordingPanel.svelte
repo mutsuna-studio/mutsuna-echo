@@ -11,6 +11,7 @@
     AlertDialogHeader,
     AlertDialogTitle
   } from "@mutsuna/ui/alert-dialog";
+  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
@@ -26,6 +27,7 @@
 
   interface Props {
     disabled?: boolean;
+    transcriptRevision?: number;
     onAudioReady: (audio: SelectedAudioFile) => void;
     onBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -34,6 +36,7 @@
 
   let {
     disabled = false,
+    transcriptRevision = 0,
     onAudioReady,
     onBusyChange,
     onMessage,
@@ -54,6 +57,7 @@
   let cancelDialogOpen = $state(false);
   let discardDialogOpen = $state(false);
   let pendingDiscard = $state<RecoverableRecording | null>(null);
+  let observedTranscriptRevision = $state(0);
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -127,6 +131,12 @@
 
   $effect(() => {
     onBusyChange(active || actionBusy);
+  });
+
+  $effect(() => {
+    if (loading || transcriptRevision === observedTranscriptRevision) return;
+    observedTranscriptRevision = transcriptRevision;
+    void refreshRecordedAudio();
   });
 
   $effect(() => {
@@ -324,7 +334,10 @@
               >
                 <span>
                   <strong>{recording.fileName}</strong>
-                  <small>{formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}</small>
+                  <small>
+                    {formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}
+                    {#if recording.hasTranscript}<Badge variant="secondary">文字起こし済み</Badge>{/if}
+                  </small>
                 </span>
                 <span class="history-action">選択</span>
               </Button>
