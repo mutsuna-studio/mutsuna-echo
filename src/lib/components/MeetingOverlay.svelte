@@ -493,7 +493,7 @@
             {:else}
               <span class="rec-dot" aria-hidden="true"></span>
             {/if}
-            <strong>{phaseLabel}</strong>
+            {#if status?.phase !== "recording"}<strong>{phaseLabel}</strong>{/if}
             {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
           </div>
           <time>{formatElapsed(status?.elapsedMs ?? 0)}</time>
