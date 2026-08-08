@@ -8,6 +8,7 @@
   import { Button } from "@mutsuna/ui/button";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import type { MeetingDetection } from "../types/meeting";
+  import type { PendingAction } from "../types/pending-action";
   import type { RecordingStatus, StopRecordingResult } from "../types/recording";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
@@ -23,6 +24,8 @@
   let compactApplied = $state(false);
   let completionMessage = $state("");
   let error = $state("");
+  let handoffBusy = $state(false);
+  let handoffPromise: Promise<void> | null = null;
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -76,6 +79,52 @@
     }
   }
 
+  function handoffToMain(): Promise<void> {
+    if (handoffPromise) return handoffPromise;
+    handoffPromise = performHandoff().finally(() => {
+      handoffPromise = null;
+    });
+    return handoffPromise;
+  }
+
+  async function performHandoff() {
+    handoffBusy = true;
+    error = "";
+    completionMessage = "録音を保存しました。メイン画面を準備しています…";
+    let actionId = "";
+    const acknowledged = new Set<string>();
+    let resolveAcknowledgement: (() => void) | undefined;
+    const acknowledgement = new Promise<void>((resolve) => {
+      resolveAcknowledgement = resolve;
+    });
+    let timeoutId: number | undefined;
+    let unlisten: UnlistenFn | undefined;
+    try {
+      unlisten = await listen<string>("pending-action-acknowledged", ({ payload }) => {
+        acknowledged.add(payload);
+        if (payload === actionId) resolveAcknowledgement?.();
+      });
+      const action = await invoke<PendingAction>("prepare_transcription_handoff");
+      actionId = action.id;
+      if (acknowledged.has(actionId)) resolveAcknowledgement?.();
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(
+          () => reject(new Error("メイン画面の準備確認がタイムアウトしました。")),
+          10_000
+        );
+      });
+      await Promise.race([acknowledgement, timeout]);
+      await closeOverlay();
+    } catch (cause) {
+      completionMessage = "";
+      error = `録音は保存されています。${errorText(cause)}`;
+    } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      unlisten?.();
+      handoffBusy = false;
+    }
+  }
+
   async function acceptStatus(nextStatus: RecordingStatus) {
     status = nextStatus;
     if (
@@ -88,13 +137,7 @@
     }
     if (!controllerMode) return;
     if (nextStatus.phase === "completed") {
-      completionMessage = "録音を保存しました";
-      try {
-        await invoke("open_main_window_for_transcription");
-        await closeOverlay();
-      } catch (cause) {
-        error = `録音は保存しましたが、メイン画面を開けませんでした。${errorText(cause)}`;
-      }
+      await handoffToMain();
     } else if (nextStatus.phase === "failed") {
       error = nextStatus.error ?? "録音を完了できませんでした。";
     }
@@ -191,7 +234,7 @@
         <div class="recording-summary">
           <strong class:finalizing={status?.phase === "finalizing"} class="rec-state">
             <span aria-hidden="true"></span>
-            {status?.phase === "finalizing" ? "SAVING" : status?.phase === "starting" ? "READY" : "REC"}
+            {status?.phase === "completed" ? "SAVED" : status?.phase === "finalizing" ? "SAVING" : status?.phase === "starting" ? "READY" : "REC"}
           </strong>
           <time>{formatElapsed(status?.elapsedMs ?? 0)}</time>
         </div>
@@ -204,9 +247,15 @@
             System
             <i class:enabled={status?.systemAudio} style={levelStyle(status?.systemLevel ?? 0, status?.systemAudio ?? false)}></i>
           </span>
-          <Button size="sm" type="button" onclick={stopRecording} loading={stopping} disabled={!active || status?.phase === "finalizing"}>
-            {status?.phase === "finalizing" ? "保存中…" : "■ 停止"}
-          </Button>
+          {#if status?.phase === "completed"}
+            <Button size="sm" type="button" onclick={handoffToMain} loading={handoffBusy} disabled={handoffBusy}>
+              {handoffBusy ? "準備中…" : "メイン画面を再表示"}
+            </Button>
+          {:else}
+            <Button size="sm" type="button" onclick={stopRecording} loading={stopping} disabled={!active || status?.phase === "finalizing"}>
+              {status?.phase === "finalizing" ? "保存中…" : "■ 停止"}
+            </Button>
+          {/if}
         </div>
         {#if completionMessage}<p class="recording-result" role="status">{completionMessage}</p>{/if}
         {#if error}<p class="meeting-error compact-error" role="alert">{error}</p>{/if}

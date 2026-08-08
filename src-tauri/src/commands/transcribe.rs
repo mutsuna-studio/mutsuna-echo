@@ -111,6 +111,24 @@ pub(crate) fn set_selected_audio_with_meeting(
     set_selected_audio(app, path, meeting_id)
 }
 
+pub(crate) fn restore_selected_meeting(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<SelectedAudioFile, String> {
+    let path = crate::meeting_store::local_audio_path(app, meeting_id)?;
+    set_selected_audio(app, path, meeting_id.to_string())
+}
+
+pub(crate) fn selected_meeting_id(app: &AppHandle) -> Result<String, String> {
+    app.state::<AudioSelectionState>()
+        .selected
+        .lock()
+        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
+        .as_ref()
+        .map(|selected| selected.meeting_id.clone())
+        .ok_or_else(|| "文字起こし対象のMeetingが選択されていません。".to_string())
+}
+
 fn set_selected_audio(
     app: &AppHandle,
     path: PathBuf,

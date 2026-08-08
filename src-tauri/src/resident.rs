@@ -6,7 +6,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     plugin::{Builder as PluginBuilder, TauriPlugin},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent, Runtime, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, Runtime, WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::recording::{types::RecordingPhase, RecordingService};
@@ -179,8 +179,15 @@ fn show_or_create_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub fn open_main_window_for_transcription(app: AppHandle) -> Result<(), String> {
-    show_or_create_main_window(&app)
+pub fn prepare_transcription_handoff(
+    app: AppHandle,
+) -> Result<crate::pending_action::PendingAction, String> {
+    let meeting_id = crate::commands::transcribe::selected_meeting_id(&app)?;
+    let action = crate::pending_action::prepare_transcription(&app, &meeting_id)?;
+    show_or_create_main_window(&app)?;
+    app.emit(crate::pending_action::AVAILABLE_EVENT, action.clone())
+        .map_err(|error| format!("メイン画面へ文字起こし待ちを通知できませんでした: {error}"))?;
+    Ok(action)
 }
 
 fn quit_application<R: Runtime>(app: &AppHandle<R>) {

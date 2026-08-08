@@ -141,7 +141,7 @@
         <small>{providerDefinition.capabilitySummary}</small>
       </div>
     </div>
-    <div class="action-row provider-action">
+    <div class="action-row provider-action" data-transcription-action>
       <p class="action-help">
         {providerConfigured ? `${providerDefinition.label}で文字起こしします` : `${providerDefinition.label}のAPIキーを設定してください`}
       </p>

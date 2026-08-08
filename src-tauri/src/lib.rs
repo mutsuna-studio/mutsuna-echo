@@ -3,6 +3,7 @@ mod credentials;
 #[cfg(desktop)]
 mod meeting_detection;
 mod meeting_store;
+mod pending_action;
 mod recording;
 #[cfg(desktop)]
 mod resident;
@@ -26,6 +27,9 @@ pub fn run() {
             commands::api_key::save_api_key,
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,
+            pending_action::get_pending_action,
+            pending_action::receive_pending_action,
+            pending_action::acknowledge_pending_action,
             commands::transcribe::select_audio_file,
             commands::transcribe::get_transcription_session,
             commands::transcribe::transcribe_selected_audio,
@@ -48,7 +52,7 @@ pub fn run() {
             #[cfg(desktop)]
             meeting_detection::dismiss_meeting_overlay,
             #[cfg(desktop)]
-            resident::open_main_window_for_transcription
+            resident::prepare_transcription_handoff
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -124,6 +124,37 @@ pub(crate) fn meeting_directory(app: &AppHandle, meeting_id: &str) -> Result<Pat
     meeting_directory_in(&meetings_directory(app)?, meeting_id)
 }
 
+pub(crate) fn local_audio_path(app: &AppHandle, meeting_id: &str) -> Result<PathBuf, String> {
+    validate_meeting_id(meeting_id)?;
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingのローカル情報を確認できませんでした。".to_string())?;
+    let primary = local_meetings_directory(app)?.join(format!("{meeting_id}.json"));
+    let backup = primary.with_extension("json.backup");
+    let path = if primary.exists() {
+        primary
+    } else if backup.exists() {
+        backup
+    } else {
+        return Err(
+            "この端末にはMeetingの音声ファイルがありません。音声を選び直してください。".into(),
+        );
+    };
+    let local: LocalMeetingState = read_json(&path)?;
+    if local.schema_version != SCHEMA_VERSION || local.meeting_id != meeting_id {
+        return Err("Meetingのローカル情報が一致しません。".into());
+    }
+    let canonical = canonical_audio_path(&local.audio_path)?;
+    let metadata = fs::metadata(&canonical)
+        .map_err(|error| format!("Meetingの音声ファイルを確認できませんでした: {error}"))?;
+    if metadata.len() != local.size_bytes
+        || modified_at_unix_ms(&metadata) != local.modified_at_unix_ms
+    {
+        return Err("Meetingの音声ファイルが変更されています。音声を選び直してください。".into());
+    }
+    Ok(canonical)
+}
+
 pub(crate) fn meetings_directory(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()

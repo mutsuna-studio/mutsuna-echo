@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { tick } from "svelte";
   import {
     Toaster,
     showErrorToast,
@@ -12,6 +14,7 @@
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import type { TranscriptionProviderId } from "./lib/providers";
+  import type { PendingAction } from "./lib/types/pending-action";
   import type {
     SelectedAudioFile,
     Transcript,
@@ -39,6 +42,8 @@
   let usageError = $state("");
   let lastErrorToast = $state("");
   let lastErrorToastAt = $state(0);
+  let pendingActionPromise: Promise<void> | null = null;
+  let pendingActionId = "";
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
@@ -68,17 +73,69 @@
     }
   }
 
+  function receivePendingAction(action: PendingAction): Promise<void> {
+    if (pendingActionPromise && pendingActionId === action.id) return pendingActionPromise;
+    if (pendingActionPromise) {
+      return pendingActionPromise.then(() => receivePendingAction(action));
+    }
+    pendingActionId = action.id;
+    pendingActionPromise = applyPendingAction(action).finally(() => {
+      pendingActionPromise = null;
+      pendingActionId = "";
+    });
+    return pendingActionPromise;
+  }
+
+  async function applyPendingAction(action: PendingAction) {
+    const audio = await invoke<SelectedAudioFile>("receive_pending_action", {
+      actionId: action.id
+    });
+    selectedAudio = audio;
+    await restoreSelectedTranscript();
+    await focusTranscriptionAction();
+    await invoke("acknowledge_pending_action", { actionId: action.id });
+    showSuccessToast(
+      "録音を保存しました。",
+      "音声を選択しました。設定を確認して文字起こしを開始できます。"
+    );
+  }
+
+  async function focusTranscriptionAction() {
+    await tick();
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    const section = document.querySelector<HTMLElement>("[data-transcription-action]");
+    const button = section?.querySelector<HTMLButtonElement>("button");
+    if (!section || !button) {
+      throw new Error("文字起こし操作を画面に準備できませんでした。");
+    }
+    section.scrollIntoView({ behavior: "smooth", block: "center" });
+    button.focus({ preventScroll: true });
+  }
+
   $effect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
     void (async () => {
       try {
-        const [nextHasApiKey, session] = await Promise.all([
+        unlisten = await listen<PendingAction>("pending-action-available", ({ payload }) => {
+          if (!cancelled) {
+            void receivePendingAction(payload).catch((error) => showError(errorText(error)));
+          }
+        });
+        const [nextHasApiKey, session, pendingAction] = await Promise.all([
           invoke<boolean>("has_api_key"),
-          invoke<TranscriptionSession>("get_transcription_session")
+          invoke<TranscriptionSession>("get_transcription_session"),
+          invoke<PendingAction | null>("get_pending_action")
         ]);
+        if (cancelled) return;
         hasApiKey = nextHasApiKey;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
-        if (selectedAudio) await restoreSelectedTranscript();
+        if (pendingAction) {
+          await receivePendingAction(pendingAction);
+        } else if (selectedAudio) {
+          await restoreSelectedTranscript();
+        }
         if (hasApiKey) await refreshUsage();
       } catch (error) {
         showError(errorText(error));
@@ -86,6 +143,10 @@
         loading = false;
       }
     })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   });
 
   // WebViewを閉じている間に進んだ文字起こしを、再生成後に再同期する。
