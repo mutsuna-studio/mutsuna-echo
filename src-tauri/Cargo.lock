@@ -2650,6 +2650,8 @@ version = "0.1.0"
 dependencies = [
  "avassetwriter",
  "chrono",
+ "core-foundation 0.10.1",
+ "core-graphics",
  "flexaudio",
  "jni 0.21.1",
  "keyring",

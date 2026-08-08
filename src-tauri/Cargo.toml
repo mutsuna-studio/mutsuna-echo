@@ -33,12 +33,14 @@ jni = "0.21.1"
 ndk-context = "0.1.1"
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_WinRT", "Win32_Media_MediaFoundation"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_WinRT", "Win32_Media_MediaFoundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 flexaudio = "0.2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 flexaudio = "0.2.0"
 avassetwriter = "0.11.1"
+core-foundation = "0.10.1"
+core-graphics = "0.25.0"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"

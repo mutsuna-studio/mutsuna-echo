@@ -1,5 +1,7 @@
 mod commands;
 mod credentials;
+#[cfg(desktop)]
+mod meeting_detection;
 mod recording;
 #[cfg(desktop)]
 mod resident;
@@ -13,7 +15,9 @@ pub fn run() {
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
     let builder = builder
+        .manage(meeting_detection::MeetingDetectionState::default())
         .manage(resident::ResidentState::default())
+        .plugin(meeting_detection::init())
         .plugin(resident::init());
     builder
         .plugin(tauri_plugin_dialog::init())
@@ -37,7 +41,11 @@ pub fn run() {
             commands::recording::select_recorded_audio,
             commands::recording::reveal_recorded_audio,
             commands::recording::recover_recording,
-            commands::recording::discard_recording
+            commands::recording::discard_recording,
+            #[cfg(desktop)]
+            meeting_detection::get_meeting_detection,
+            #[cfg(desktop)]
+            meeting_detection::dismiss_meeting_overlay
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
