@@ -314,7 +314,7 @@
         <span>マイク</span>
       </label>
       {#if capabilities.microphoneDevices.length > 0}
-        <Select bind:value={microphoneDeviceId} options={microphoneOptions} disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
+        <Select bind:value={microphoneDeviceId} options={microphoneOptions} searchable disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
       {/if}
       <div class="meter" aria-label="マイク入力レベル"><span style:width={`${(status?.microphoneLevel ?? 0) * 100}%`}></span></div>
     </div>
@@ -325,7 +325,7 @@
         <span>システム音声</span>
       </label>
       {#if capabilities.systemDevices.length > 0}
-        <Select bind:value={systemDeviceId} options={systemOptions} disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
+        <Select bind:value={systemDeviceId} options={systemOptions} searchable disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
       {/if}
       <div class="meter" aria-label="システム音声レベル"><span style:width={`${(status?.systemLevel ?? 0) * 100}%`}></span></div>
     </div>
@@ -337,6 +337,7 @@
       value={vadPreset}
       options={VAD_PRESET_OPTIONS}
       onValueChange={changeVadPreset}
+      searchable
       disabled={active || disabled || vadPresetBusy}
       ariaLabel="録音中の音声検出感度"
     />

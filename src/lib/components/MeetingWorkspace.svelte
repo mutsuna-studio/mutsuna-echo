@@ -94,29 +94,10 @@
           </div>
         </div>
         <div class="header-actions">
-          <div class="model-picker">
-            <span>文字起こしモデル</span>
-            <Select
-              value={provider}
-              options={providerOptions}
-              onValueChange={selectProvider}
-              disabled={transcribing || providers.length === 0}
-              ariaLabel="文字起こしモデル"
-            />
-          </div>
           {#if recording}
             <Button size="sm" variant="ghost" type="button" icon={FolderOpen} onclick={() => onReveal(recording)}>場所を開く</Button>
           {/if}
-          <span data-transcription-action>
-            <Button size="sm" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
-          </span>
         </div>
-      </div>
-      <div class="provider-line">
-        <span class:ready={canTranscribe || Boolean(transcript)} aria-hidden="true"></span>
-        <strong>{providerLabel}</strong>
-        <small>{providerStatus}</small>
-        {#if !canTranscribe && !transcript}<button type="button" onclick={onOpenSettings}>設定を確認</button>{/if}
       </div>
     </header>
 
@@ -128,6 +109,29 @@
       </div>
       <Badge variant="secondary">音声</Badge>
     </div>
+
+    <section class="transcription-toolbar" aria-label="文字起こしモデルと実行">
+      <div class="model-picker">
+        <span>文字起こしモデル</span>
+        <Select
+          value={provider}
+          options={providerOptions}
+          onValueChange={selectProvider}
+          searchable
+          disabled={transcribing || providers.length === 0}
+          ariaLabel="文字起こしモデル"
+        />
+      </div>
+      <span class="transcription-action" data-transcription-action>
+        <Button type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
+      </span>
+      <div class="provider-line">
+        <span class:ready={canTranscribe || Boolean(transcript)} aria-hidden="true"></span>
+        <strong>{providerLabel}</strong>
+        <small>{providerStatus}</small>
+        {#if !canTranscribe && !transcript}<button type="button" onclick={onOpenSettings}>設定を確認</button>{/if}
+      </div>
+    </section>
 
     <div class="detail-tabs" role="tablist" aria-label="会議の表示内容">
       <button class:active={detailTab === "transcript"} type="button" role="tab" aria-selected={detailTab === "transcript"} onclick={() => detailTab = "transcript"}>文字起こし</button>
@@ -142,8 +146,7 @@
           <div class="empty-transcript">
             <FileAudio aria-hidden="true" />
             <h2>文字起こしはまだありません</h2>
-            <p>{providerStatus}</p>
-            <Button type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
+            <p>上の「文字起こしモデル」から使用するモデルを選び、文字起こしを開始できます。</p>
           </div>
         {/if}
       {:else}
@@ -170,7 +173,7 @@
 </section>
 
 <style>
-  .meeting-workspace { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); background: var(--background); }
+  .meeting-workspace { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); background: var(--background); }
   .workspace-header { padding: 25px 30px 18px; }
   .title-row { display: flex; min-width: 0; align-items: flex-start; gap: 12px; }
   .meeting-title { min-width: 0; flex: 1; }
@@ -178,11 +181,13 @@
   .meeting-meta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 9px; color: var(--muted-foreground); font-size: 0.79rem; }
   .meeting-meta span { display: flex; align-items: center; gap: 5px; }
   .meeting-meta :global(svg) { width: 14px; height: 14px; }
-  .header-actions { display: flex; flex: none; align-items: flex-end; gap: 6px; }
-  .header-actions > span { display: contents; }
-  .model-picker { display: grid; width: 210px; gap: 4px; }
-  .model-picker > span { color: var(--muted-foreground); font-size: 0.68rem; font-weight: 650; }
-  .provider-line { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 15px; color: var(--muted-foreground); font-size: 0.75rem; }
+  .header-actions { display: flex; flex: none; gap: 6px; }
+
+  .transcription-toolbar { display: grid; grid-template-columns: minmax(210px, 280px) auto; align-items: end; gap: 8px 12px; margin: 0 30px 18px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--muted) 35%, var(--background)); }
+  .model-picker { display: grid; min-width: 0; gap: 5px; }
+  .model-picker > span { color: var(--muted-foreground); font-size: 0.7rem; font-weight: 650; }
+  .transcription-action { align-self: end; }
+  .provider-line { display: flex; min-width: 0; grid-column: 1 / -1; align-items: center; gap: 7px; color: var(--muted-foreground); font-size: 0.75rem; }
   .provider-line > span { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted-foreground); }
   .provider-line > span.ready { background: var(--primary); }
   .provider-line strong { color: var(--foreground); font-weight: 650; }
@@ -222,9 +227,14 @@
     .workspace-header { padding: 20px 18px 14px; }
     .title-row { flex-wrap: wrap; }
     .meeting-title { flex-basis: calc(100% - 44px); }
-    .header-actions { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
-    .model-picker { width: min(100%, 240px); margin-right: auto; }
-    .audio-summary, .detail-tabs { margin-right: 18px; margin-left: 18px; }
+    .header-actions { width: 100%; justify-content: flex-end; }
+    .audio-summary, .transcription-toolbar, .detail-tabs { margin-right: 18px; margin-left: 18px; }
     .detail-content { padding-right: 18px; padding-left: 18px; }
+  }
+
+  @media (max-width: 520px) {
+    .transcription-toolbar { grid-template-columns: minmax(0, 1fr); }
+    .transcription-action { justify-self: stretch; }
+    .transcription-action :global(button) { width: 100%; }
   }
 </style>

@@ -157,6 +157,7 @@
           value={provider}
           options={providerOptions}
           onValueChange={selectProvider}
+          searchable
           disabled={busy}
           ariaLabel="文字起こしモデル"
         />

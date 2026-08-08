@@ -242,6 +242,7 @@
         value={vadPreset}
         options={VAD_PRESET_OPTIONS}
         onValueChange={changePreset}
+        searchable
         disabled={disabled || vadWorking || presetWorking}
         ariaLabel="VADの検出感度"
       />
