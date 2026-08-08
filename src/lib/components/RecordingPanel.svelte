@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { Alert, AlertDescription, AlertTitle } from "@mutsuna/ui/alert";
   import {
     AlertDialog,
@@ -11,12 +12,10 @@
     AlertDialogHeader,
     AlertDialogTitle
   } from "@mutsuna/ui/alert-dialog";
-  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
-  import { formatFileSize, formatRecordedAt } from "../format";
-  import { transcriptionProviderLabel } from "../providers";
+  import RecordingHistory from "./RecordingHistory.svelte";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
@@ -59,6 +58,7 @@
   let discardDialogOpen = $state(false);
   let pendingDiscard = $state<RecoverableRecording | null>(null);
   let observedTranscriptRevision = $state(0);
+  let statusEventsAvailable = $state(false);
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -125,6 +125,10 @@
 
   async function refreshStatus() {
     const nextStatus = await invoke<RecordingStatus>("get_recording_status");
+    await acceptStatus(nextStatus);
+  }
+
+  async function acceptStatus(nextStatus: RecordingStatus) {
     status = nextStatus;
     await deliverCompletedRecording(nextStatus);
     if (nextStatus.phase === "failed" && nextStatus.error) onError(nextStatus.error);
@@ -142,9 +146,17 @@
 
   $effect(() => {
     let cancelled = false;
-    let timer: number | undefined;
+    let unlisten: UnlistenFn | undefined;
     void (async () => {
       try {
+        try {
+          unlisten = await listen<RecordingStatus>("recording-status", ({ payload }) => {
+            if (!cancelled) void acceptStatus(payload).catch((error) => onError(errorText(error)));
+          });
+          statusEventsAvailable = true;
+        } catch (error) {
+          console.error("Could not subscribe to recording status events", error);
+        }
         const [nextCapabilities, nextStatus, nextRecoverable, nextRecordedAudio] = await Promise.all([
           invoke<RecordingCapabilities>("get_recording_capabilities"),
           invoke<RecordingStatus>("get_recording_status"),
@@ -156,17 +168,13 @@
         ]);
         if (cancelled) return;
         capabilities = nextCapabilities;
-        status = nextStatus;
         recoverable = nextRecoverable;
         recordedAudio = nextRecordedAudio;
         microphone = nextCapabilities.microphoneSupported;
         systemAudio = nextCapabilities.systemAudioSupported;
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
-        await deliverCompletedRecording(nextStatus);
-        timer = window.setInterval(() => {
-          void refreshStatus().catch((error) => onError(errorText(error)));
-        }, 500);
+        await acceptStatus(nextStatus);
       } catch (error) {
         onError(errorText(error));
       } finally {
@@ -175,8 +183,18 @@
     })();
     return () => {
       cancelled = true;
-      if (timer !== undefined) window.clearInterval(timer);
+      statusEventsAvailable = false;
+      unlisten?.();
     };
+  });
+
+  // Androidまたはイベント購読失敗時だけ、録音中に限定して状態を確認する。
+  $effect(() => {
+    if (!active || (capabilities?.platform !== "android" && statusEventsAvailable)) return;
+    const timer = window.setInterval(() => {
+      void refreshStatus().catch((error) => onError(errorText(error)));
+    }, 500);
+    return () => window.clearInterval(timer);
   });
 
   async function start() {
@@ -207,7 +225,7 @@
     try {
       const result = await invoke<StopRecordingResult>("stop_recording");
       status = result.status;
-      if (result.audio) {
+      if (result.audio && deliveredOutput !== result.status.outputPath) {
         deliveredOutput = result.status.outputPath ?? "";
         onAudioReady(result.audio);
         await refreshRecordedAudio();
@@ -314,52 +332,14 @@
   {/if}
 
   {#if !active}
-    <section class="history" aria-label="過去の録音">
-      <div class="history-heading">
-        <div>
-          <strong>過去の録音</strong>
-          <small>Music/Mutsuna Echoに保存された最新100件</small>
-        </div>
-        <Button variant="outline" size="sm" type="button" onclick={refreshRecordedAudio} disabled={actionBusy}>更新</Button>
-      </div>
-      {#if recordedAudio.length > 0}
-        <div class="history-list">
-          {#each recordedAudio as recording (recording.id)}
-            <div class="history-item">
-              <Button
-                class="history-select"
-                variant="ghost"
-                type="button"
-                onclick={() => selectRecordedAudio(recording)}
-                disabled={actionBusy || disabled}
-              >
-                <span>
-                  <strong>{recording.fileName}</strong>
-                  <small>
-                    {formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}
-                    {#each recording.transcriptProviders as provider}
-                      <Badge variant="secondary">{transcriptionProviderLabel(provider)} 済み</Badge>
-                    {/each}
-                  </small>
-                </span>
-                <span class="history-action">選択</span>
-              </Button>
-              <Button
-                class="history-reveal"
-                variant="outline"
-                size="sm"
-                type="button"
-                onclick={() => revealRecordedAudio(recording)}
-                disabled={actionBusy}
-                aria-label={`${recording.fileName}の保存場所を開く`}
-              >場所を開く</Button>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <p class="history-empty">保存済みの録音はまだありません。</p>
-      {/if}
-    </section>
+    <RecordingHistory
+      recordings={recordedAudio}
+      {disabled}
+      busy={actionBusy}
+      onRefresh={refreshRecordedAudio}
+      onSelect={selectRecordedAudio}
+      onReveal={revealRecordedAudio}
+    />
   {/if}
 
   <div class="sources" aria-disabled={active || disabled}>
@@ -443,21 +423,6 @@
   .limitation { padding: 11px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; }
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
-  .history { display: grid; gap: 10px; margin-top: 18px; }
-  .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .history-heading > div { display: grid; gap: 3px; }
-  .history-heading small,
-  .history-empty { color: #68746c; font-size: 0.78rem; }
-  .history-list { display: grid; overflow: hidden; border: 1px solid #dce3de; border-radius: 12px; }
-  .history-item { display: flex; align-items: center; gap: 8px; padding: 6px; border-top: 1px solid var(--border); }
-  .history-item:first-child { border-top: 0; }
-  .history-item :global(.history-select) { min-width: 0; height: auto; flex: 1; justify-content: space-between; padding: 8px; text-align: left; }
-  .history-item :global(.history-select > span:first-child) { display: grid; min-width: 0; gap: 3px; }
-  .history-item :global(.history-select strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .history-item :global(.history-select small) { color: var(--muted-foreground); }
-  .history-item :global(.history-reveal) { flex: none; }
-  .history-action { flex: none; color: #23704a; font-size: 0.78rem; font-weight: 750; }
-  .history-empty { margin: 0; padding: 14px; border-radius: 10px; background: #f5f7f5; }
   .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
   .source { display: grid; gap: 10px; padding: 15px; border: 1px solid #dce3de; border-radius: 12px; background: #f8faf8; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
@@ -476,6 +441,5 @@
     .recorder small { width: 100%; margin-left: 20px; }
     .record-actions :global(button) { flex: 1; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
-    .history-action { display: none; }
   }
 </style>

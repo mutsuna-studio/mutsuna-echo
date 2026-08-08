@@ -85,12 +85,16 @@ fn completed_recordings_directory(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
-pub(super) fn completed_recordings(app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+pub(super) fn completed_recordings_with_paths(
+    app: &AppHandle,
+) -> Result<Vec<(RecordedAudioSummary, PathBuf)>, String> {
     let directory = completed_recordings_directory(app)?;
-    completed_recordings_in(&directory)
+    completed_recording_entries_in(&directory)
 }
 
-fn completed_recordings_in(directory: &Path) -> Result<Vec<RecordedAudioSummary>, String> {
+fn completed_recording_entries_in(
+    directory: &Path,
+) -> Result<Vec<(RecordedAudioSummary, PathBuf)>, String> {
     let mut recordings = fs::read_dir(directory)
         .map_err(|error| format!("過去の録音を確認できませんでした: {error}"))?
         .filter_map(Result::ok)
@@ -116,16 +120,19 @@ fn completed_recordings_in(directory: &Path) -> Result<Vec<RecordedAudioSummary>
                 .as_millis()
                 .try_into()
                 .ok()?;
-            Some(RecordedAudioSummary {
-                id: file_name.clone(),
-                file_name,
-                size_bytes: metadata.len(),
-                recorded_at_unix_ms,
-                transcript_providers: Vec::new(),
-            })
+            Some((
+                RecordedAudioSummary {
+                    id: file_name.clone(),
+                    file_name,
+                    size_bytes: metadata.len(),
+                    recorded_at_unix_ms,
+                    transcript_providers: Vec::new(),
+                },
+                path,
+            ))
         })
         .collect::<Vec<_>>();
-    recordings.sort_by_key(|recording| std::cmp::Reverse(recording.recorded_at_unix_ms));
+    recordings.sort_by_key(|(recording, _)| std::cmp::Reverse(recording.recorded_at_unix_ms));
     recordings.truncate(HISTORY_LIMIT);
     Ok(recordings)
 }
@@ -247,7 +254,7 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        completed_recordings_in, unique_output_path, validate_completed_file_name,
+        completed_recording_entries_in, unique_output_path, validate_completed_file_name,
         validate_session_id,
     };
 
@@ -284,11 +291,12 @@ mod tests {
         std::fs::write(directory.join("meeting.m4a"), b"audio").expect("write M4A fixture");
         std::fs::write(directory.join("notes.txt"), b"not audio").expect("write non-audio fixture");
 
-        let recordings = completed_recordings_in(&directory).expect("list completed recordings");
+        let recordings =
+            completed_recording_entries_in(&directory).expect("list completed recordings");
         assert_eq!(recordings.len(), 1);
-        assert_eq!(recordings[0].id, "meeting.m4a");
-        assert_eq!(recordings[0].file_name, "meeting.m4a");
-        assert_eq!(recordings[0].size_bytes, 5);
+        assert_eq!(recordings[0].0.id, "meeting.m4a");
+        assert_eq!(recordings[0].0.file_name, "meeting.m4a");
+        assert_eq!(recordings[0].0.size_bytes, 5);
 
         let _ = std::fs::remove_dir_all(directory);
     }

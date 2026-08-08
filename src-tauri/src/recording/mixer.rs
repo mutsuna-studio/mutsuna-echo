@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use super::{
-    platform::{mix_with_limiter, M4aWriter},
+    platform::{mix_with_limiter_into, M4aWriter},
     types::StartRecordingRequest,
 };
 
@@ -11,6 +11,7 @@ pub(super) fn drain_mix(
     writer: &mut M4aWriter,
     microphone: &mut VecDeque<(i64, Vec<f32>)>,
     system: &mut VecDeque<(i64, Vec<f32>)>,
+    mix_buffer: &mut Vec<f32>,
     request: &StartRecordingRequest,
     flush: bool,
 ) -> Result<(), String> {
@@ -34,7 +35,8 @@ pub(super) fn drain_mix(
             (Some((mic_pts, _)), Some((sys_pts, _))) if (mic_pts - sys_pts).abs() < CHUNK_NS => {
                 let (_, mic) = microphone.pop_front().expect("front checked");
                 let (_, sys) = system.pop_front().expect("front checked");
-                writer.write(&mix_with_limiter(&mic, &sys))?;
+                mix_with_limiter_into(&mic, &sys, mix_buffer);
+                writer.write(mix_buffer)?;
             }
             (Some((mic_pts, _)), Some((sys_pts, _))) if mic_pts < sys_pts => {
                 let (_, mic) = microphone.pop_front().expect("front checked");

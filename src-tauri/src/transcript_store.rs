@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
+    fmt::Write as FmtWrite,
     fs,
-    io::Write,
+    io::BufReader,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -14,12 +16,67 @@ use crate::transcription::{Transcript, TranscriptionProvider};
 const SCHEMA_VERSION: u8 = 1;
 const MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredTranscript {
     schema_version: u8,
-    saved_at: String,
+    #[serde(rename = "savedAt")]
+    _saved_at: String,
     transcript: Transcript,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredTranscriptRef<'a> {
+    schema_version: u8,
+    saved_at: String,
+    transcript: &'a Transcript,
+}
+
+#[derive(Default)]
+pub(crate) struct TranscriptIndex {
+    file_names: HashSet<String>,
+}
+
+impl TranscriptIndex {
+    pub(crate) fn load(app: &AppHandle) -> Result<Self, String> {
+        let directory = transcripts_directory(app)?;
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "保存済みの文字起こし一覧を確認できませんでした: {error}"
+                ))
+            }
+        };
+        let file_names = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        Ok(Self { file_names })
+    }
+
+    pub(crate) fn providers_for_audio(&self, audio_path: &Path) -> Vec<String> {
+        let Ok(key) = audio_key(audio_path) else {
+            return Vec::new();
+        };
+        TranscriptionProvider::ALL
+            .into_iter()
+            .filter(|provider| {
+                let primary = format!("{key}.{}.json", provider.id());
+                self.file_names.contains(&primary)
+                    || self.file_names.contains(&format!("{primary}.backup"))
+                    || (*provider == TranscriptionProvider::ElevenLabs
+                        && (self.file_names.contains(&format!("{key}.json"))
+                            || self.file_names.contains(&format!("{key}.json.backup"))))
+            })
+            .map(|provider| provider.id().to_string())
+            .collect()
+    }
 }
 
 pub(crate) fn save(
@@ -38,21 +95,6 @@ pub(crate) fn load(
 ) -> Result<Option<Transcript>, String> {
     let directory = transcripts_directory(app)?;
     load_in(&directory, audio_path, provider)
-}
-
-pub(crate) fn exists(app: &AppHandle, audio_path: &Path, provider: TranscriptionProvider) -> bool {
-    let Ok(directory) = transcripts_directory(app) else {
-        return false;
-    };
-    let Ok(path) = transcript_path_in(&directory, audio_path, provider.id()) else {
-        return false;
-    };
-    path.is_file()
-        || path.with_extension("json.backup").is_file()
-        || (provider == TranscriptionProvider::ElevenLabs
-            && legacy_transcript_path(&directory, audio_path).is_ok_and(|legacy| {
-                legacy.is_file() || legacy.with_extension("json.backup").is_file()
-            }))
 }
 
 fn transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -96,11 +138,12 @@ fn audio_key(audio_path: &Path) -> Result<String, String> {
     hasher.update(canonical.as_os_str().as_encoded_bytes());
     hasher.update(metadata.len().to_le_bytes());
     hasher.update(modified_nanos.to_le_bytes());
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(key)
 }
 
 fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Result<(), String> {
@@ -113,25 +156,34 @@ fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Resu
         chrono::Utc::now().timestamp_micros()
     ));
     let backup = path.with_extension("json.backup");
-    let stored = StoredTranscript {
+    let stored = StoredTranscriptRef {
         schema_version: SCHEMA_VERSION,
         saved_at: chrono::Utc::now().to_rfc3339(),
-        transcript: transcript.clone(),
+        transcript,
     };
-    let json = serde_json::to_vec_pretty(&stored)
-        .map_err(|error| format!("文字起こしをJSONへ変換できませんでした: {error}"))?;
-    if json.len() as u64 > MAX_TRANSCRIPT_BYTES {
-        return Err("文字起こしが大きすぎるため保存できませんでした。".to_string());
-    }
 
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .map_err(|error| format!("文字起こしを書き込めませんでした: {error}"))?;
-    file.write_all(&json)
-        .and_then(|_| file.sync_all())
+    if let Err(error) = serde_json::to_writer(&mut file, &stored) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("文字起こしをJSONへ変換できませんでした: {error}"));
+    }
+    let written_bytes = file
+        .metadata()
+        .map_err(|error| format!("文字起こしの保存サイズを確認できませんでした: {error}"))?
+        .len();
+    if written_bytes > MAX_TRANSCRIPT_BYTES {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err("文字起こしが大きすぎるため保存できませんでした。".to_string());
+    }
+    file.sync_all()
         .map_err(|error| format!("文字起こしを安全に書き込めませんでした: {error}"))?;
+    drop(file);
 
     if path.exists() {
         if backup.exists() {
@@ -176,9 +228,9 @@ fn load_in(
     if !metadata.is_file() || metadata.len() > MAX_TRANSCRIPT_BYTES {
         return Err("保存済みの文字起こしファイルが不正です。".to_string());
     }
-    let bytes = fs::read(path)
+    let file = fs::File::open(path)
         .map_err(|error| format!("保存済みの文字起こしを読み込めませんでした: {error}"))?;
-    let stored: StoredTranscript = serde_json::from_slice(&bytes)
+    let stored: StoredTranscript = serde_json::from_reader(BufReader::new(file))
         .map_err(|error| format!("保存済みの文字起こしが壊れています: {error}"))?;
     if stored.schema_version != SCHEMA_VERSION {
         return Err("保存済みの文字起こし形式に対応していません。".to_string());
@@ -191,9 +243,9 @@ fn load_in(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
 
-    use super::{audio_key, load_in, save_in, transcript_path_in};
+    use super::{audio_key, load_in, save_in, transcript_path_in, TranscriptIndex};
     use crate::transcription::{Transcript, TranscriptSegment, TranscriptionProvider};
 
     fn fixture_transcript() -> Transcript {
@@ -281,6 +333,32 @@ mod tests {
         let assemblyai = transcript_path_in(&root, &audio, "assemblyai")
             .expect("create AssemblyAI transcript path");
         assert_ne!(elevenlabs, assemblyai);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transcript_index_matches_provider_and_legacy_files_without_rescanning() {
+        let root =
+            std::env::temp_dir().join(format!("mutsuna-transcript-index-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create fixture directory");
+        let audio = root.join("meeting.m4a");
+        fs::write(&audio, b"audio fixture").expect("write audio fixture");
+        let key = audio_key(&audio).expect("audio key");
+
+        let provider_index = TranscriptIndex {
+            file_names: HashSet::from([format!("{key}.elevenlabs.json.backup")]),
+        };
+        assert_eq!(
+            provider_index.providers_for_audio(&audio),
+            vec!["elevenlabs"]
+        );
+
+        let legacy_index = TranscriptIndex {
+            file_names: HashSet::from([format!("{key}.json")]),
+        };
+        assert_eq!(legacy_index.providers_for_audio(&audio), vec!["elevenlabs"]);
 
         let _ = fs::remove_dir_all(root);
     }

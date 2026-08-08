@@ -5,6 +5,7 @@ pub struct M4aWriter {
     sink_writer: windows::Win32::Media::MediaFoundation::IMFSinkWriter,
     stream_index: u32,
     samples_written: u64,
+    pcm_buffer: Vec<u8>,
     _media_foundation: MediaFoundation,
 }
 
@@ -79,6 +80,7 @@ impl M4aWriter {
                 sink_writer: writer,
                 stream_index: 0,
                 samples_written: 0,
+                pcm_buffer: Vec::new(),
                 _media_foundation: media_foundation,
             })
         }
@@ -86,17 +88,22 @@ impl M4aWriter {
 
     pub fn write(&mut self, samples: &[f32]) -> Result<(), String> {
         use windows::Win32::Media::MediaFoundation::{MFCreateMemoryBuffer, MFCreateSample};
-        let pcm = samples_to_i16_bytes(samples);
+        samples_to_i16_bytes(samples, &mut self.pcm_buffer);
         unsafe {
-            let buffer = MFCreateMemoryBuffer(pcm.len() as u32).map_err(windows_encoder_error)?;
+            let buffer = MFCreateMemoryBuffer(self.pcm_buffer.len() as u32)
+                .map_err(windows_encoder_error)?;
             let mut destination = std::ptr::null_mut();
             buffer
                 .Lock(&mut destination, None, None)
                 .map_err(windows_encoder_error)?;
-            std::ptr::copy_nonoverlapping(pcm.as_ptr(), destination, pcm.len());
+            std::ptr::copy_nonoverlapping(
+                self.pcm_buffer.as_ptr(),
+                destination,
+                self.pcm_buffer.len(),
+            );
             buffer.Unlock().map_err(windows_encoder_error)?;
             buffer
-                .SetCurrentLength(pcm.len() as u32)
+                .SetCurrentLength(self.pcm_buffer.len() as u32)
                 .map_err(windows_encoder_error)?;
             let sample = MFCreateSample().map_err(windows_encoder_error)?;
             sample.AddBuffer(&buffer).map_err(windows_encoder_error)?;
@@ -119,9 +126,10 @@ impl M4aWriter {
         // newly opened or extremely short stream otherwise returns
         // MF_E_SINK_NO_SAMPLES_PROCESSED (0xC00D4A44).
         const MIN_FINALIZE_FRAMES: u64 = 2_048;
+        let silence = [0.0; 960];
         while self.samples_written < MIN_FINALIZE_FRAMES {
             let frames = (MIN_FINALIZE_FRAMES - self.samples_written).min(960) as usize;
-            self.write(&vec![0.0; frames])?;
+            self.write(&silence[..frames])?;
         }
         unsafe { self.sink_writer.Finalize().map_err(windows_encoder_error) }
     }
@@ -172,6 +180,7 @@ pub struct M4aWriter {
     frames_written: i64,
     path: std::path::PathBuf,
     bitrate: u32,
+    pcm_buffer: Vec<u8>,
 }
 
 #[cfg(target_os = "macos")]
@@ -197,15 +206,16 @@ impl M4aWriter {
             frames_written: 0,
             path: path.to_path_buf(),
             bitrate,
+            pcm_buffer: Vec::new(),
         })
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<(), String> {
-        let pcm = samples_to_i16_bytes(samples);
+        samples_to_i16_bytes(samples, &mut self.pcm_buffer);
         self.writer
             .append_audio_pcm(
                 self.input,
-                &pcm,
+                &self.pcm_buffer,
                 samples.len(),
                 (self.frames_written, 48_000),
             )
@@ -260,24 +270,31 @@ impl M4aWriter {
     }
 }
 
-fn samples_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut pcm = Vec::with_capacity(samples.len() * 2);
+fn samples_to_i16_bytes(samples: &[f32], pcm: &mut Vec<u8>) {
+    pcm.clear();
+    pcm.reserve(samples.len() * 2);
     for sample in samples {
         let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
         pcm.extend_from_slice(&value.to_le_bytes());
     }
-    pcm
 }
 
+#[cfg(test)]
 pub fn mix_with_limiter(microphone: &[f32], system: &[f32]) -> Vec<f32> {
+    let mut output = Vec::with_capacity(microphone.len().max(system.len()));
+    mix_with_limiter_into(microphone, system, &mut output);
+    output
+}
+
+pub fn mix_with_limiter_into(microphone: &[f32], system: &[f32], output: &mut Vec<f32>) {
     let length = microphone.len().max(system.len());
-    (0..length)
-        .map(|index| {
-            let mic = microphone.get(index).copied().unwrap_or(0.0);
-            let sys = system.get(index).copied().unwrap_or(0.0);
-            soft_limit(mic + sys)
-        })
-        .collect()
+    output.clear();
+    output.reserve(length);
+    output.extend((0..length).map(|index| {
+        let mic = microphone.get(index).copied().unwrap_or(0.0);
+        let sys = system.get(index).copied().unwrap_or(0.0);
+        soft_limit(mic + sys)
+    }));
 }
 
 fn soft_limit(sample: f32) -> f32 {

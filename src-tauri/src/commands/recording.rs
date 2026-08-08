@@ -155,18 +155,26 @@ pub(crate) fn list_recoverable_recordings(
 
 #[tauri::command]
 pub(crate) fn list_recorded_audio(app: AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
-    let mut recordings = recording::completed_recordings(&app)?;
-    #[cfg(not(target_os = "android"))]
-    for recording in &mut recordings {
-        if let Ok(path) = recording::completed_recording_path(&app, &recording.id) {
-            recording.transcript_providers = crate::transcription::TranscriptionProvider::ALL
-                .into_iter()
-                .filter(|provider| crate::transcript_store::exists(&app, &path, *provider))
-                .map(|provider| provider.id().to_string())
-                .collect();
-        }
+    #[cfg(target_os = "android")]
+    {
+        recording::completed_recordings(&app)
     }
-    Ok(recordings)
+    #[cfg(not(target_os = "android"))]
+    {
+        let entries = recording::completed_recordings_with_paths(&app)?;
+        let transcript_index =
+            crate::transcript_store::TranscriptIndex::load(&app).unwrap_or_else(|error| {
+                eprintln!("Could not index stored transcripts: {error}");
+                crate::transcript_store::TranscriptIndex::default()
+            });
+        Ok(entries
+            .into_iter()
+            .map(|(mut recording, path)| {
+                recording.transcript_providers = transcript_index.providers_for_audio(&path);
+                recording
+            })
+            .collect())
+    }
 }
 
 #[tauri::command]

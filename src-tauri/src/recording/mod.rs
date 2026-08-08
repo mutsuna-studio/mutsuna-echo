@@ -12,13 +12,15 @@ pub mod types;
 
 use std::sync::{Arc, Mutex};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 pub use service::RecordingService;
 use types::{
     AudioDevice, RecordedAudioSummary, RecordingCapabilities, RecordingStatus,
     RecoverableRecording, CHANNELS, FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
 };
+
+pub const RECORDING_STATUS_EVENT: &str = "recording-status";
 
 pub fn capabilities() -> Result<RecordingCapabilities, String> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -90,16 +92,9 @@ pub fn recoverable_recordings(app: &AppHandle) -> Result<Vec<RecoverableRecordin
     session::recoverable_recordings(app)
 }
 
-pub fn completed_recordings(app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
-    #[cfg(target_os = "android")]
-    {
-        let _ = app;
-        android::completed_recordings()
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        session::completed_recordings(app)
-    }
+#[cfg(target_os = "android")]
+pub fn completed_recordings(_app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+    android::completed_recordings()
 }
 
 pub fn completed_recording_path(
@@ -133,4 +128,28 @@ pub(super) fn set_status(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     update(&mut current);
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn completed_recordings_with_paths(
+    app: &AppHandle,
+) -> Result<Vec<(RecordedAudioSummary, std::path::PathBuf)>, String> {
+    session::completed_recordings_with_paths(app)
+}
+
+pub(super) fn publish_status(
+    app: &AppHandle,
+    status: &Arc<Mutex<RecordingStatus>>,
+    update: impl FnOnce(&mut RecordingStatus),
+) {
+    let snapshot = {
+        let mut current = status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        update(&mut current);
+        current.clone()
+    };
+    if let Err(error) = app.emit(RECORDING_STATUS_EVENT, snapshot) {
+        eprintln!("Could not emit recording status: {error:?}");
+    }
 }

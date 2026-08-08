@@ -3,8 +3,8 @@ use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
 use tauri::AppHandle;
 
 use super::{
+    publish_status,
     session::RecordingPaths,
-    set_status,
     types::{RecordingPhase, RecordingStatus, StartRecordingRequest},
 };
 
@@ -30,6 +30,8 @@ use super::{
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 const MANIFEST_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const STATUS_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 const MAC_FRAGMENT_SECONDS: f64 = 10.0;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -57,7 +59,7 @@ pub(super) fn run_recording(
     if let Err(error) =
         run_desktop_recording(&app, &request, &paths, &status, &stop, &cancel, &ready)
     {
-        set_status(&status, |current| {
+        publish_status(&app, &status, |current| {
             current.phase = RecordingPhase::Failed;
             current.error = Some(error.clone());
             current.stop_reason = Some(StopReason::CaptureError);
@@ -68,7 +70,7 @@ pub(super) fn run_recording(
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn run_recording(
-    _app: AppHandle,
+    app: AppHandle,
     _request: StartRecordingRequest,
     _paths: RecordingPaths,
     status: Arc<Mutex<RecordingStatus>>,
@@ -77,7 +79,7 @@ pub(super) fn run_recording(
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
     let error = "このOSでは現在、アプリ内録音を利用できません。".to_string();
-    set_status(&status, |current| {
+    publish_status(&app, &status, |current| {
         current.phase = RecordingPhase::Failed;
         current.error = Some(error.clone());
     });
@@ -176,11 +178,17 @@ fn run_desktop_recording(
     };
     manifest.save(&paths.directory)?;
 
-    set_status(status, |current| current.phase = RecordingPhase::Recording);
+    publish_status(app, status, |current| {
+        current.phase = RecordingPhase::Recording
+    });
     let _ = ready.send(Ok(()));
     let mut last_manifest = Instant::now();
+    let mut last_status = Instant::now();
     let mut mic_queue = VecDeque::new();
     let mut sys_queue = VecDeque::new();
+    let mut mix_buffer = Vec::new();
+    let mut microphone_level = 0.0;
+    let mut system_level = 0.0;
     let mut stop_reason = StopReason::User;
     let mut microphone_stalled = false;
     let mut system_stalled = false;
@@ -195,15 +203,13 @@ fn run_desktop_recording(
         if let Some(stream) = microphone.as_mut() {
             while let Some(event) = stream.poll_event() {
                 apply_capture_event(&event, &mut microphone_stalled, &mut stop_reason, stop);
-                update_capture_warning(status, microphone_stalled, system_stalled);
+                update_capture_warning(app, status, microphone_stalled, system_stalled);
             }
             while let Some(chunk) = stream.poll_chunk() {
                 if let Some(writer) = microphone_writer.as_mut() {
                     writer.write(&chunk.data)?;
                 }
-                set_status(status, |current| {
-                    current.microphone_level = chunk.peak.clamp(0.0, 1.0)
-                });
+                microphone_level = chunk.peak.clamp(0.0, 1.0);
                 mic_queue.push_back((chunk.pts_ns, chunk.data));
             }
         }
@@ -211,15 +217,13 @@ fn run_desktop_recording(
         if let Some(stream) = system.as_mut() {
             while let Some(event) = stream.poll_event() {
                 apply_capture_event(&event, &mut system_stalled, &mut stop_reason, stop);
-                update_capture_warning(status, microphone_stalled, system_stalled);
+                update_capture_warning(app, status, microphone_stalled, system_stalled);
             }
             while let Some(chunk) = stream.poll_chunk() {
                 if let Some(writer) = system_writer.as_mut() {
                     writer.write(&chunk.data)?;
                 }
-                set_status(status, |current| {
-                    current.system_level = chunk.peak.clamp(0.0, 1.0)
-                });
+                system_level = chunk.peak.clamp(0.0, 1.0);
                 sys_queue.push_back((chunk.pts_ns, chunk.data));
             }
         }
@@ -228,10 +232,18 @@ fn run_desktop_recording(
             &mut mixed_writer,
             &mut mic_queue,
             &mut sys_queue,
+            &mut mix_buffer,
             request,
             false,
         )?;
-        set_status(status, |current| current.elapsed_ms = elapsed_ms);
+        if last_status.elapsed() >= STATUS_INTERVAL {
+            publish_status(app, status, |current| {
+                current.elapsed_ms = elapsed_ms;
+                current.microphone_level = microphone_level;
+                current.system_level = system_level;
+            });
+            last_status = Instant::now();
+        }
 
         if last_manifest.elapsed() >= MANIFEST_INTERVAL {
             manifest.duration_ms = elapsed_ms;
@@ -252,6 +264,7 @@ fn run_desktop_recording(
         &mut mixed_writer,
         &mut mic_queue,
         &mut sys_queue,
+        &mut mix_buffer,
         request,
         true,
     )?;
@@ -261,11 +274,11 @@ fn run_desktop_recording(
         drop(system_writer);
         drop(mixed_writer);
         remove_session(&paths.directory)?;
-        set_status(status, |current| *current = RecordingStatus::default());
+        publish_status(app, status, |current| *current = RecordingStatus::default());
         return Ok(());
     }
 
-    set_status(status, |current| {
+    publish_status(app, status, |current| {
         current.phase = RecordingPhase::Finalizing;
         current.stop_reason = Some(stop_reason);
     });
@@ -292,7 +305,7 @@ fn run_desktop_recording(
 
     crate::commands::transcribe::set_selected_audio_path(app, paths.final_file.clone())?;
     remove_session(&paths.directory)?;
-    set_status(status, |current| {
+    publish_status(app, status, |current| {
         current.phase = RecordingPhase::Completed;
         current.elapsed_ms = manifest.duration_ms;
         current.output_path = Some(paths.final_file.to_string_lossy().into_owned());
@@ -339,6 +352,7 @@ fn capture_event_effect(event: &flexaudio::Event) -> CaptureEventEffect {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn update_capture_warning(
+    app: &AppHandle,
     status: &Arc<Mutex<RecordingStatus>>,
     microphone_stalled: bool,
     system_stalled: bool,
@@ -349,7 +363,7 @@ fn update_capture_warning(
         (false, true) => Some("システム音声を再接続しています。録音は継続中です。"),
         (false, false) => None,
     };
-    set_status(status, |current| {
+    publish_status(app, status, |current| {
         current.warning = warning.map(str::to_owned)
     });
 }

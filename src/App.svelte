@@ -31,7 +31,8 @@
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>("elevenlabs");
-  let transcript = $state<Transcript | null>(null);
+  // Transcriptは読み取り専用の大きな値なので、深いProxy化を避ける。
+  let transcript = $state.raw<Transcript | null>(null);
   let transcriptRevision = $state(0);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let usageError = $state("");
