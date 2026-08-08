@@ -1,3 +1,4 @@
+mod audio_playback;
 mod commands;
 mod credentials;
 #[cfg(desktop)]
@@ -13,6 +14,16 @@ pub mod transcription;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol(
+            "mutsuna-audio",
+            |context, request, responder| {
+                let app = context.app_handle().clone();
+                let webview_label = context.webview_label().to_string();
+                std::thread::spawn(move || {
+                    responder.respond(audio_playback::response(&app, &webview_label, request));
+                });
+            },
+        )
         .manage(commands::transcribe::AudioSelectionState::default())
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]

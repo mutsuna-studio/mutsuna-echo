@@ -37,6 +37,7 @@ export type SelectedAudioFile = {
   name: string;
   sizeBytes: number;
   durationMs: number;
+  playbackUrl: string;
 };
 
 export type TranscriptionSession = {

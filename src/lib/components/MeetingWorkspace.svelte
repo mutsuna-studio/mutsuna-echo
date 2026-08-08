@@ -4,7 +4,6 @@
   import FileAudio from "@lucide/svelte/icons/file-audio";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
-  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { Select } from "@mutsuna/ui/select";
   import { formatFileSize, formatTimestamp } from "../format";
@@ -16,6 +15,7 @@
   } from "../providers";
   import type { RecentMeetingSummary } from "../types/recording";
   import type { SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
+  import AudioPlayer from "./AudioPlayer.svelte";
   import TranscriptView from "./TranscriptView.svelte";
 
   type Props = {
@@ -36,6 +36,7 @@
     onReveal: (meeting: RecentMeetingSummary) => void;
     onCreate: () => void;
     onOpenSettings: () => void;
+    onError: (message: string) => void;
   };
 
   let {
@@ -55,7 +56,8 @@
     onProviderChange,
     onReveal,
     onCreate,
-    onOpenSettings
+    onOpenSettings,
+    onError
   }: Props = $props();
 
   let detailTab = $state<"transcript" | "info">("transcript");
@@ -103,13 +105,8 @@
       </div>
     </header>
 
-    <div class="audio-summary">
-      <span class="audio-icon"><FileAudio aria-hidden="true" /></span>
-      <div>
-        <strong>{selectedAudio.name}</strong>
-        <small>{formatTimestamp(selectedAudio.durationMs)} · {formatFileSize(selectedAudio.sizeBytes)}</small>
-      </div>
-      <Badge variant="secondary">音声</Badge>
+    <div class="audio-player-wrap">
+      <AudioPlayer audio={selectedAudio} source={meeting?.source} {onError} />
     </div>
 
     <section class="transcription-toolbar" aria-label="文字起こしモデルと実行">
@@ -196,12 +193,7 @@
   .provider-line small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .provider-line button { flex: none; padding: 0; border: 0; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-weight: 650; }
 
-  .audio-summary { display: flex; align-items: center; gap: 11px; margin: 0 30px 18px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; }
-  .audio-summary > div { display: grid; min-width: 0; flex: 1; gap: 3px; }
-  .audio-summary strong { overflow: hidden; font-size: 0.81rem; text-overflow: ellipsis; white-space: nowrap; }
-  .audio-summary small { color: var(--muted-foreground); font-size: 0.72rem; }
-  .audio-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; color: var(--primary); background: color-mix(in oklch, var(--primary) 9%, var(--background)); }
-  .audio-icon :global(svg) { width: 17px; height: 17px; }
+  .audio-player-wrap { min-width: 0; margin: 0 30px 18px; container: audio-player / inline-size; }
 
   .detail-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 30px; border-bottom: 1px solid var(--border); }
   .detail-tabs button { position: relative; height: 42px; border: 0; color: var(--muted-foreground); background: transparent; cursor: pointer; font: inherit; font-size: 0.82rem; font-weight: 650; }
@@ -230,7 +222,7 @@
     .title-row { flex-wrap: wrap; }
     .meeting-title { flex-basis: calc(100% - 44px); }
     .header-actions { width: 100%; justify-content: flex-end; }
-    .audio-summary, .transcription-toolbar, .detail-tabs { margin-right: 18px; margin-left: 18px; }
+    .audio-player-wrap, .transcription-toolbar, .detail-tabs { margin-right: 18px; margin-left: 18px; }
     .detail-content { padding-right: 18px; padding-left: 18px; }
   }
 

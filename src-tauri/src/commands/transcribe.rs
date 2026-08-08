@@ -39,6 +39,7 @@ pub(crate) struct SelectedAudioFile {
     name: String,
     size_bytes: u64,
     duration_ms: u64,
+    playback_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,11 +120,20 @@ fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioF
         .unwrap_or("選択した音声ファイル")
         .to_string();
     Ok(SelectedAudioFile {
+        playback_url: playback_url(&meeting_id),
         meeting_id,
         name,
         size_bytes,
         duration_ms: audio.duration_ms,
     })
+}
+
+fn playback_url(meeting_id: &str) -> String {
+    if cfg!(any(target_os = "windows", target_os = "android")) {
+        format!("http://mutsuna-audio.localhost/selected/{meeting_id}")
+    } else {
+        format!("mutsuna-audio://localhost/selected/{meeting_id}")
+    }
 }
 
 pub(crate) fn validate_audio_path(path: &Path) -> Result<(), String> {
@@ -165,6 +175,25 @@ pub(crate) fn selected_meeting_id(app: &AppHandle) -> Result<String, String> {
         .as_ref()
         .map(|selected| selected.descriptor.meeting_id.clone())
         .ok_or_else(|| "文字起こし対象のMeetingが選択されていません。".to_string())
+}
+
+pub(crate) fn selected_audio_path_for_playback(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<PathBuf, String> {
+    crate::meeting_store::validate_meeting_id(meeting_id)?;
+    let state = app.state::<AudioSelectionState>();
+    let selected = state
+        .selected
+        .lock()
+        .map_err(|_| "再生する音声の状態を取得できませんでした。".to_string())?;
+    let selected = selected
+        .as_ref()
+        .ok_or_else(|| "再生する音声が選択されていません。".to_string())?;
+    if selected.descriptor.meeting_id != meeting_id {
+        return Err("選択中のMeetingと再生対象が一致しません。".into());
+    }
+    Ok(selected.path.clone())
 }
 
 fn set_selected_audio(

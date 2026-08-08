@@ -544,6 +544,7 @@
           onReveal={revealMeeting}
           onCreate={() => section = "new"}
           onOpenSettings={() => section = "settings"}
+          onError={showError}
         />
       {:else if section === "new"}
         <section class="page-view new-meeting-view">
