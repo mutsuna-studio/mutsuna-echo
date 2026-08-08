@@ -498,7 +498,7 @@
           <time>{formatElapsed(status?.elapsedMs ?? 0)}</time>
         </button>
 
-        {#if active}
+        {#if active && status?.phase !== "finalizing"}
           <div class="audio-sources">
             <div class="waveform-with-legend">
               <Mic
@@ -533,17 +533,19 @@
           {:else if status?.phase === "failed"}
             <Button size="sm" variant="outline" type="button" onclick={isPreview ? closePreview : closeOverlay}>閉じる</Button>
           {:else}
-            <Button
-              class="minimize-controller-button"
-              size="icon-sm"
-              variant="ghost"
-              type="button"
-              icon={Minimize2}
-              aria-label="停止ボタンだけに最小化"
-              title="停止ボタンだけに最小化"
-              onclick={minimizeController}
-              disabled={!active || status?.phase === "finalizing"}
-            />
+            {#if status?.phase !== "finalizing"}
+              <Button
+                class="minimize-controller-button"
+                size="icon-sm"
+                variant="ghost"
+                type="button"
+                icon={Minimize2}
+                aria-label="停止ボタンだけに最小化"
+                title="停止ボタンだけに最小化"
+                onclick={minimizeController}
+                disabled={!active}
+              />
+            {/if}
             <Button
               size="sm"
               variant="destructive"
