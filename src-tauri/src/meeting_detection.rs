@@ -354,9 +354,9 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.height = height;
     config.min_width = Some(300.0);
     config.min_height = Some(height);
-    config.max_width = Some(width);
-    // The recording controller switches to 310 x 158 in the same window.
-    config.max_height = Some(158.0);
+    // The recording controller switches to 380 x 64 in the same window.
+    config.max_width = Some(380.0);
+    config.max_height = Some(64.0);
     config.resizable = false;
     config.maximizable = false;
     config.minimizable = false;

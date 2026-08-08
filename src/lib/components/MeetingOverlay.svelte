@@ -12,7 +12,6 @@
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import Square from "@lucide/svelte/icons/square";
   import X from "@lucide/svelte/icons/x";
-  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import type { MeetingDetection } from "../types/meeting";
@@ -26,7 +25,7 @@
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const promptSize = { width: 320, height: 60 };
-  const controllerSize = { width: 310, height: 158 };
+  const controllerSize = { width: 380, height: 64 };
   const snapStorageKey = "meeting-overlay-snap-position";
   const snapMargin = 20;
   const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
@@ -446,53 +445,50 @@
               <span class="rec-dot" aria-hidden="true"></span>
             {/if}
             <strong>{phaseLabel}</strong>
-            {#if isPreview}<Badge variant="secondary">{previewRuntime?.badgeLabel}</Badge>{/if}
+            {#if isPreview}<span class="preview-label">{previewRuntime?.badgeLabel}</span>{/if}
           </div>
           <time>{formatElapsed(status?.elapsedMs ?? 0)}</time>
         </button>
 
-        <div class="audio-sources">
-          <div class:enabled={status?.microphone} class="audio-source">
-            <Mic aria-hidden="true" />
-            <span>マイク</span>
-            <i
-              class="level-track"
-              role="meter"
-              aria-label="マイク音量"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round((status?.microphoneLevel ?? 0) * 100)}
-            >
-              <b style={levelStyle(status?.microphoneLevel ?? 0)}></b>
-            </i>
-          </div>
-          <div class:enabled={status?.systemAudio} class="audio-source">
-            <MonitorSpeaker aria-hidden="true" />
-            <span>システム</span>
-            <i
-              class="level-track"
-              role="meter"
-              aria-label="システム音量"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round((status?.systemLevel ?? 0) * 100)}
-            >
-              <b style={levelStyle(status?.systemLevel ?? 0)}></b>
-            </i>
-          </div>
-        </div>
-
-        <div class="controller-footer">
-          {#if active}
+        {#if active}
+          <div class="audio-sources">
+            <div class:enabled={status?.microphone} class="audio-source" title={status?.microphone ? "マイク入力" : "マイク入力なし"}>
+              <Mic aria-hidden="true" />
+              <i
+                class="level-track"
+                role="meter"
+                aria-label="マイク音量"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round((status?.microphoneLevel ?? 0) * 100)}
+              >
+                <b style={levelStyle(status?.microphoneLevel ?? 0)}></b>
+              </i>
+            </div>
+            <div class:enabled={status?.systemAudio} class="audio-source" title={status?.systemAudio ? "システム音声" : "システム音声なし"}>
+              <MonitorSpeaker aria-hidden="true" />
+              <i
+                class="level-track"
+                role="meter"
+                aria-label="システム音量"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round((status?.systemLevel ?? 0) * 100)}
+              >
+                <b style={levelStyle(status?.systemLevel ?? 0)}></b>
+              </i>
+            </div>
             <p class:speaking={status?.voiceActivity === "speechDetected"} class="overlay-vad" role="status">
-              <AudioWaveform aria-hidden="true" />{voiceActivityLabel}
+              <AudioWaveform aria-hidden="true" /><span>{voiceActivityLabel}</span>
             </p>
-          {:else if completionMessage}
-            <p class="recording-result" role="status">{completionMessage}</p>
-          {:else if error}
-            <p class="compact-error" role="alert">{error}</p>
-          {/if}
+          </div>
+        {:else if completionMessage}
+          <p class="recording-result controller-message" role="status">{completionMessage}</p>
+        {:else if error}
+          <p class="compact-error controller-message" role="alert">{error}</p>
+        {/if}
 
+        <div class="controller-action">
           {#if status?.phase === "completed"}
             <Button size="sm" type="button" onclick={handoffToMain} loading={handoffBusy} disabled={handoffBusy}>
               {isPreview ? "閉じる" : handoffBusy ? "準備中…" : "文字起こしへ"}
@@ -609,8 +605,24 @@
   .meeting-overlay.compact {
     display: grid;
     min-width: 0;
-    padding: 15px 16px;
+    padding: 0 12px;
     align-items: center;
+    color: rgb(247 250 248);
+    background: rgb(31 35 33 / 88%);
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 16px;
+    box-shadow:
+      0 8px 24px rgb(0 0 0 / 18%),
+      inset 0 1px 0 rgb(255 255 255 / 7%);
+    backdrop-filter: blur(18px) saturate(120%);
+  }
+
+  :global(html.transparent-overlay) .meeting-overlay.compact {
+    background: rgb(31 35 33 / 88%);
+    border-color: rgb(255 255 255 / 8%);
+    box-shadow:
+      0 8px 24px rgb(0 0 0 / 18%),
+      inset 0 1px 0 rgb(255 255 255 / 7%);
   }
 
   .glass-highlight {
@@ -635,7 +647,9 @@
   }
 
   .meeting-overlay:not(.compact) .glass-highlight,
-  :global(html.transparent-overlay) .meeting-overlay:not(.compact) .glass-highlight {
+  :global(html.transparent-overlay) .meeting-overlay:not(.compact) .glass-highlight,
+  .meeting-overlay.compact .glass-highlight,
+  :global(html.transparent-overlay) .meeting-overlay.compact .glass-highlight {
     background: rgb(255 255 255 / 3%);
   }
 
@@ -661,8 +675,7 @@
   .overlay-drag-handle > * { pointer-events: none; }
 
   .prompt-row,
-  .recording-summary,
-  .controller-footer {
+  .recording-summary {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -742,7 +755,14 @@
     white-space: nowrap;
   }
 
-  .recording-controller { display: grid; min-width: 0; gap: 11px; }
+  .recording-controller {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+  }
+  .recording-summary { flex: none; justify-content: flex-start; gap: 8px; }
   .phase-state { gap: 6px; color: var(--destructive); }
   .phase-state.success-state { color: var(--primary); }
   .phase-state.error-state { color: var(--destructive); }
@@ -759,32 +779,38 @@
   }
 
   time {
-    font-size: 1.12rem;
+    font-size: 0.9rem;
     font-weight: 760;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.035em;
   }
 
-  .audio-sources { display: grid; grid-template-columns: 1fr 1.25fr; gap: 7px; }
-
-  .audio-source {
+  .audio-sources {
+    display: flex;
     min-width: 0;
-    gap: 5px;
-    padding: 7px 8px;
-    border: 1px solid color-mix(in oklch, var(--border) 82%, transparent);
-    border-radius: 10px;
-    color: var(--muted-foreground);
-    background: color-mix(in oklch, var(--background) 58%, transparent);
+    flex: 1;
+    align-items: center;
+    gap: 7px;
   }
 
-  .audio-source.enabled { color: var(--foreground); }
-  .audio-source > :global(svg) { width: 13px; height: 13px; flex: none; color: var(--primary); }
-  .audio-source span { flex: none; font-size: 0.65rem; }
+  .audio-source {
+    width: 43px;
+    min-width: 0;
+    flex: none;
+    gap: 5px;
+    padding: 0;
+    border: 0;
+    color: rgb(209 218 213 / 45%);
+    background: transparent;
+  }
+
+  .audio-source.enabled { color: rgb(102 222 156); }
+  .audio-source > :global(svg) { width: 13px; height: 13px; flex: none; color: currentColor; }
 
   .level-track {
     display: block;
     height: 4px;
-    min-width: 18px;
+    min-width: 22px;
     flex: 1;
     overflow: hidden;
     border-radius: 999px;
@@ -800,7 +826,8 @@
     transition: width 110ms linear;
   }
 
-  .controller-footer { min-width: 0; }
+  .controller-message { flex: 1; }
+  .controller-action { flex: none; }
 
   .overlay-vad,
   .recording-result,
@@ -813,10 +840,11 @@
     white-space: nowrap;
   }
 
-  .overlay-vad { gap: 5px; color: var(--muted-foreground); }
-  .overlay-vad.speaking { color: var(--primary); font-weight: 700; }
+  .overlay-vad { gap: 4px; color: rgb(209 218 213 / 62%); }
+  .overlay-vad.speaking { color: rgb(102 222 156); font-weight: 700; }
   .overlay-vad :global(svg) { width: 13px; height: 13px; flex: none; }
-  .recording-result { color: var(--primary); }
+  .overlay-vad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recording-result { color: rgb(102 222 156); }
   .compact-error { color: var(--destructive); }
   .meeting-loading { justify-content: center; gap: 8px; min-height: calc(100vh - 28px); color: var(--muted-foreground); font-size: 0.76rem; }
   .meeting-loading :global(svg) { width: 16px; height: 16px; }
@@ -852,6 +880,13 @@
 
     .meeting-overlay:not(.compact),
     :global(html.transparent-overlay) .meeting-overlay:not(.compact) {
+      color: rgb(247 250 248);
+      background: rgb(31 35 33 / 88%);
+      border-color: rgb(255 255 255 / 8%);
+    }
+
+    .meeting-overlay.compact,
+    :global(html.transparent-overlay) .meeting-overlay.compact {
       color: rgb(247 250 248);
       background: rgb(31 35 33 / 88%);
       border-color: rgb(255 255 255 / 8%);
