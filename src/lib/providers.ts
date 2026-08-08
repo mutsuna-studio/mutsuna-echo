@@ -60,6 +60,16 @@ export type LocalSttModelDownloadProgress = {
   totalBytes: number;
 };
 
+export type LocalVadModelStatus = {
+  modelId: string;
+  displayName: string;
+  version: string;
+  sizeBytes: number;
+  installed: boolean;
+  downloading: boolean;
+  runtimeSupported: boolean;
+};
+
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
   return value === "elevenlabs" || value === "local";
 }

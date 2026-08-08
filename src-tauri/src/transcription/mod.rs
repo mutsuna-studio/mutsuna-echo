@@ -1,3 +1,5 @@
+#[cfg(desktop)]
+mod audio_decode;
 pub mod diarization;
 pub(crate) mod elevenlabs;
 #[cfg(desktop)]
@@ -5,6 +7,9 @@ mod local;
 pub(crate) mod local_models;
 pub(crate) mod providers;
 pub mod types;
+#[cfg(desktop)]
+mod vad;
+pub(crate) mod vad_models;
 
 use std::path::Path;
 
