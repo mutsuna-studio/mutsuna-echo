@@ -27,6 +27,67 @@ enum ProviderAvailability {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum TimingGranularity {
+    Token,
+    Word,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptionCapabilities {
+    timing_granularity: TimingGranularity,
+    speaker_labels: bool,
+    confidence_scores: bool,
+    external_diarization: bool,
+}
+
+const ELEVENLABS_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
+    timing_granularity: TimingGranularity::Word,
+    speaker_labels: true,
+    confidence_scores: false,
+    external_diarization: true,
+};
+
+const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
+    timing_granularity: TimingGranularity::Token,
+    speaker_labels: false,
+    confidence_scores: false,
+    external_diarization: true,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderDefinition {
+    id: &'static str,
+    label: &'static str,
+    kind: ProviderKind,
+    setup: ProviderSetup,
+    default_model_label: &'static str,
+    capability_summary: &'static str,
+    capabilities: TranscriptionCapabilities,
+}
+
+const ELEVENLABS_DEFINITION: ProviderDefinition = ProviderDefinition {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    kind: ProviderKind::Cloud,
+    setup: ProviderSetup::ApiKey,
+    default_model_label: "Scribe v2",
+    capability_summary: "日本語・話者分離・単語タイムスタンプ",
+    capabilities: ELEVENLABS_CAPABILITIES,
+};
+
+const LOCAL_DEFINITION: ProviderDefinition = ProviderDefinition {
+    id: "local",
+    label: "ローカルSTT",
+    kind: ProviderKind::Local,
+    setup: ProviderSetup::ModelDownload,
+    default_model_label: "ローカルモデル",
+    capability_summary: "端末内処理・音声を外部送信しない",
+    capabilities: REAZONSPEECH_CAPABILITIES,
+};
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionProviderDescriptor {
@@ -40,6 +101,7 @@ pub(crate) struct TranscriptionProviderDescriptor {
     model_id: Option<String>,
     model_label: String,
     capability_summary: &'static str,
+    capabilities: TranscriptionCapabilities,
     status_message: String,
     pricing_usd_per_hour: Option<f64>,
     pricing_verified_on: Option<&'static str>,
@@ -49,12 +111,7 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
     let cloud = match crate::credentials::has_api_key(app) {
         Ok(has_api_key) => elevenlabs(has_api_key),
         Err(error) => unavailable_provider(
-            "elevenlabs",
-            "ElevenLabs",
-            ProviderKind::Cloud,
-            ProviderSetup::ApiKey,
-            "Scribe v2",
-            "日本語・話者分離・単語タイムスタンプ",
+            ELEVENLABS_DEFINITION,
             format!("APIキーの保存状態を確認できませんでした: {error}"),
         ),
     };
@@ -64,39 +121,27 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
                 .iter()
                 .find(|model| model.model_id == super::local_models::REAZONSPEECH_MODEL_ID),
         ),
-        Err(error) => unavailable_provider(
-            "local",
-            "ローカルSTT",
-            ProviderKind::Local,
-            ProviderSetup::ModelDownload,
-            "ローカルモデル",
-            "端末内処理・音声を外部送信しない",
-            error,
-        ),
+        Err(error) => unavailable_provider(LOCAL_DEFINITION, error),
     };
     Ok(vec![cloud, local])
 }
 
 fn unavailable_provider(
-    id: &'static str,
-    label: &'static str,
-    kind: ProviderKind,
-    setup: ProviderSetup,
-    model_label: &str,
-    capability_summary: &'static str,
+    definition: ProviderDefinition,
     status_message: String,
 ) -> TranscriptionProviderDescriptor {
     TranscriptionProviderDescriptor {
-        id,
-        label,
-        kind,
-        setup,
+        id: definition.id,
+        label: definition.label,
+        kind: definition.kind,
+        setup: definition.setup,
         availability: ProviderAvailability::Unavailable,
         ready: false,
         configured: false,
         model_id: None,
-        model_label: model_label.into(),
-        capability_summary,
+        model_label: definition.default_model_label.into(),
+        capability_summary: definition.capability_summary,
+        capabilities: definition.capabilities,
         status_message,
         pricing_usd_per_hour: None,
         pricing_verified_on: None,
@@ -105,10 +150,10 @@ fn unavailable_provider(
 
 fn elevenlabs(has_api_key: bool) -> TranscriptionProviderDescriptor {
     TranscriptionProviderDescriptor {
-        id: "elevenlabs",
-        label: "ElevenLabs",
-        kind: ProviderKind::Cloud,
-        setup: ProviderSetup::ApiKey,
+        id: ELEVENLABS_DEFINITION.id,
+        label: ELEVENLABS_DEFINITION.label,
+        kind: ELEVENLABS_DEFINITION.kind,
+        setup: ELEVENLABS_DEFINITION.setup,
         availability: if has_api_key {
             ProviderAvailability::Ready
         } else {
@@ -117,8 +162,9 @@ fn elevenlabs(has_api_key: bool) -> TranscriptionProviderDescriptor {
         ready: has_api_key,
         configured: has_api_key,
         model_id: Some("scribe_v2".into()),
-        model_label: "Scribe v2".into(),
-        capability_summary: "日本語・話者分離・単語タイムスタンプ",
+        model_label: ELEVENLABS_DEFINITION.default_model_label.into(),
+        capability_summary: ELEVENLABS_DEFINITION.capability_summary,
+        capabilities: ELEVENLABS_DEFINITION.capabilities,
         status_message: if has_api_key {
             "クラウドAPIで文字起こしできます。".into()
         } else {
@@ -156,16 +202,17 @@ fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProvi
         ),
     };
     TranscriptionProviderDescriptor {
-        id: "local",
-        label: "ローカルSTT",
-        kind: ProviderKind::Local,
-        setup: ProviderSetup::ModelDownload,
+        id: LOCAL_DEFINITION.id,
+        label: LOCAL_DEFINITION.label,
+        kind: LOCAL_DEFINITION.kind,
+        setup: LOCAL_DEFINITION.setup,
         availability,
         ready: installed.is_some() && engine_available,
         configured,
         model_id,
         model_label,
-        capability_summary: "端末内処理・音声を外部送信しない",
+        capability_summary: LOCAL_DEFINITION.capability_summary,
+        capabilities: LOCAL_DEFINITION.capabilities,
         status_message,
         pricing_usd_per_hour: None,
         pricing_verified_on: None,
@@ -190,6 +237,7 @@ pub(crate) fn list_installed_local_stt_models(
 mod tests {
     use super::{
         local_provider, InstalledLocalModel, ProviderAvailability, ProviderKind, ProviderSetup,
+        TimingGranularity,
     };
 
     #[test]
@@ -219,5 +267,11 @@ mod tests {
         let provider = local_provider(Some(&model));
         assert_eq!(provider.ready, cfg!(desktop));
         assert!(provider.configured);
+        assert_eq!(
+            provider.capabilities.timing_granularity,
+            TimingGranularity::Token
+        );
+        assert!(!provider.capabilities.speaker_labels);
+        assert!(provider.capabilities.external_diarization);
     }
 }

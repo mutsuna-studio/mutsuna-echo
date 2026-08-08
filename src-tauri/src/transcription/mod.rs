@@ -1,3 +1,4 @@
+pub mod diarization;
 pub(crate) mod elevenlabs;
 #[cfg(desktop)]
 mod local;

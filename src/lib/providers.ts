@@ -8,6 +8,15 @@ export type TranscriptionProviderAvailability =
   | "engineUnavailable"
   | "unavailable";
 
+export type TimingGranularity = "token" | "word";
+
+export type TranscriptionCapabilities = {
+  timingGranularity: TimingGranularity;
+  speakerLabels: boolean;
+  confidenceScores: boolean;
+  externalDiarization: boolean;
+};
+
 export type TranscriptionProviderDefinition = {
   id: TranscriptionProviderId;
   label: string;
@@ -19,6 +28,7 @@ export type TranscriptionProviderDefinition = {
   modelId: string | null;
   modelLabel: string;
   capabilitySummary: string;
+  capabilities: TranscriptionCapabilities;
   statusMessage: string;
   pricingUsdPerHour: number | null;
   pricingVerifiedOn: string | null;
