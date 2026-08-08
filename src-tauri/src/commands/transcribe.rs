@@ -21,13 +21,20 @@ const PRICING_VERIFIED_ON: &str = "2026-08-08";
 
 #[derive(Default)]
 pub(crate) struct AudioSelectionState {
-    path: Mutex<Option<PathBuf>>,
+    selected: Mutex<Option<SelectedAudio>>,
     transcribing: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedAudio {
+    path: PathBuf,
+    meeting_id: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SelectedAudioFile {
+    meeting_id: String,
     name: String,
     size_bytes: u64,
     duration_ms: u64,
@@ -62,7 +69,7 @@ pub(crate) struct StoredTranscriptRequest {
     provider: TranscriptionProvider,
 }
 
-pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, String> {
+fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioFile, String> {
     let size_bytes = validate_audio_file(path)?;
     let estimate = estimate_audio_cost(path)?;
     let name = path
@@ -71,6 +78,7 @@ pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, Stri
         .unwrap_or("選択した音声ファイル")
         .to_string();
     Ok(SelectedAudioFile {
+        meeting_id,
         name,
         size_bytes,
         duration_ms: estimate.duration_ms,
@@ -80,16 +88,41 @@ pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, Stri
     })
 }
 
+pub(crate) fn validate_audio_path(path: &Path) -> Result<(), String> {
+    validate_audio_file(path)?;
+    estimate_audio_cost(path)?;
+    Ok(())
+}
+
 pub(crate) fn set_selected_audio_path(
     app: &AppHandle,
     path: PathBuf,
 ) -> Result<SelectedAudioFile, String> {
-    let selected = describe_audio_path(&path)?;
+    let meeting_id = crate::meeting_store::resolve_or_create(app, &path)?;
+    set_selected_audio(app, path, meeting_id)
+}
+
+pub(crate) fn set_selected_audio_with_meeting(
+    app: &AppHandle,
+    path: PathBuf,
+    meeting_id: String,
+) -> Result<SelectedAudioFile, String> {
+    crate::meeting_store::link_existing(app, &meeting_id, &path)?;
+    set_selected_audio(app, path, meeting_id)
+}
+
+fn set_selected_audio(
+    app: &AppHandle,
+    path: PathBuf,
+    meeting_id: String,
+) -> Result<SelectedAudioFile, String> {
+    let selected = describe_audio_path(&path, meeting_id.clone())?;
     let state = app.state::<AudioSelectionState>();
     *state
-        .path
+        .selected
         .lock()
-        .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
+        .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? =
+        Some(SelectedAudio { path, meeting_id });
     Ok(selected)
 }
 
@@ -98,15 +131,19 @@ pub(crate) fn get_transcription_session(
     state: State<'_, AudioSelectionState>,
 ) -> Result<TranscriptionSession, String> {
     let selected_audio = {
-        let mut path = state
-            .path
+        let mut selection = state
+            .selected
             .lock()
             .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?;
-        match path.as_deref().map(describe_audio_path).transpose() {
+        match selection
+            .as_ref()
+            .map(|selected| describe_audio_path(&selected.path, selected.meeting_id.clone()))
+            .transpose()
+        {
             Ok(selected) => selected,
             Err(error) => {
                 eprintln!("Could not restore selected audio: {error}");
-                *path = None;
+                *selection = None;
                 None
             }
         }
@@ -409,10 +446,7 @@ fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
 }
 
 #[tauri::command]
-pub(crate) async fn select_audio_file(
-    app: AppHandle,
-    state: State<'_, AudioSelectionState>,
-) -> Result<Option<SelectedAudioFile>, String> {
+pub(crate) async fn select_audio_file(app: AppHandle) -> Result<Option<SelectedAudioFile>, String> {
     let selected = app
         .dialog()
         .file()
@@ -424,11 +458,12 @@ pub(crate) async fn select_audio_file(
     };
 
     let path = selected_file_path(selected)?;
-    let selected = describe_audio_path(&path)?;
-    *state
-        .path
-        .lock()
-        .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? = Some(path);
+    let selected =
+        tauri::async_runtime::spawn_blocking(move || set_selected_audio_path(&app, path))
+            .await
+            .map_err(|error| {
+                format!("音声ファイルのMeeting情報を準備できませんでした: {error}")
+            })??;
     Ok(Some(selected))
 }
 
@@ -459,22 +494,23 @@ pub(crate) async fn transcribe_selected_audio(
     }
     let _guard = TranscriptionGuard(&state.transcribing);
 
-    let path = state
-        .path
+    let selected = state
+        .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
 
-    validate_audio_file(&path)?;
+    validate_audio_file(&selected.path)?;
 
     let transcript = match request.provider {
         TranscriptionProvider::ElevenLabs => {
             let api_key = crate::commands::api_key::load_api_key(&app)?;
-            crate::transcription::elevenlabs::transcribe(&path, &api_key).await?
+            crate::transcription::elevenlabs::transcribe(&selected.path, &api_key).await?
         }
     };
-    let persistence_warning = crate::transcript_store::save(&app, &path, &transcript).err();
+    let persistence_warning =
+        crate::transcript_store::save(&app, &selected.meeting_id, &transcript).err();
     Ok(TranscriptionResult {
         transcript,
         persistence_warning,
@@ -487,13 +523,13 @@ pub(crate) fn get_selected_transcript(
     state: State<'_, AudioSelectionState>,
     request: StoredTranscriptRequest,
 ) -> Result<Option<Transcript>, String> {
-    let path = state
-        .path
+    let selected = state
+        .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
-    crate::transcript_store::load(&app, &path, request.provider)
+    crate::transcript_store::load(&app, &selected.meeting_id, &selected.path, request.provider)
 }
 
 #[cfg(test)]

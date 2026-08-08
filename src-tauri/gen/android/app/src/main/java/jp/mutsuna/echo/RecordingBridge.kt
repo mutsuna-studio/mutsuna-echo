@@ -105,6 +105,7 @@ object RecordingBridge {
         )
         recordings.put(JSONObject().apply {
           put("id", uri.toString())
+          put("meetingId", meetingIdForRecording(context, uri.toString()))
           put("fileName", cursor.getString(nameColumn))
           put("sizeBytes", cursor.getLong(sizeColumn))
           put("recordedAtUnixMs", cursor.getLong(modifiedColumn) * 1_000L)
@@ -112,6 +113,25 @@ object RecordingBridge {
       }
     }
     return recordings.toString()
+  }
+
+  private fun meetingIdForRecording(context: Context, recordingId: String): String {
+    val preferences = context.getSharedPreferences("mutsuna_echo_meetings", Context.MODE_PRIVATE)
+    val key = "recording:$recordingId"
+    preferences.getString(key, null)?.let { return it }
+    val meetingId = newMeetingId()
+    check(preferences.edit().putString(key, meetingId).commit()) {
+      "Meeting IDを端末へ保存できませんでした。"
+    }
+    return meetingId
+  }
+
+  private fun newMeetingId(): String {
+    val random = java.security.SecureRandom()
+    val timestamp = System.currentTimeMillis() and 0x0000ffffffffffffL
+    val mostSignificant = (timestamp shl 16) or 0x7000L or (random.nextLong() and 0x0fffL)
+    val leastSignificant = (random.nextLong() and 0x3fffffffffffffffL) or Long.MIN_VALUE
+    return java.util.UUID(mostSignificant, leastSignificant).toString()
   }
 
   @JvmStatic fun copyCompletedRecording(context: Context, value: String): String {

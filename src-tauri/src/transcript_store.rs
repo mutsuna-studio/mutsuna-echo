@@ -13,13 +13,15 @@ use tauri::{AppHandle, Manager};
 
 use crate::transcription::{Transcript, TranscriptionProvider};
 
-const SCHEMA_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = 2;
 const MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredTranscript {
     schema_version: u8,
+    #[serde(default)]
+    meeting_id: Option<String>,
     #[serde(rename = "savedAt")]
     _saved_at: String,
     transcript: Transcript,
@@ -29,50 +31,79 @@ struct StoredTranscript {
 #[serde(rename_all = "camelCase")]
 struct StoredTranscriptRef<'a> {
     schema_version: u8,
+    meeting_id: &'a str,
     saved_at: String,
     transcript: &'a Transcript,
 }
 
 #[derive(Default)]
 pub(crate) struct TranscriptIndex {
-    file_names: HashSet<String>,
+    meeting_providers: HashSet<String>,
+    legacy_file_names: HashSet<String>,
 }
 
 impl TranscriptIndex {
     pub(crate) fn load(app: &AppHandle) -> Result<Self, String> {
-        let directory = transcripts_directory(app)?;
-        let entries = match fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
+        let mut index = Self::default();
+        let meetings = crate::meeting_store::meetings_directory(app)?;
+        if let Ok(entries) = fs::read_dir(meetings) {
+            for entry in entries.filter_map(Result::ok) {
+                let Some(meeting_id) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if crate::meeting_store::validate_meeting_id(&meeting_id).is_err() {
+                    continue;
+                }
+                let transcripts = entry.path().join("transcripts");
+                let Ok(files) = fs::read_dir(transcripts) else {
+                    continue;
+                };
+                for file in files.filter_map(Result::ok) {
+                    let Some(provider) = transcript_provider_from_file_name(&file.file_name())
+                    else {
+                        continue;
+                    };
+                    index
+                        .meeting_providers
+                        .insert(meeting_provider_key(&meeting_id, &provider));
+                }
             }
-            Err(error) => {
-                return Err(format!(
-                    "保存済みの文字起こし一覧を確認できませんでした: {error}"
-                ))
-            }
-        };
-        let file_names = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .collect();
-        Ok(Self { file_names })
+        }
+
+        let legacy = legacy_transcripts_directory(app)?;
+        if let Ok(entries) = fs::read_dir(legacy) {
+            index.legacy_file_names = entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect();
+        }
+        Ok(index)
     }
 
-    pub(crate) fn providers_for_audio(&self, audio_path: &Path) -> Vec<String> {
-        let Ok(key) = audio_key(audio_path) else {
-            return Vec::new();
-        };
+    pub(crate) fn providers_for_meeting(
+        &self,
+        meeting_id: &str,
+        legacy_audio_path: Option<&Path>,
+    ) -> Vec<String> {
+        let legacy_key = legacy_audio_path.and_then(|path| audio_key(path).ok());
         TranscriptionProvider::ALL
             .into_iter()
             .filter(|provider| {
-                let primary = format!("{key}.{}.json", provider.id());
-                self.file_names.contains(&primary)
-                    || self.file_names.contains(&format!("{primary}.backup"))
-                    || (*provider == TranscriptionProvider::ElevenLabs
-                        && (self.file_names.contains(&format!("{key}.json"))
-                            || self.file_names.contains(&format!("{key}.json.backup"))))
+                self.meeting_providers
+                    .contains(&meeting_provider_key(meeting_id, provider.id()))
+                    || legacy_key.as_ref().is_some_and(|key| {
+                        let primary = format!("{key}.{}.json", provider.id());
+                        self.legacy_file_names.contains(&primary)
+                            || self
+                                .legacy_file_names
+                                .contains(&format!("{primary}.backup"))
+                            || (*provider == TranscriptionProvider::ElevenLabs
+                                && (self.legacy_file_names.contains(&format!("{key}.json"))
+                                    || self
+                                        .legacy_file_names
+                                        .contains(&format!("{key}.json.backup"))))
+                    })
             })
             .map(|provider| provider.id().to_string())
             .collect()
@@ -81,23 +112,34 @@ impl TranscriptIndex {
 
 pub(crate) fn save(
     app: &AppHandle,
-    audio_path: &Path,
+    meeting_id: &str,
     transcript: &Transcript,
 ) -> Result<(), String> {
-    let directory = transcripts_directory(app)?;
-    save_in(&directory, audio_path, transcript)
+    let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
+    save_in(&directory, meeting_id, transcript)
 }
 
 pub(crate) fn load(
     app: &AppHandle,
+    meeting_id: &str,
     audio_path: &Path,
     provider: TranscriptionProvider,
 ) -> Result<Option<Transcript>, String> {
-    let directory = transcripts_directory(app)?;
-    load_in(&directory, audio_path, provider)
+    let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
+    if let Some(transcript) = load_current_in(&directory, meeting_id, provider)? {
+        return Ok(Some(transcript));
+    }
+
+    let legacy_directory = legacy_transcripts_directory(app)?;
+    let Some(transcript) = load_legacy_in(&legacy_directory, audio_path, provider)? else {
+        return Ok(None);
+    };
+    // 旧形式は残したまま、新しいMeeting配下へコピーして段階的に移行する。
+    save_in(&directory, meeting_id, &transcript)?;
+    Ok(Some(transcript))
 }
 
-fn transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
+fn legacy_transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| path.join("transcripts"))
@@ -106,9 +148,15 @@ fn transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn transcript_path_in(
     directory: &Path,
-    audio_path: &Path,
+    meeting_id: &str,
     provider_id: &str,
 ) -> Result<PathBuf, String> {
+    crate::meeting_store::validate_meeting_id(meeting_id)?;
+    validate_provider_id(provider_id)?;
+    Ok(directory.join(format!("{provider_id}.json")))
+}
+
+fn validate_provider_id(provider_id: &str) -> Result<(), String> {
     if provider_id.is_empty()
         || !provider_id.chars().all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
@@ -116,11 +164,20 @@ fn transcript_path_in(
     {
         return Err("文字起こしプロバイダーIDが不正です。".to_string());
     }
-    Ok(directory.join(format!("{}.{provider_id}.json", audio_key(audio_path)?)))
+    Ok(())
 }
 
 fn legacy_transcript_path(directory: &Path, audio_path: &Path) -> Result<PathBuf, String> {
     Ok(directory.join(format!("{}.json", audio_key(audio_path)?)))
+}
+
+fn legacy_provider_path(
+    directory: &Path,
+    audio_path: &Path,
+    provider_id: &str,
+) -> Result<PathBuf, String> {
+    validate_provider_id(provider_id)?;
+    Ok(directory.join(format!("{}.{provider_id}.json", audio_key(audio_path)?)))
 }
 
 fn audio_key(audio_path: &Path) -> Result<String, String> {
@@ -146,10 +203,10 @@ fn audio_key(audio_path: &Path) -> Result<String, String> {
     Ok(key)
 }
 
-fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Result<(), String> {
+fn save_in(directory: &Path, meeting_id: &str, transcript: &Transcript) -> Result<(), String> {
     fs::create_dir_all(directory)
         .map_err(|error| format!("文字起こしの保存先を作成できませんでした: {error}"))?;
-    let path = transcript_path_in(directory, audio_path, &transcript.provider)?;
+    let path = transcript_path_in(directory, meeting_id, &transcript.provider)?;
     let temporary = path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),
@@ -158,6 +215,7 @@ fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Resu
     let backup = path.with_extension("json.backup");
     let stored = StoredTranscriptRef {
         schema_version: SCHEMA_VERSION,
+        meeting_id,
         saved_at: chrono::Utc::now().to_rfc3339(),
         transcript,
     };
@@ -184,19 +242,22 @@ fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Resu
     file.sync_all()
         .map_err(|error| format!("文字起こしを安全に書き込めませんでした: {error}"))?;
     drop(file);
+    replace_with_backup(&path, &temporary, &backup)
+}
 
+fn replace_with_backup(path: &Path, temporary: &Path, backup: &Path) -> Result<(), String> {
     if path.exists() {
         if backup.exists() {
-            fs::remove_file(&backup).map_err(|error| {
+            fs::remove_file(backup).map_err(|error| {
                 format!("古い文字起こしのバックアップを削除できませんでした: {error}")
             })?;
         }
-        fs::rename(&path, &backup)
+        fs::rename(path, backup)
             .map_err(|error| format!("文字起こしを更新用に退避できませんでした: {error}"))?;
     }
-    if let Err(error) = fs::rename(&temporary, &path) {
+    if let Err(error) = fs::rename(temporary, path) {
         if backup.exists() {
-            let _ = fs::rename(&backup, &path);
+            let _ = fs::rename(backup, path);
         }
         return Err(format!("文字起こしの保存を確定できませんでした: {error}"));
     }
@@ -208,12 +269,30 @@ fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Resu
     Ok(())
 }
 
-fn load_in(
+fn load_current_in(
+    directory: &Path,
+    meeting_id: &str,
+    provider: TranscriptionProvider,
+) -> Result<Option<Transcript>, String> {
+    let primary = transcript_path_in(directory, meeting_id, provider.id())?;
+    let candidates = [primary.clone(), primary.with_extension("json.backup")];
+    let Some(path) = candidates.into_iter().find(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let stored = read_stored_transcript(&path)?;
+    if stored.schema_version != SCHEMA_VERSION || stored.meeting_id.as_deref() != Some(meeting_id) {
+        return Err("保存済みの文字起こし形式またはMeeting IDが一致しません。".into());
+    }
+    validate_stored_provider(&stored, provider)?;
+    Ok(Some(stored.transcript))
+}
+
+fn load_legacy_in(
     directory: &Path,
     audio_path: &Path,
     provider: TranscriptionProvider,
 ) -> Result<Option<Transcript>, String> {
-    let primary = transcript_path_in(directory, audio_path, provider.id())?;
+    let primary = legacy_provider_path(directory, audio_path, provider.id())?;
     let mut candidates = vec![primary.clone(), primary.with_extension("json.backup")];
     if provider == TranscriptionProvider::ElevenLabs {
         let legacy = legacy_transcript_path(directory, audio_path)?;
@@ -223,29 +302,54 @@ fn load_in(
     let Some(path) = candidates.into_iter().find(|path| path.exists()) else {
         return Ok(None);
     };
-    let metadata = fs::metadata(&path)
+    let stored = read_stored_transcript(&path)?;
+    if stored.schema_version != 1 {
+        return Err("保存済みの旧文字起こし形式に対応していません。".into());
+    }
+    validate_stored_provider(&stored, provider)?;
+    Ok(Some(stored.transcript))
+}
+
+fn read_stored_transcript(path: &Path) -> Result<StoredTranscript, String> {
+    let metadata = fs::metadata(path)
         .map_err(|error| format!("保存済みの文字起こしを確認できませんでした: {error}"))?;
     if !metadata.is_file() || metadata.len() > MAX_TRANSCRIPT_BYTES {
         return Err("保存済みの文字起こしファイルが不正です。".to_string());
     }
     let file = fs::File::open(path)
         .map_err(|error| format!("保存済みの文字起こしを読み込めませんでした: {error}"))?;
-    let stored: StoredTranscript = serde_json::from_reader(BufReader::new(file))
-        .map_err(|error| format!("保存済みの文字起こしが壊れています: {error}"))?;
-    if stored.schema_version != SCHEMA_VERSION {
-        return Err("保存済みの文字起こし形式に対応していません。".to_string());
-    }
+    serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| format!("保存済みの文字起こしが壊れています: {error}"))
+}
+
+fn validate_stored_provider(
+    stored: &StoredTranscript,
+    provider: TranscriptionProvider,
+) -> Result<(), String> {
     if stored.transcript.provider != provider.id() {
         return Err("保存済みの文字起こしプロバイダーが一致しません。".to_string());
     }
-    Ok(Some(stored.transcript))
+    Ok(())
+}
+
+fn transcript_provider_from_file_name(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    let provider = name
+        .strip_suffix(".json")
+        .or_else(|| name.strip_suffix(".json.backup"))?;
+    validate_provider_id(provider).ok()?;
+    Some(provider.to_string())
+}
+
+fn meeting_provider_key(meeting_id: &str, provider_id: &str) -> String {
+    format!("{meeting_id}:{provider_id}")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs};
+    use std::fs;
 
-    use super::{audio_key, load_in, save_in, transcript_path_in, TranscriptIndex};
+    use super::{audio_key, load_current_in, load_legacy_in, save_in, transcript_path_in};
     use crate::transcription::{Transcript, TranscriptSegment, TranscriptionProvider};
 
     fn fixture_transcript() -> Transcript {
@@ -263,103 +367,67 @@ mod tests {
     }
 
     #[test]
-    fn transcript_round_trips_without_storing_beside_audio() {
-        let root =
-            std::env::temp_dir().join(format!("mutsuna-transcript-store-{}", std::process::id()));
-        let audio = root.join("audio").join("meeting.m4a");
-        let store = root.join("store");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(audio.parent().expect("audio parent")).expect("create audio directory");
-        fs::write(&audio, b"audio fixture").expect("write audio fixture");
-
+    fn transcript_round_trips_by_meeting_id() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-transcript-store-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let meeting_id = uuid::Uuid::now_v7().to_string();
+        let directory = root.join("transcripts");
         let transcript = fixture_transcript();
-        save_in(&store, &audio, &transcript).expect("save transcript");
+        save_in(&directory, &meeting_id, &transcript).expect("save transcript");
         assert_eq!(
-            load_in(&store, &audio, TranscriptionProvider::ElevenLabs).expect("load transcript"),
-            Some(transcript.clone())
-        );
-        assert!(!audio.with_extension("json").exists());
-
-        let primary = transcript_path_in(&store, &audio, "elevenlabs").expect("transcript path");
-        fs::rename(&primary, primary.with_extension("json.backup"))
-            .expect("simulate interrupted update");
-        assert_eq!(
-            load_in(&store, &audio, TranscriptionProvider::ElevenLabs)
-                .expect("load backup transcript"),
-            Some(transcript.clone())
-        );
-
-        let provider_backup = primary.with_extension("json.backup");
-        let legacy = store.join(format!("{}.json", audio_key(&audio).expect("legacy key")));
-        fs::rename(provider_backup, legacy).expect("move transcript to legacy path");
-        assert_eq!(
-            load_in(&store, &audio, TranscriptionProvider::ElevenLabs)
-                .expect("load legacy transcript"),
+            load_current_in(&directory, &meeting_id, TranscriptionProvider::ElevenLabs)
+                .expect("load transcript"),
             Some(transcript)
         );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn audio_changes_get_a_new_storage_key() {
-        let root =
-            std::env::temp_dir().join(format!("mutsuna-transcript-key-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create fixture directory");
-        let audio = root.join("meeting.m4a");
-        fs::write(&audio, b"first").expect("write first fixture");
-        let first = audio_key(&audio).expect("first key");
-        fs::write(&audio, b"second version").expect("write second fixture");
-        let second = audio_key(&audio).expect("second key");
-
-        assert_ne!(first, second);
+        let path =
+            transcript_path_in(&directory, &meeting_id, "elevenlabs").expect("transcript path");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("elevenlabs.json")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn providers_get_distinct_storage_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "mutsuna-transcript-provider-key-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create fixture directory");
-        let audio = root.join("meeting.m4a");
-        fs::write(&audio, b"audio fixture").expect("write audio fixture");
-
-        let elevenlabs = transcript_path_in(&root, &audio, "elevenlabs")
-            .expect("create ElevenLabs transcript path");
-        let assemblyai = transcript_path_in(&root, &audio, "assemblyai")
-            .expect("create AssemblyAI transcript path");
+        let root = std::path::Path::new("transcripts");
+        let meeting_id = uuid::Uuid::now_v7().to_string();
+        let elevenlabs = transcript_path_in(root, &meeting_id, "elevenlabs").expect("path");
+        let assemblyai = transcript_path_in(root, &meeting_id, "assemblyai").expect("path");
         assert_ne!(elevenlabs, assemblyai);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn transcript_index_matches_provider_and_legacy_files_without_rescanning() {
-        let root =
-            std::env::temp_dir().join(format!("mutsuna-transcript-index-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create fixture directory");
+    fn schema_v1_transcript_remains_readable_for_migration() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-transcript-legacy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
         let audio = root.join("meeting.m4a");
-        fs::write(&audio, b"audio fixture").expect("write audio fixture");
-        let key = audio_key(&audio).expect("audio key");
-
-        let provider_index = TranscriptIndex {
-            file_names: HashSet::from([format!("{key}.elevenlabs.json.backup")]),
-        };
+        let legacy = root.join("transcripts");
+        fs::create_dir_all(&legacy).expect("create legacy store");
+        fs::write(&audio, b"legacy audio").expect("write audio");
+        let transcript = fixture_transcript();
+        let stored = serde_json::json!({
+            "schemaVersion": 1,
+            "savedAt": "2026-08-08T00:00:00Z",
+            "transcript": transcript
+        });
+        let key = audio_key(&audio).expect("legacy audio key");
+        fs::write(
+            legacy.join(format!("{key}.elevenlabs.json")),
+            serde_json::to_vec(&stored).expect("serialize legacy transcript"),
+        )
+        .expect("write legacy transcript");
         assert_eq!(
-            provider_index.providers_for_audio(&audio),
-            vec!["elevenlabs"]
+            load_legacy_in(&legacy, &audio, TranscriptionProvider::ElevenLabs)
+                .expect("load legacy transcript"),
+            Some(fixture_transcript())
         );
-
-        let legacy_index = TranscriptIndex {
-            file_names: HashSet::from([format!("{key}.json")]),
-        };
-        assert_eq!(legacy_index.providers_for_audio(&audio), vec!["elevenlabs"]);
-
         let _ = fs::remove_dir_all(root);
     }
 }

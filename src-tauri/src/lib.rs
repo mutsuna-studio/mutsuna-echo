@@ -2,6 +2,7 @@ mod commands;
 mod credentials;
 #[cfg(desktop)]
 mod meeting_detection;
+mod meeting_store;
 mod recording;
 #[cfg(desktop)]
 mod resident;

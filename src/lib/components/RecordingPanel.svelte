@@ -285,7 +285,8 @@
     actionBusy = true;
     try {
       const audio = await invoke<SelectedAudioFile>("select_recorded_audio", {
-        recordingId: recording.id
+        recordingId: recording.id,
+        meetingId: recording.meetingId
       });
       onAudioReady(audio);
       onMessage(`${recording.fileName}を文字起こし対象に選択しました。`);

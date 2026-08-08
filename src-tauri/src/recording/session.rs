@@ -123,6 +123,7 @@ fn completed_recording_entries_in(
             Some((
                 RecordedAudioSummary {
                     id: file_name.clone(),
+                    meeting_id: String::new(),
                     file_name,
                     size_bytes: metadata.len(),
                     recorded_at_unix_ms,
@@ -227,7 +228,7 @@ pub(super) fn recover(app: &AppHandle, session_id: &str) -> Result<PathBuf, Stri
     if !manifest.mixed_file.exists() {
         return Err("復旧できる音声フラグメントが見つかりません。".into());
     }
-    crate::commands::transcribe::describe_audio_path(&manifest.mixed_file)
+    crate::commands::transcribe::validate_audio_path(&manifest.mixed_file)
         .map_err(|error| format!("録音フラグメントを再生可能なM4Aとして復旧できませんでした。元データは破棄していません: {error}"))?;
     atomic_copy_to_output(&manifest.mixed_file, &manifest.final_file)?;
     crate::commands::transcribe::set_selected_audio_path(app, manifest.final_file.clone())?;

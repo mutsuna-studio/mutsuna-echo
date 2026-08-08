@@ -49,6 +49,7 @@ export interface RecoverableRecording {
 
 export interface RecordedAudioSummary {
   id: string;
+  meetingId: string;
   fileName: string;
   sizeBytes: number;
   recordedAtUnixMs: number;

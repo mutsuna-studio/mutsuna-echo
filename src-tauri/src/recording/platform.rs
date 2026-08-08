@@ -352,7 +352,7 @@ mod tests {
         let duration = crate::commands::transcribe::fragmented_m4a_duration(&path)
             .expect("read fragmented duration");
         assert!((4.9..=5.1).contains(&duration.as_secs_f64()));
-        crate::commands::transcribe::describe_audio_path(&path)
+        crate::commands::transcribe::validate_audio_path(&path)
             .expect("recorded M4A is selectable for transcription");
         let _ = std::fs::remove_file(path);
     }
@@ -381,7 +381,7 @@ mod tests {
             assert_eq!(tagged.properties().sample_rate(), Some(48_000));
             assert!(crate::commands::transcribe::fragmented_m4a_duration(&path)
                 .is_some_and(|duration| !duration.is_zero()));
-            crate::commands::transcribe::describe_audio_path(&path)
+            crate::commands::transcribe::validate_audio_path(&path)
                 .expect("short M4A is selectable for transcription");
             let bytes = std::fs::read(&path).expect("read short M4A");
             assert!(bytes.windows(4).any(|atom| atom == b"moof"));

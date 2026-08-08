@@ -18,6 +18,7 @@ export type TranscriptionResult = {
 };
 
 export type SelectedAudioFile = {
+  meetingId: string;
   name: string;
   sizeBytes: number;
   durationMs: number;

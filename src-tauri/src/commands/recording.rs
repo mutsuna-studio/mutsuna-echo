@@ -2,7 +2,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    commands::transcribe::{describe_audio_path, SelectedAudioFile},
+    commands::transcribe::{
+        set_selected_audio_path, set_selected_audio_with_meeting, SelectedAudioFile,
+    },
     recording::{
         self,
         types::{
@@ -42,6 +44,7 @@ pub(crate) fn get_recording_status(
 
 #[tauri::command]
 pub(crate) fn get_recorded_audio(
+    app: AppHandle,
     state: State<'_, RecordingService>,
 ) -> Result<Option<SelectedAudioFile>, String> {
     #[cfg(target_os = "android")]
@@ -52,7 +55,7 @@ pub(crate) fn get_recorded_audio(
         .output_path
         .as_deref()
         .map(std::path::Path::new)
-        .map(describe_audio_path)
+        .map(|path| set_selected_audio_path(&app, path.to_path_buf()))
         .transpose()
 }
 
@@ -83,7 +86,7 @@ pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult
             .output_path
             .as_deref()
             .map(std::path::Path::new)
-            .map(describe_audio_path)
+            .map(|path| set_selected_audio_path(&app, path.to_path_buf()))
             .transpose()?;
         return Ok(StopRecordingResult { status, audio });
     }
@@ -100,7 +103,7 @@ pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult
             .output_path
             .as_deref()
             .map(std::path::Path::new)
-            .map(describe_audio_path)
+            .map(|path| set_selected_audio_path(&app, path.to_path_buf()))
             .transpose()?;
         Ok(StopRecordingResult { status, audio })
     }
@@ -154,36 +157,59 @@ pub(crate) fn list_recoverable_recordings(
 }
 
 #[tauri::command]
-pub(crate) fn list_recorded_audio(app: AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+pub(crate) async fn list_recorded_audio(
+    app: AppHandle,
+) -> Result<Vec<RecordedAudioSummary>, String> {
     #[cfg(target_os = "android")]
     {
-        recording::completed_recordings(&app)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let entries = recording::completed_recordings_with_paths(&app)?;
+        let mut recordings = recording::completed_recordings(&app)?;
         let transcript_index =
             crate::transcript_store::TranscriptIndex::load(&app).unwrap_or_else(|error| {
                 eprintln!("Could not index stored transcripts: {error}");
                 crate::transcript_store::TranscriptIndex::default()
             });
-        Ok(entries
-            .into_iter()
-            .map(|(mut recording, path)| {
-                recording.transcript_providers = transcript_index.providers_for_audio(&path);
-                recording
-            })
-            .collect())
+        for recording in &mut recordings {
+            recording.transcript_providers =
+                transcript_index.providers_for_meeting(&recording.meeting_id, None);
+        }
+        Ok(recordings)
     }
+    #[cfg(not(target_os = "android"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || list_recorded_audio_desktop(&app))
+            .await
+            .map_err(|error| format!("録音履歴のMeeting情報を準備できませんでした: {error}"))?
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn list_recorded_audio_desktop(app: &AppHandle) -> Result<Vec<RecordedAudioSummary>, String> {
+    let entries = recording::completed_recordings_with_paths(app)?;
+    let transcript_index =
+        crate::transcript_store::TranscriptIndex::load(app).unwrap_or_else(|error| {
+            eprintln!("Could not index stored transcripts: {error}");
+            crate::transcript_store::TranscriptIndex::default()
+        });
+    entries
+        .into_iter()
+        .map(|(mut recording, path)| {
+            let meeting_id = crate::meeting_store::resolve_or_create(app, &path)?;
+            recording.meeting_id = meeting_id.clone();
+            recording.transcript_providers =
+                transcript_index.providers_for_meeting(&meeting_id, Some(&path));
+            Ok(recording)
+        })
+        .collect()
 }
 
 #[tauri::command]
 pub(crate) fn select_recorded_audio(
     app: AppHandle,
     recording_id: String,
+    meeting_id: String,
 ) -> Result<SelectedAudioFile, String> {
     let path = recording::completed_recording_path(&app, &recording_id)?;
-    crate::commands::transcribe::set_selected_audio_path(&app, path)
+    set_selected_audio_with_meeting(&app, path, meeting_id)
 }
 
 #[tauri::command]
@@ -210,7 +236,7 @@ pub(crate) fn recover_recording(
     };
     #[cfg(not(target_os = "android"))]
     let path = recording::recover(&app, &session_id)?;
-    describe_audio_path(&path)
+    set_selected_audio_path(&app, path)
 }
 
 #[tauri::command]

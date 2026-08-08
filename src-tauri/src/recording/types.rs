@@ -119,6 +119,7 @@ pub struct RecoverableRecording {
 #[serde(rename_all = "camelCase")]
 pub struct RecordedAudioSummary {
     pub id: String,
+    pub meeting_id: String,
     pub file_name: String,
     pub size_bytes: u64,
     pub recorded_at_unix_ms: u64,
