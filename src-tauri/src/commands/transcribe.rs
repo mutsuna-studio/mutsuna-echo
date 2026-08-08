@@ -26,10 +26,10 @@ pub(crate) struct AudioSelectionState {
 #[derive(Debug, Clone)]
 struct SelectedAudio {
     path: PathBuf,
-    meeting_id: String,
+    descriptor: SelectedAudioFile,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SelectedAudioFile {
     meeting_id: String,
@@ -118,7 +118,7 @@ pub(crate) fn selected_meeting_id(app: &AppHandle) -> Result<String, String> {
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .as_ref()
-        .map(|selected| selected.meeting_id.clone())
+        .map(|selected| selected.descriptor.meeting_id.clone())
         .ok_or_else(|| "文字起こし対象のMeetingが選択されていません。".to_string())
 }
 
@@ -127,14 +127,17 @@ fn set_selected_audio(
     path: PathBuf,
     meeting_id: String,
 ) -> Result<SelectedAudioFile, String> {
-    let selected = describe_audio_path(&path, meeting_id.clone())?;
+    let descriptor = describe_audio_path(&path, meeting_id)?;
     let state = app.state::<AudioSelectionState>();
     *state
         .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を更新できませんでした。".to_string())? =
-        Some(SelectedAudio { path, meeting_id });
-    Ok(selected)
+        Some(SelectedAudio {
+            path,
+            descriptor: descriptor.clone(),
+        });
+    Ok(descriptor)
 }
 
 #[tauri::command]
@@ -146,17 +149,13 @@ pub(crate) fn get_transcription_session(
             .selected
             .lock()
             .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?;
-        match selection
-            .as_ref()
-            .map(|selected| describe_audio_path(&selected.path, selected.meeting_id.clone()))
-            .transpose()
-        {
-            Ok(selected) => selected,
-            Err(error) => {
-                eprintln!("Could not restore selected audio: {error}");
+        match selection.as_ref() {
+            Some(selected) if selected.path.is_file() => Some(selected.descriptor.clone()),
+            Some(_) => {
                 *selection = None;
                 None
             }
+            None => None,
         }
     };
     Ok(TranscriptionSession {
@@ -506,7 +505,9 @@ pub(crate) async fn transcribe_selected_audio(
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
 
-    validate_audio_file(&selected.path)?;
+    // Selection metadata is cached for lightweight session polling, so validate
+    // the actual file once more at the boundary where it is consumed.
+    validate_audio_path(&selected.path)?;
 
     let transcript = crate::transcription::transcribe(
         &app,
@@ -516,7 +517,7 @@ pub(crate) async fn transcribe_selected_audio(
     )
     .await?;
     let persistence_warning =
-        crate::transcript_store::save(&app, &selected.meeting_id, &transcript).err();
+        crate::transcript_store::save(&app, &selected.descriptor.meeting_id, &transcript).err();
     Ok(TranscriptionResult {
         transcript,
         persistence_warning,
@@ -535,7 +536,12 @@ pub(crate) fn get_selected_transcript(
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
-    crate::transcript_store::load(&app, &selected.meeting_id, &selected.path, request.provider)
+    crate::transcript_store::load(
+        &app,
+        &selected.descriptor.meeting_id,
+        &selected.path,
+        request.provider,
+    )
 }
 
 #[cfg(test)]

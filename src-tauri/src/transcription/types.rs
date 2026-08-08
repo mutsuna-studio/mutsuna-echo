@@ -87,6 +87,7 @@ struct SegmentBuilder {
     last_start_ms: Option<u64>,
     end_time_source: Option<TokenTimeSource>,
     text: String,
+    character_count: usize,
 }
 
 const SEGMENT_GAP_MS: u64 = 800;
@@ -102,13 +103,10 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         if token.text.is_empty() {
             continue;
         }
-        let speaker = token
+        let speaker_changed = token
             .speaker
             .as_deref()
-            .or_else(|| (!current.speaker.is_empty()).then_some(current.speaker.as_str()))
-            .unwrap_or("Speaker 1")
-            .to_string();
-        let speaker_changed = !current.speaker.is_empty() && current.speaker != speaker;
+            .is_some_and(|speaker| !current.speaker.is_empty() && current.speaker != speaker);
         let inferred_end = current.end_time_source == Some(TokenTimeSource::Inferred);
         let gap_anchor = if inferred_end {
             current.last_start_ms
@@ -127,13 +125,19 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
             .start_ms
             .zip(token.end_ms.or(token.start_ms))
             .is_some_and(|(start, end)| end.saturating_sub(start) >= MAX_SEGMENT_DURATION_MS);
-        let length_boundary = current.text.chars().count() >= MAX_SEGMENT_CHARACTERS;
+        let length_boundary = current.character_count >= MAX_SEGMENT_CHARACTERS;
         if speaker_changed || gap_boundary || duration_boundary || length_boundary {
+            let next_speaker = token
+                .speaker
+                .clone()
+                .or_else(|| (!current.speaker.is_empty()).then(|| current.speaker.clone()))
+                .unwrap_or_else(|| "Speaker 1".into());
             finish_segment(&mut current, &mut segments);
+            current.speaker = next_speaker;
         }
 
         if current.speaker.is_empty() {
-            current.speaker = speaker;
+            current.speaker = token.speaker.clone().unwrap_or_else(|| "Speaker 1".into());
         }
         if let Some(start) = token.start_ms {
             current.start_ms.get_or_insert(start);
@@ -144,6 +148,7 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
             current.end_time_source = token.end_time_source;
         }
         current.text.push_str(&token.text);
+        current.character_count += token.text.chars().count();
 
         if token
             .text
