@@ -3,13 +3,14 @@
 
   type Props = {
     peaks: number[];
+    completedPoints: number;
     currentSeconds: number;
     durationSeconds: number;
     loading?: boolean;
     onseek: (seconds: number) => void;
   };
 
-  let { peaks, currentSeconds, durationSeconds, loading = false, onseek }: Props = $props();
+  let { peaks, completedPoints, currentSeconds, durationSeconds, loading = false, onseek }: Props = $props();
   let canvas = $state<HTMLCanvasElement | null>(null);
   let width = $state(0);
   let height = $state(0);
@@ -33,7 +34,7 @@
 
   $effect(() => {
     themeRevision;
-    drawWaveform(canvas, peaks, progress, width, height, loading);
+    drawWaveform(canvas, peaks, completedPoints, progress, width, height);
   });
 
   function handleSeek(event: Event) {
@@ -45,10 +46,10 @@
   function drawWaveform(
     target: HTMLCanvasElement | null,
     values: number[],
+    availablePoints: number,
     played: number,
     cssWidth: number,
     cssHeight: number,
-    isLoading: boolean,
   ) {
     if (!target || cssWidth <= 0 || cssHeight <= 0) return;
     const scale = window.devicePixelRatio || 1;
@@ -63,36 +64,35 @@
     const primary = style.getPropertyValue("--primary").trim() || "#16854a";
     const muted = style.getPropertyValue("--waveform-muted").trim() || "#bdc3bf";
     const center = cssHeight / 2;
-    if (isLoading || values.length === 0) {
+    if (values.length === 0) {
       context.fillStyle = muted;
       context.fillRect(0, Math.round(center), cssWidth, 1);
-      return;
+    } else {
+      const gap = 2;
+      const barWidth = 1.5;
+      const barCount = Math.max(1, Math.min(values.length, Math.floor(cssWidth / (barWidth + gap))));
+      const step = cssWidth / barCount;
+      const playedX = played * cssWidth;
+      for (let index = 0; index < barCount; index += 1) {
+        const from = Math.floor(index * values.length / barCount);
+        const to = Math.max(from + 1, Math.floor((index + 1) * values.length / barCount));
+        let peak = 0;
+        for (let sample = from; sample < to; sample += 1) peak = Math.max(peak, values[sample] ?? 0);
+        const available = from < availablePoints;
+        const barHeight = available ? Math.max(3, peak * (cssHeight - 6)) : 1;
+        const x = index * step + (step - barWidth) / 2;
+        context.fillStyle = x + barWidth / 2 <= playedX ? primary : muted;
+        context.fillRect(x, center - barHeight / 2, barWidth, barHeight);
+      }
     }
 
-    const gap = 2;
-    const barWidth = 1.5;
-    const barCount = Math.max(1, Math.min(values.length, Math.floor(cssWidth / (barWidth + gap))));
-    const step = cssWidth / barCount;
-    const playedX = played * cssWidth;
-    for (let index = 0; index < barCount; index += 1) {
-      const from = Math.floor(index * values.length / barCount);
-      const to = Math.max(from + 1, Math.floor((index + 1) * values.length / barCount));
-      let peak = 0;
-      for (let sample = from; sample < to; sample += 1) peak = Math.max(peak, values[sample] ?? 0);
-      const barHeight = Math.max(3, peak * (cssHeight - 6));
-      const x = index * step + (step - barWidth) / 2;
-      context.fillStyle = x + barWidth / 2 <= playedX ? primary : muted;
-      context.fillRect(x, center - barHeight / 2, barWidth, barHeight);
-    }
-
-    if (played > 0 && played < 1) {
-      context.fillStyle = primary;
-      context.fillRect(Math.max(0, playedX - 1), 2, 2, cssHeight - 4);
-    }
+    const playedX = Math.min(Math.max(played * cssWidth, 1), Math.max(1, cssWidth - 1));
+    context.fillStyle = primary;
+    context.fillRect(playedX - 1, 2, 2, cssHeight - 4);
   }
 </script>
 
-<div class:loading class="waveform-seek">
+<div class="waveform-seek" aria-busy={loading}>
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
   <input
     type="range"
@@ -121,5 +121,4 @@
   }
   canvas { display: block; width: 100%; height: 100%; }
   input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-  .loading input { cursor: wait; }
 </style>

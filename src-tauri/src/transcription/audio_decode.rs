@@ -9,6 +9,19 @@ pub(crate) fn decode_mono(
     path: &Path,
     mut on_samples: impl FnMut(u32, &[f32]) -> Result<(), String>,
 ) -> Result<u64, String> {
+    decode_mono_sampled(path, 1, |sample_rate, _, samples| {
+        on_samples(sample_rate, samples)
+    })
+}
+
+pub(crate) fn decode_mono_sampled(
+    path: &Path,
+    stride: usize,
+    mut on_samples: impl FnMut(u32, u64, &[f32]) -> Result<(), String>,
+) -> Result<u64, String> {
+    if stride == 0 {
+        return Err("音声のサンプリング間隔が不正です。".into());
+    }
     let file =
         File::open(path).map_err(|error| format!("音声ファイルを開けませんでした: {error}"))?;
     let source = MediaSourceStream::new(Box::new(file), Default::default());
@@ -34,6 +47,7 @@ pub(crate) fn decode_mono(
         .map_err(|error| format!("音声デコーダーを準備できませんでした: {error}"))?;
     let mut sample_rate = 0u32;
     let mut frames = 0u64;
+    let mut mono = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
@@ -66,13 +80,19 @@ pub(crate) fn decode_mono(
         }
         let mut decoded_samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         decoded_samples.copy_interleaved_ref(decoded);
-        let mono: Vec<f32> = decoded_samples
-            .samples()
-            .chunks_exact(channels)
-            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-            .collect();
-        frames = frames.saturating_add(mono.len() as u64);
-        on_samples(sample_rate, &mono)?;
+        mono.clear();
+        mono.reserve(decoded_samples.samples().len() / channels);
+        let packet_frame_offset = frames;
+        let packet_frames = decoded_samples.samples().len() / channels;
+        mono.extend(
+            decoded_samples
+                .samples()
+                .chunks_exact(channels)
+                .step_by(stride)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+        );
+        frames = frames.saturating_add(packet_frames as u64);
+        on_samples(sample_rate, packet_frame_offset, &mono)?;
     }
     if sample_rate == 0 || frames == 0 {
         return Err("音声データが含まれていません。".into());

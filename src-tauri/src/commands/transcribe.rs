@@ -42,6 +42,12 @@ pub(crate) struct SelectedAudioFile {
     playback_url: String,
 }
 
+impl SelectedAudioFile {
+    pub(crate) fn meeting_id(&self) -> &str {
+        &self.meeting_id
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionSession {

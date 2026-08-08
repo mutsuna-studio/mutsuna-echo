@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import FastForward from "@lucide/svelte/icons/fast-forward";
   import Pause from "@lucide/svelte/icons/pause";
   import Play from "@lucide/svelte/icons/play";
@@ -9,7 +10,7 @@
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { formatFileSize, formatTimestamp } from "../format";
-  import type { AudioWaveform as AudioWaveformData, SelectedAudioFile } from "../types/transcript";
+  import type { AudioWaveform as AudioWaveformData, AudioWaveformProgress, SelectedAudioFile } from "../types/transcript";
   import AudioWaveform from "./AudioWaveform.svelte";
 
   type Props = {
@@ -28,6 +29,7 @@
   let playbackRateIndex = $state(0);
   let waveformPeaks = $state.raw<number[]>([]);
   let waveformLoading = $state(false);
+  let waveformCompletedPoints = $state(0);
   const playbackRates = [1, 1.25, 1.5, 2] as const;
   const playbackRate = $derived(playbackRates[playbackRateIndex]);
 
@@ -44,19 +46,41 @@
   $effect(() => {
     const meetingId = audio.meetingId;
     let active = true;
+    let stopListening: (() => void) | undefined;
     waveformPeaks = [];
+    waveformCompletedPoints = 0;
     waveformLoading = true;
-    invoke<AudioWaveformData>("get_selected_audio_waveform", { meetingId, points: 320 })
-      .then((waveform) => {
-        if (active && waveform.meetingId === meetingId) waveformPeaks = waveform.peaks;
-      })
-      .catch((error) => {
+    (async () => {
+      try {
+        stopListening = await listen<AudioWaveformProgress>("audio-waveform-progress", ({ payload }) => {
+          if (!active || payload.meetingId !== meetingId) return;
+          waveformPeaks = payload.peaks;
+          waveformCompletedPoints = payload.completedPoints;
+        });
+        if (!active) {
+          stopListening();
+          return;
+        }
+      } catch {
+        // The final waveform command still works if progressive events are unavailable.
+      }
+      if (!active) return;
+      try {
+        const waveform = await invoke<AudioWaveformData>("get_selected_audio_waveform", { meetingId, points: 320 });
+        if (active && waveform.meetingId === meetingId) {
+          waveformPeaks = waveform.peaks;
+          waveformCompletedPoints = waveform.points;
+        }
+      } catch (error) {
         if (active) onError(`音声波形を生成できませんでした: ${String(error)}`);
-      })
-      .finally(() => {
+      } finally {
         if (active) waveformLoading = false;
-      });
-    return () => { active = false; };
+      }
+    })();
+    return () => {
+      active = false;
+      stopListening?.();
+    };
   });
 
   async function togglePlayback() {
@@ -134,7 +158,7 @@
     </div>
     <div class="timeline-controls">
       <time>{formatTimestamp(currentSeconds * 1_000)}</time>
-      <AudioWaveform peaks={waveformPeaks} {currentSeconds} {durationSeconds} loading={waveformLoading} onseek={seekTo} />
+      <AudioWaveform peaks={waveformPeaks} completedPoints={waveformCompletedPoints} {currentSeconds} {durationSeconds} loading={waveformLoading} onseek={seekTo} />
       <time>{formatTimestamp(durationSeconds * 1_000)}</time>
     </div>
     <div class="playback-options">

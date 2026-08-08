@@ -198,6 +198,7 @@ fn run_desktop_recording(
     let mut mic_queue = VecDeque::new();
     let mut sys_queue = VecDeque::new();
     let mut mix_buffer = Vec::new();
+    let mut waveform = crate::audio_waveform::LiveWaveformAccumulator::new(SAMPLE_RATE);
     let mut microphone_level = 0.0;
     let mut system_level = 0.0;
     let mut stop_reason = StopReason::User;
@@ -246,6 +247,7 @@ fn run_desktop_recording(
             request,
             false,
             |samples| {
+                waveform.accept(samples);
                 if let Some(detector) = live_vad.as_mut() {
                     voice_activity = if detector.accept_waveform(samples) {
                         VoiceActivityState::SpeechDetected
@@ -288,6 +290,7 @@ fn run_desktop_recording(
         request,
         true,
         |samples| {
+            waveform.accept(samples);
             if let Some(detector) = live_vad.as_mut() {
                 let _ = detector.accept_waveform(samples);
             }
@@ -328,7 +331,13 @@ fn run_desktop_recording(
     manifest.stop_reason = Some(stop_reason);
     manifest.save(&paths.directory)?;
 
-    crate::commands::transcribe::set_selected_audio_path(app, paths.final_file.clone())?;
+    let selected =
+        crate::commands::transcribe::set_selected_audio_path(app, paths.final_file.clone())?;
+    if let Err(error) =
+        crate::audio_waveform::cache_recorded_waveform(app, selected.meeting_id(), waveform)
+    {
+        eprintln!("Could not cache recorded waveform: {error}");
+    }
     remove_session(&paths.directory)?;
     publish_status(app, status, |current| {
         current.phase = RecordingPhase::Completed;

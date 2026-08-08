@@ -4,11 +4,91 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MIN_POINTS: u16 = 64;
 const MAX_POINTS: u16 = 512;
 const CACHE_VERSION: u8 = 1;
+pub(crate) const DEFAULT_POINTS: u16 = 320;
+const PROGRESS_POINT_INTERVAL: usize = 4;
+const WAVEFORM_SAMPLE_STRIDE: usize = 8;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BinStats {
+    sum_of_squares: f64,
+    transient: f32,
+    count: u64,
+}
+
+impl BinStats {
+    fn accept(&mut self, sample: f32) {
+        let amplitude = sample.abs().min(1.0);
+        self.sum_of_squares += f64::from(amplitude) * f64::from(amplitude);
+        self.transient = self.transient.max(amplitude);
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.sum_of_squares += other.sum_of_squares;
+        self.transient = self.transient.max(other.transient);
+        self.count = self.count.saturating_add(other.count);
+    }
+
+    fn amplitude(self) -> f32 {
+        if self.count == 0 {
+            0.0
+        } else {
+            let rms = (self.sum_of_squares / self.count as f64).sqrt() as f32;
+            rms * 0.85 + self.transient * 0.15
+        }
+    }
+}
+
+pub(crate) struct LiveWaveformAccumulator {
+    bucket_frames: usize,
+    current: BinStats,
+    buckets: Vec<BinStats>,
+}
+
+impl LiveWaveformAccumulator {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        Self {
+            bucket_frames: (sample_rate as usize / 10).max(1),
+            current: BinStats::default(),
+            buckets: Vec::new(),
+        }
+    }
+
+    pub(crate) fn accept(&mut self, samples: &[f32]) {
+        for sample in samples {
+            self.current.accept(*sample);
+            if self.current.count as usize >= self.bucket_frames {
+                self.buckets.push(std::mem::take(&mut self.current));
+            }
+        }
+    }
+
+    fn finish(mut self, points: usize) -> Vec<f32> {
+        if self.current.count > 0 {
+            self.buckets.push(self.current);
+        }
+        let mut bins = vec![BinStats::default(); points];
+        let bucket_count = self.buckets.len();
+        if bucket_count <= points {
+            for (index, target) in bins.iter_mut().enumerate() {
+                if let Some(bucket) = self.buckets.get(index * bucket_count / points) {
+                    *target = *bucket;
+                }
+            }
+        } else {
+            for (index, bucket) in self.buckets.into_iter().enumerate() {
+                let target = (index * points / bucket_count).min(points.saturating_sub(1));
+                bins[target].merge(bucket);
+            }
+        }
+        peaks_from_bins(&bins)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +96,14 @@ pub(crate) struct AudioWaveform {
     meeting_id: String,
     points: u16,
     peaks: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioWaveformProgress {
+    meeting_id: String,
+    peaks: Vec<f32>,
+    completed_points: usize,
 }
 
 #[tauri::command]
@@ -29,6 +117,8 @@ pub(crate) async fn get_selected_audio_waveform(
         crate::commands::transcribe::selected_audio_for_waveform(&app, &meeting_id)?;
     let cache_path = cache_path(&app, &meeting_id, points)?;
     let cached_meeting_id = meeting_id.clone();
+    let progress_app = app.clone();
+    let progress_meeting_id = meeting_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(cached) = read_cache(&cache_path, &cached_meeting_id, points) {
@@ -37,7 +127,30 @@ pub(crate) async fn get_selected_audio_waveform(
         if cache_path.is_file() {
             let _ = fs::remove_file(&cache_path);
         }
-        let peaks = extract_peaks(&audio_path, duration_ms, points as usize)?;
+        let peaks = extract_peaks(
+            &audio_path,
+            duration_ms,
+            points as usize,
+            |peaks, completed_points| {
+                if crate::commands::transcribe::selected_audio_for_waveform(
+                    &progress_app,
+                    &progress_meeting_id,
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                let _ = progress_app.emit(
+                    "audio-waveform-progress",
+                    AudioWaveformProgress {
+                        meeting_id: progress_meeting_id.clone(),
+                        peaks,
+                        completed_points,
+                    },
+                );
+                true
+            },
+        )?;
         let waveform = AudioWaveform {
             meeting_id,
             points,
@@ -50,6 +163,20 @@ pub(crate) async fn get_selected_audio_waveform(
     })
     .await
     .map_err(|error| format!("音声波形の生成処理を完了できませんでした: {error}"))?
+}
+
+pub(crate) fn cache_recorded_waveform(
+    app: &AppHandle,
+    meeting_id: &str,
+    accumulator: LiveWaveformAccumulator,
+) -> Result<(), String> {
+    let points = DEFAULT_POINTS;
+    let waveform = AudioWaveform {
+        meeting_id: meeting_id.to_string(),
+        points,
+        peaks: accumulator.finish(points as usize),
+    };
+    write_cache(&cache_path(app, meeting_id, points)?, &waveform)
 }
 
 fn validate_points(points: u16) -> Result<(), String> {
@@ -110,46 +237,53 @@ fn write_cache(path: &Path, waveform: &AudioWaveform) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_peaks(path: &Path, duration_ms: u64, points: usize) -> Result<Vec<f32>, String> {
+fn extract_peaks(
+    path: &Path,
+    duration_ms: u64,
+    points: usize,
+    mut on_progress: impl FnMut(Vec<f32>, usize) -> bool,
+) -> Result<Vec<f32>, String> {
     if duration_ms == 0 {
         return Err("音声の長さを取得できないため波形を生成できません。".into());
     }
-    let mut energy = vec![0.0f64; points];
-    let mut transients = vec![0.0f32; points];
-    let mut counts = vec![0u64; points];
-    let mut frame_offset = 0u64;
-    crate::transcription::audio_decode::decode_mono(path, |sample_rate, samples| {
-        let expected_frames = duration_ms
-            .saturating_mul(sample_rate as u64)
-            .saturating_add(999)
-            / 1_000;
-        for (offset, sample) in samples.iter().enumerate() {
-            let frame = frame_offset.saturating_add(offset as u64);
-            let index = ((frame as u128 * points as u128) / expected_frames.max(1) as u128)
-                .min(points.saturating_sub(1) as u128) as usize;
-            let amplitude = sample.abs().min(1.0);
-            energy[index] += f64::from(amplitude) * f64::from(amplitude);
-            transients[index] = transients[index].max(amplitude);
-            counts[index] = counts[index].saturating_add(1);
-        }
-        frame_offset = frame_offset.saturating_add(samples.len() as u64);
-        Ok(())
-    })?;
-    let mut peaks: Vec<f32> = energy
-        .into_iter()
-        .zip(transients)
-        .zip(counts)
-        .map(|((sum_of_squares, transient), count)| {
-            if count == 0 {
-                0.0
-            } else {
-                let rms = (sum_of_squares / count as f64).sqrt() as f32;
-                rms * 0.85 + transient * 0.15
+    let mut bins = vec![BinStats::default(); points];
+    let mut next_progress_point = PROGRESS_POINT_INTERVAL;
+    crate::transcription::audio_decode::decode_mono_sampled(
+        path,
+        WAVEFORM_SAMPLE_STRIDE,
+        |sample_rate, packet_frame_offset, samples| {
+            let expected_frames = duration_ms
+                .saturating_mul(sample_rate as u64)
+                .saturating_add(999)
+                / 1_000;
+            for (offset, sample) in samples.iter().enumerate() {
+                let frame =
+                    packet_frame_offset.saturating_add((offset * WAVEFORM_SAMPLE_STRIDE) as u64);
+                let index = ((frame as u128 * points as u128) / expected_frames.max(1) as u128)
+                    .min(points.saturating_sub(1) as u128) as usize;
+                bins[index].accept(*sample);
             }
-        })
-        .collect();
+            let decoded_through = packet_frame_offset
+                .saturating_add((samples.len().saturating_mul(WAVEFORM_SAMPLE_STRIDE)) as u64);
+            let completed_points = ((decoded_through as u128 * points as u128)
+                / expected_frames.max(1) as u128)
+                .min(points as u128) as usize;
+            if next_progress_point <= points && completed_points >= next_progress_point {
+                if !on_progress(peaks_from_bins(&bins), completed_points) {
+                    return Err("別の音声が選択されたため波形生成を中止しました。".into());
+                }
+                next_progress_point = completed_points.saturating_add(PROGRESS_POINT_INTERVAL);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(peaks_from_bins(&bins))
+}
+
+fn peaks_from_bins(bins: &[BinStats]) -> Vec<f32> {
+    let mut peaks: Vec<f32> = bins.iter().copied().map(BinStats::amplitude).collect();
     normalize_peaks(&mut peaks);
-    Ok(peaks)
+    peaks
 }
 
 fn normalize_peaks(peaks: &mut [f32]) {
@@ -167,7 +301,7 @@ fn normalize_peaks(peaks: &mut [f32]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_peaks, validate_points};
+    use super::{normalize_peaks, validate_points, LiveWaveformAccumulator};
 
     #[test]
     fn accepts_only_bounded_waveform_resolutions() {
@@ -186,5 +320,16 @@ mod tests {
         assert!(peaks.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(peaks.iter().all(|peak| (0.0..=1.0).contains(peak)));
         assert_eq!(peaks[4], 1.0);
+    }
+
+    #[test]
+    fn live_accumulator_downsamples_without_redecoding() {
+        let mut accumulator = LiveWaveformAccumulator::new(100);
+        accumulator.accept(&[0.1; 10]);
+        accumulator.accept(&[0.8; 10]);
+        let peaks = accumulator.finish(8);
+        assert_eq!(peaks.len(), 8);
+        assert!(peaks.iter().all(|peak| (0.0..=1.0).contains(peak)));
+        assert!(peaks.iter().any(|peak| *peak > 0.0));
     }
 }
