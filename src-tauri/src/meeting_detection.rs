@@ -163,13 +163,15 @@ fn start_watcher<R: Runtime>(app: AppHandle<R>) {
                 RecordingPhase::Starting | RecordingPhase::Recording | RecordingPhase::Finalizing
             );
             let state = app.state::<MeetingDetectionState>();
-            if candidate.is_none() {
-                state.observe(None);
-                destroy_overlay(&app);
+            if recording_active {
+                if let Some(candidate) = candidate {
+                    state.suppress(Some(candidate.provider));
+                }
+                // 録音コントローラーは会議ウィンドウが最小化されても維持する。
                 continue;
             }
-            if recording_active {
-                state.suppress(candidate.map(|item| item.provider));
+            if candidate.is_none() {
+                state.observe(None);
                 destroy_overlay(&app);
                 continue;
             }
@@ -207,8 +209,8 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.title = "Mutsuna Echo - 会議を検出".into();
     config.width = width;
     config.height = height;
-    config.min_width = Some(width);
-    config.min_height = Some(height);
+    config.min_width = Some(300.0);
+    config.min_height = Some(128.0);
     config.max_width = Some(width);
     config.max_height = Some(height);
     config.resizable = false;

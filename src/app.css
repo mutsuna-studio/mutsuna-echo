@@ -24,6 +24,13 @@ body {
   box-shadow: 0 18px 55px color-mix(in oklch, var(--foreground) 22%, transparent);
 }
 
+.meeting-overlay.compact {
+  display: grid;
+  min-width: 0;
+  padding: 16px 18px;
+  align-items: center;
+}
+
 .meeting-overlay header {
   display: flex;
   align-items: flex-start;
@@ -75,6 +82,97 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+
+.recording-controller {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.recording-summary,
+.recording-sources {
+  display: flex;
+  align-items: center;
+}
+
+.recording-summary { justify-content: space-between; }
+
+.recording-summary time {
+  color: var(--foreground);
+  font-size: 1.05rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.rec-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--destructive);
+  font-size: 0.76rem;
+  letter-spacing: 0.12em;
+}
+
+.rec-state span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--destructive);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--destructive) 14%, transparent);
+  animation: recording-pulse 1.8s ease-in-out infinite;
+}
+
+.rec-state.finalizing { color: var(--muted-foreground); }
+.rec-state.finalizing span { background: var(--muted-foreground); animation: none; }
+
+.recording-sources {
+  gap: 13px;
+  color: var(--muted-foreground);
+  font-size: 0.74rem;
+}
+
+.recording-sources > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.recording-sources i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+  transition: opacity 100ms linear, transform 100ms linear;
+}
+
+.recording-sources i.enabled {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 12%, transparent);
+}
+
+.recording-sources button { margin-left: auto; }
+
+.recording-result,
+.compact-error {
+  margin: -4px 0 0;
+  overflow: hidden;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-result { color: var(--primary); }
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-state span { animation: none; }
 }
 
 button,
