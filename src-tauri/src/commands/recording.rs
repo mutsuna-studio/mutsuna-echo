@@ -159,7 +159,11 @@ pub(crate) fn list_recorded_audio(app: AppHandle) -> Result<Vec<RecordedAudioSum
     #[cfg(not(target_os = "android"))]
     for recording in &mut recordings {
         if let Ok(path) = recording::completed_recording_path(&app, &recording.id) {
-            recording.has_transcript = crate::transcript_store::exists(&app, &path);
+            recording.transcript_providers = crate::transcription::TranscriptionProvider::ALL
+                .into_iter()
+                .filter(|provider| crate::transcript_store::exists(&app, &path, *provider))
+                .map(|provider| provider.id().to_string())
+                .collect();
         }
     }
     Ok(recordings)

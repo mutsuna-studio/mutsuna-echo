@@ -2,6 +2,7 @@
   import { Badge } from "@mutsuna/ui/badge";
   import { Card } from "@mutsuna/ui/card";
   import { formatTimestamp } from "../format";
+  import { transcriptionProviderLabel } from "../providers";
   import type { Transcript } from "../types/transcript";
 
   let { transcript }: { transcript: Transcript } = $props();
@@ -13,7 +14,11 @@
       <p class="step">Transcript</p>
       <h2>文字起こし結果</h2>
     </div>
-    <Badge class="model" variant="secondary">{transcript.model} · {transcript.language}</Badge>
+    <div class="transcript-badges">
+      <Badge>{transcriptionProviderLabel(transcript.provider)}</Badge>
+      <Badge class="model" variant="secondary">{transcript.model}</Badge>
+      <Badge variant="outline">{transcript.language}</Badge>
+    </div>
   </div>
 
   {#if transcript.segments.length > 0}

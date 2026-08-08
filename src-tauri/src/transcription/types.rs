@@ -1,5 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum TranscriptionProvider {
+    #[serde(rename = "elevenlabs")]
+    ElevenLabs,
+}
+
+impl TranscriptionProvider {
+    pub const ALL: [Self; 1] = [Self::ElevenLabs];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::ElevenLabs => "elevenlabs",
+        }
+    }
+}
+
 /// A provider-neutral transcription result.
 ///
 /// Provider-specific responses are normalized into this format before they are

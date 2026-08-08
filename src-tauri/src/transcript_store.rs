@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
-use crate::transcription::Transcript;
+use crate::transcription::{Transcript, TranscriptionProvider};
 
 const SCHEMA_VERSION: u8 = 1;
 const MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
@@ -31,14 +31,28 @@ pub(crate) fn save(
     save_in(&directory, audio_path, transcript)
 }
 
-pub(crate) fn load(app: &AppHandle, audio_path: &Path) -> Result<Option<Transcript>, String> {
+pub(crate) fn load(
+    app: &AppHandle,
+    audio_path: &Path,
+    provider: TranscriptionProvider,
+) -> Result<Option<Transcript>, String> {
     let directory = transcripts_directory(app)?;
-    load_in(&directory, audio_path)
+    load_in(&directory, audio_path, provider)
 }
 
-pub(crate) fn exists(app: &AppHandle, audio_path: &Path) -> bool {
-    transcript_path(app, audio_path)
-        .is_ok_and(|path| path.is_file() || path.with_extension("json.backup").is_file())
+pub(crate) fn exists(app: &AppHandle, audio_path: &Path, provider: TranscriptionProvider) -> bool {
+    let Ok(directory) = transcripts_directory(app) else {
+        return false;
+    };
+    let Ok(path) = transcript_path_in(&directory, audio_path, provider.id()) else {
+        return false;
+    };
+    path.is_file()
+        || path.with_extension("json.backup").is_file()
+        || (provider == TranscriptionProvider::ElevenLabs
+            && legacy_transcript_path(&directory, audio_path).is_ok_and(|legacy| {
+                legacy.is_file() || legacy.with_extension("json.backup").is_file()
+            }))
 }
 
 fn transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -48,8 +62,23 @@ fn transcripts_directory(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("文字起こしの保存先を取得できませんでした: {error}"))
 }
 
-fn transcript_path(app: &AppHandle, audio_path: &Path) -> Result<PathBuf, String> {
-    Ok(transcripts_directory(app)?.join(format!("{}.json", audio_key(audio_path)?)))
+fn transcript_path_in(
+    directory: &Path,
+    audio_path: &Path,
+    provider_id: &str,
+) -> Result<PathBuf, String> {
+    if provider_id.is_empty()
+        || !provider_id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+    {
+        return Err("文字起こしプロバイダーIDが不正です。".to_string());
+    }
+    Ok(directory.join(format!("{}.{provider_id}.json", audio_key(audio_path)?)))
+}
+
+fn legacy_transcript_path(directory: &Path, audio_path: &Path) -> Result<PathBuf, String> {
+    Ok(directory.join(format!("{}.json", audio_key(audio_path)?)))
 }
 
 fn audio_key(audio_path: &Path) -> Result<String, String> {
@@ -77,7 +106,7 @@ fn audio_key(audio_path: &Path) -> Result<String, String> {
 fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Result<(), String> {
     fs::create_dir_all(directory)
         .map_err(|error| format!("文字起こしの保存先を作成できませんでした: {error}"))?;
-    let path = directory.join(format!("{}.json", audio_key(audio_path)?));
+    let path = transcript_path_in(directory, audio_path, &transcript.provider)?;
     let temporary = path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),
@@ -127,14 +156,19 @@ fn save_in(directory: &Path, audio_path: &Path, transcript: &Transcript) -> Resu
     Ok(())
 }
 
-fn load_in(directory: &Path, audio_path: &Path) -> Result<Option<Transcript>, String> {
-    let primary = directory.join(format!("{}.json", audio_key(audio_path)?));
-    let backup = primary.with_extension("json.backup");
-    let path = if primary.exists() {
-        primary
-    } else if backup.exists() {
-        backup
-    } else {
+fn load_in(
+    directory: &Path,
+    audio_path: &Path,
+    provider: TranscriptionProvider,
+) -> Result<Option<Transcript>, String> {
+    let primary = transcript_path_in(directory, audio_path, provider.id())?;
+    let mut candidates = vec![primary.clone(), primary.with_extension("json.backup")];
+    if provider == TranscriptionProvider::ElevenLabs {
+        let legacy = legacy_transcript_path(directory, audio_path)?;
+        candidates.push(legacy.clone());
+        candidates.push(legacy.with_extension("json.backup"));
+    }
+    let Some(path) = candidates.into_iter().find(|path| path.exists()) else {
         return Ok(None);
     };
     let metadata = fs::metadata(&path)
@@ -149,6 +183,9 @@ fn load_in(directory: &Path, audio_path: &Path) -> Result<Option<Transcript>, St
     if stored.schema_version != SCHEMA_VERSION {
         return Err("保存済みの文字起こし形式に対応していません。".to_string());
     }
+    if stored.transcript.provider != provider.id() {
+        return Err("保存済みの文字起こしプロバイダーが一致しません。".to_string());
+    }
     Ok(Some(stored.transcript))
 }
 
@@ -156,8 +193,8 @@ fn load_in(directory: &Path, audio_path: &Path) -> Result<Option<Transcript>, St
 mod tests {
     use std::fs;
 
-    use super::{audio_key, load_in, save_in};
-    use crate::transcription::{Transcript, TranscriptSegment};
+    use super::{audio_key, load_in, save_in, transcript_path_in};
+    use crate::transcription::{Transcript, TranscriptSegment, TranscriptionProvider};
 
     fn fixture_transcript() -> Transcript {
         Transcript {
@@ -186,16 +223,26 @@ mod tests {
         let transcript = fixture_transcript();
         save_in(&store, &audio, &transcript).expect("save transcript");
         assert_eq!(
-            load_in(&store, &audio).expect("load transcript"),
+            load_in(&store, &audio, TranscriptionProvider::ElevenLabs).expect("load transcript"),
             Some(transcript.clone())
         );
         assert!(!audio.with_extension("json").exists());
 
-        let primary = store.join(format!("{}.json", audio_key(&audio).expect("audio key")));
+        let primary = transcript_path_in(&store, &audio, "elevenlabs").expect("transcript path");
         fs::rename(&primary, primary.with_extension("json.backup"))
             .expect("simulate interrupted update");
         assert_eq!(
-            load_in(&store, &audio).expect("load backup transcript"),
+            load_in(&store, &audio, TranscriptionProvider::ElevenLabs)
+                .expect("load backup transcript"),
+            Some(transcript.clone())
+        );
+
+        let provider_backup = primary.with_extension("json.backup");
+        let legacy = store.join(format!("{}.json", audio_key(&audio).expect("legacy key")));
+        fs::rename(provider_backup, legacy).expect("move transcript to legacy path");
+        assert_eq!(
+            load_in(&store, &audio, TranscriptionProvider::ElevenLabs)
+                .expect("load legacy transcript"),
             Some(transcript)
         );
 
@@ -215,6 +262,26 @@ mod tests {
         let second = audio_key(&audio).expect("second key");
 
         assert_ne!(first, second);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn providers_get_distinct_storage_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-transcript-provider-key-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create fixture directory");
+        let audio = root.join("meeting.m4a");
+        fs::write(&audio, b"audio fixture").expect("write audio fixture");
+
+        let elevenlabs = transcript_path_in(&root, &audio, "elevenlabs")
+            .expect("create ElevenLabs transcript path");
+        let assemblyai = transcript_path_in(&root, &audio, "assemblyai")
+            .expect("create AssemblyAI transcript path");
+        assert_ne!(elevenlabs, assemblyai);
+
         let _ = fs::remove_dir_all(root);
     }
 }

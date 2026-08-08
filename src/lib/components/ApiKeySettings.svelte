@@ -41,7 +41,15 @@
   <div class="section-heading">
     <div>
       <p class="step">Settings</p>
-      <h2>ElevenLabs APIキー</h2>
+      <h2>プロバイダー設定</h2>
+      <p class="help">文字起こしサービスごとに認証情報を管理します。</p>
+    </div>
+    <Badge variant="secondary">ElevenLabs</Badge>
+  </div>
+
+  <div class="credential-heading">
+    <div>
+      <h3>ElevenLabs APIキー</h3>
       <p class="help">キーはOSの暗号化機能で保護し、画面へ読み戻しません。</p>
     </div>
     {#if loading}

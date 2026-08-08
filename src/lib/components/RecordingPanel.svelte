@@ -16,6 +16,7 @@
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
   import { formatFileSize, formatRecordedAt } from "../format";
+  import { transcriptionProviderLabel } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
@@ -336,7 +337,9 @@
                   <strong>{recording.fileName}</strong>
                   <small>
                     {formatRecordedAt(recording.recordedAtUnixMs)} · {formatFileSize(recording.sizeBytes)}
-                    {#if recording.hasTranscript}<Badge variant="secondary">文字起こし済み</Badge>{/if}
+                    {#each recording.transcriptProviders as provider}
+                      <Badge variant="secondary">{transcriptionProviderLabel(provider)} 済み</Badge>
+                    {/each}
                   </small>
                 </span>
                 <span class="history-action">選択</span>

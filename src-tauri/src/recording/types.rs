@@ -123,7 +123,7 @@ pub struct RecordedAudioSummary {
     pub size_bytes: u64,
     pub recorded_at_unix_ms: u64,
     #[serde(default)]
-    pub has_transcript: bool,
+    pub transcript_providers: Vec<String>,
 }
 
 #[cfg(test)]

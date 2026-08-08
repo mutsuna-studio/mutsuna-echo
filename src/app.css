@@ -38,6 +38,7 @@ input {
 
 h1,
 h2,
+h3,
 p { margin-top: 0; }
 
 h1 {
@@ -51,6 +52,11 @@ h1 {
 h2 {
   margin-bottom: 0;
   font-size: 1.14rem;
+}
+
+h3 {
+  margin-bottom: 0;
+  font-size: 0.98rem;
 }
 
 .lead,
@@ -221,6 +227,60 @@ h2 {
   font-size: 0.86rem;
 }
 
+.transcription-settings {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.transcription-settings-heading { margin-bottom: 14px; }
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 12px;
+}
+
+.provider-field label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.provider-summary {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--muted);
+}
+
+.provider-summary span,
+.provider-summary small {
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+}
+
+.provider-action { margin-top: 14px; }
+
+.credential-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.transcript-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .transcript-heading { margin-bottom: 4px; }
 .segments { margin-top: 22px; }
 
@@ -288,5 +348,8 @@ h2 {
   .input-row > button { width: 100%; }
   .model { display: none; }
   .usage-grid,
-  .input-tabs { grid-template-columns: 1fr; }
+  .input-tabs,
+  .provider-grid { grid-template-columns: 1fr; }
+
+  .transcript-badges { justify-content: flex-start; }
 }

@@ -11,6 +11,7 @@
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
   import TranscriptView from "./lib/components/TranscriptView.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
+  import type { TranscriptionProviderId } from "./lib/providers";
   import type {
     SelectedAudioFile,
     Transcript,
@@ -29,6 +30,7 @@
   let usageLoading = $state(false);
   let recordingBusy = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
+  let transcriptionProvider = $state<TranscriptionProviderId>("elevenlabs");
   let transcript = $state<Transcript | null>(null);
   let transcriptRevision = $state(0);
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
@@ -38,7 +40,10 @@
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
-  const canTranscribe = $derived(hasApiKey && selectedAudio !== null && !busy);
+  const providerConfigured = $derived(
+    transcriptionProvider === "elevenlabs" && hasApiKey
+  );
+  const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
@@ -129,7 +134,9 @@
     transcribing = true;
     transcript = null;
     try {
-      const result = await invoke<TranscriptionResult>("transcribe_selected_audio");
+      const result = await invoke<TranscriptionResult>("transcribe_selected_audio", {
+        request: { provider: transcriptionProvider }
+      });
       transcript = result.transcript;
       if (transcript.segments.length > 0) {
         showSuccessToast("文字起こしが完了しました。");
@@ -154,13 +161,26 @@
     await restoreSelectedTranscript();
   }
 
-  async function restoreSelectedTranscript() {
+  async function restoreSelectedTranscript(
+    provider: TranscriptionProviderId = transcriptionProvider
+  ) {
     try {
-      transcript = await invoke<Transcript | null>("get_selected_transcript");
+      const restored = await invoke<Transcript | null>("get_selected_transcript", {
+        request: { provider }
+      });
+      if (provider === transcriptionProvider) transcript = restored;
     } catch (error) {
-      transcript = null;
-      showError(errorText(error));
+      if (provider === transcriptionProvider) {
+        transcript = null;
+        showError(errorText(error));
+      }
     }
+  }
+
+  async function changeTranscriptionProvider(provider: TranscriptionProviderId) {
+    transcriptionProvider = provider;
+    transcript = null;
+    if (selectedAudio) await restoreSelectedTranscript(provider);
   }
 
   function showMessage(nextMessage: string) {
@@ -194,16 +214,18 @@
 
   <AudioInputPanel
     {selectedAudio}
+    provider={transcriptionProvider}
     {selecting}
     {transcribing}
     {recordingBusy}
     {transcriptRevision}
     {busy}
     {recordingDisabled}
-    {hasApiKey}
+    {providerConfigured}
     {canTranscribe}
     onSelect={selectAudioFile}
     onTranscribe={transcribeAudio}
+    onProviderChange={changeTranscriptionProvider}
     onRecordedAudio={handleRecordedAudio}
     onRecordingBusyChange={(value) => recordingBusy = value}
     onMessage={showMessage}

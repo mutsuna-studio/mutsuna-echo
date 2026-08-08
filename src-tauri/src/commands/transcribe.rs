@@ -8,11 +8,11 @@ use std::{
 };
 
 use lofty::{config::ParseOptions, file::AudioFile, probe::Probe};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use crate::transcription::Transcript;
+use crate::transcription::{Transcript, TranscriptionProvider};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac"];
 const ELEVENLABS_MAX_FILE_SIZE: u64 = 5_000_000_000;
@@ -41,6 +41,18 @@ pub(crate) struct SelectedAudioFile {
 pub(crate) struct TranscriptionResult {
     transcript: Transcript,
     persistence_warning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptionRequest {
+    provider: TranscriptionProvider,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredTranscriptRequest {
+    provider: TranscriptionProvider,
 }
 
 pub(crate) fn describe_audio_path(path: &Path) -> Result<SelectedAudioFile, String> {
@@ -405,6 +417,7 @@ fn selected_file_path(selected: FilePath) -> Result<PathBuf, String> {
 pub(crate) async fn transcribe_selected_audio(
     app: AppHandle,
     state: State<'_, AudioSelectionState>,
+    request: TranscriptionRequest,
 ) -> Result<TranscriptionResult, String> {
     if state
         .transcribing
@@ -423,9 +436,13 @@ pub(crate) async fn transcribe_selected_audio(
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
 
     validate_audio_file(&path)?;
-    let api_key = crate::commands::api_key::load_api_key(&app)?;
 
-    let transcript = crate::transcription::elevenlabs::transcribe(&path, &api_key).await?;
+    let transcript = match request.provider {
+        TranscriptionProvider::ElevenLabs => {
+            let api_key = crate::commands::api_key::load_api_key(&app)?;
+            crate::transcription::elevenlabs::transcribe(&path, &api_key).await?
+        }
+    };
     let persistence_warning = crate::transcript_store::save(&app, &path, &transcript).err();
     Ok(TranscriptionResult {
         transcript,
@@ -437,6 +454,7 @@ pub(crate) async fn transcribe_selected_audio(
 pub(crate) fn get_selected_transcript(
     app: AppHandle,
     state: State<'_, AudioSelectionState>,
+    request: StoredTranscriptRequest,
 ) -> Result<Option<Transcript>, String> {
     let path = state
         .path
@@ -444,14 +462,16 @@ pub(crate) fn get_selected_transcript(
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
-    crate::transcript_store::load(&app, &path)
+    crate::transcript_store::load(&app, &path, request.provider)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Write, path::Path};
 
-    use super::{estimate_audio_cost, validate_audio_file, ELEVENLABS_STT_USD_PER_HOUR};
+    use super::{
+        estimate_audio_cost, validate_audio_file, TranscriptionRequest, ELEVENLABS_STT_USD_PER_HOUR,
+    };
 
     fn write_one_second_wav(path: &Path) {
         const SAMPLE_RATE: u32 = 8_000;
@@ -511,5 +531,21 @@ mod tests {
 
         assert_eq!(estimate.duration_ms, 1_000);
         assert!((estimate.estimated_cost_usd - ELEVENLABS_STT_USD_PER_HOUR / 3600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transcription_request_rejects_unknown_providers() {
+        assert!(
+            serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
+                "provider": "elevenlabs"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
+                "provider": "unknown"
+            }))
+            .is_err()
+        );
     }
 }

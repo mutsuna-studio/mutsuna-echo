@@ -2,23 +2,33 @@
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import { Card } from "@mutsuna/ui/card";
+  import { Label } from "@mutsuna/ui/label";
+  import { Select } from "@mutsuna/ui/select";
   import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
   import RecordingPanel from "./RecordingPanel.svelte";
   import { formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
+  import {
+    getTranscriptionProvider,
+    isTranscriptionProviderId,
+    transcriptionProviderOptions,
+    type TranscriptionProviderId
+  } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
 
   interface Props {
     selectedAudio: SelectedAudioFile | null;
+    provider: TranscriptionProviderId;
     selecting: boolean;
     transcribing: boolean;
     recordingBusy: boolean;
     transcriptRevision: number;
     busy: boolean;
     recordingDisabled: boolean;
-    hasApiKey: boolean;
+    providerConfigured: boolean;
     canTranscribe: boolean;
     onSelect: () => void;
     onTranscribe: () => void;
+    onProviderChange: (provider: TranscriptionProviderId) => void;
     onRecordedAudio: (audio: SelectedAudioFile) => void;
     onRecordingBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -27,16 +37,18 @@
 
   let {
     selectedAudio,
+    provider,
     selecting,
     transcribing,
     recordingBusy,
     transcriptRevision,
     busy,
     recordingDisabled,
-    hasApiKey,
+    providerConfigured,
     canTranscribe,
     onSelect,
     onTranscribe,
+    onProviderChange,
     onRecordedAudio,
     onRecordingBusyChange,
     onMessage,
@@ -44,6 +56,11 @@
   }: Props = $props();
 
   let inputMode = $state<"file" | "record">("file");
+  const providerDefinition = $derived(getTranscriptionProvider(provider));
+
+  function selectProvider(value: string) {
+    if (isTranscriptionProviderId(value)) onProviderChange(value);
+  }
 </script>
 
 <Card class="card transcription-card" aria-busy={selecting || transcribing}>
@@ -91,25 +108,46 @@
   {#if selectedAudio}
     <div class="cost-estimate">
       <div>
-        <span>推定コスト</span>
+        <span>{providerDefinition.label} {providerDefinition.modelLabel} の推定コスト</span>
         <strong>{formatEstimatedCost(selectedAudio.estimatedCostUsd)}</strong>
       </div>
       <small>
-        公開単価 ${selectedAudio.pricingRateUsdPerHour.toFixed(2)}/時間
+        {providerDefinition.pricingLabel} ${selectedAudio.pricingRateUsdPerHour.toFixed(2)}/時間
         （{selectedAudio.pricingVerifiedOn}確認）に基づく概算です。プラン内枠や請求時の丸めにより実際の請求額とは異なる場合があります。
       </small>
     </div>
   {/if}
 
-  <div class="action-row">
-    <div>
+  <div class="transcription-settings">
+    <div class="transcription-settings-heading">
       <p class="step">Step 2</p>
-      <p class="action-help">
-        {hasApiKey ? "日本語・話者分離・単語タイムスタンプ" : "先にAPIキーを設定してください"}
-      </p>
+      <h2>文字起こし設定</h2>
     </div>
-    <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>
-      {transcribing ? "文字起こし中…" : "文字起こし開始"}
-    </Button>
+    <div class="provider-grid">
+      <div class="provider-field">
+        <Label for="transcription-provider">プロバイダー</Label>
+        <Select
+          id="transcription-provider"
+          value={provider}
+          options={transcriptionProviderOptions}
+          onValueChange={selectProvider}
+          disabled={busy}
+          ariaLabel="文字起こしプロバイダー"
+        />
+      </div>
+      <div class="provider-summary">
+        <span>モデル</span>
+        <strong>{providerDefinition.modelLabel}</strong>
+        <small>{providerDefinition.capabilitySummary}</small>
+      </div>
+    </div>
+    <div class="action-row provider-action">
+      <p class="action-help">
+        {providerConfigured ? `${providerDefinition.label}で文字起こしします` : `${providerDefinition.label}のAPIキーを設定してください`}
+      </p>
+      <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>
+        {transcribing ? "文字起こし中…" : "文字起こし開始"}
+      </Button>
+    </div>
   </div>
 </Card>
