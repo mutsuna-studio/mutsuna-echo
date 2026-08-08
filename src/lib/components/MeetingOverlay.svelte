@@ -499,6 +499,15 @@
     pointer-events: none;
   }
 
+  :global(html.transparent-overlay) .glass-highlight {
+    inset: 0;
+    width: auto;
+    height: auto;
+    border-radius: inherit;
+    background: rgb(255 255 255 / 16%);
+    filter: none;
+  }
+
   .meeting-prompt,
   .recording-controller {
     position: relative;
