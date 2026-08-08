@@ -29,6 +29,7 @@
   const controllerSize = { width: 310, height: 158 };
   const snapStorageKey = "meeting-overlay-snap-position";
   const snapMargin = 20;
+  const snapSettleDelayMs = 32;
   const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
   type OverlaySnapPosition = (typeof snapPositions)[number];
 
@@ -159,7 +160,7 @@
     snapDebounceId = window.setTimeout(() => {
       snapDebounceId = undefined;
       void snapToNearestPosition().catch((cause) => { error = errorText(cause); });
-    }, 180);
+    }, snapSettleDelayMs);
   }
 
   async function closeOverlay() {
