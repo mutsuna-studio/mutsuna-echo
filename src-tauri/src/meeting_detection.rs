@@ -211,18 +211,33 @@ pub fn dismiss_meeting_overlay(state: tauri::State<'_, MeetingDetectionState>) {
 
 #[cfg(debug_assertions)]
 #[tauri::command]
-pub fn show_overlay_preview(
+pub async fn show_overlay_preview(
     app: AppHandle,
     state: tauri::State<'_, MeetingDetectionState>,
     mode: OverlayPreviewMode,
 ) -> Result<(), String> {
     state.set_preview_mode(Some(mode));
-    if let Err(error) = show_overlay(&app) {
+
+    // WebView2 can synchronously wait for window initialization inside `build()`.
+    // Running that work in an invoke handler blocks the main WebView as well and
+    // leaves both windows unpainted, so create/show the preview off the UI thread.
+    let preview_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        show_overlay(&preview_app)?;
+        preview_app
+            .emit(PREVIEW_CHANGED_EVENT, mode)
+            .map_err(|error| format!("プレビュー状態を通知できませんでした: {error}"))
+    })
+    .await
+    .map_err(|error| format!("オーバーレイの表示処理を待機できませんでした: {error}"))
+    .and_then(|result| result);
+
+    if let Err(error) = result {
         state.set_preview_mode(None);
         return Err(error);
     }
-    app.emit(PREVIEW_CHANGED_EVENT, mode)
-        .map_err(|error| format!("プレビュー状態を通知できませんでした: {error}"))
+
+    Ok(())
 }
 
 #[cfg(debug_assertions)]
