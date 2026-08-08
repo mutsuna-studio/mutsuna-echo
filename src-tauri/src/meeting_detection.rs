@@ -332,16 +332,13 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.focus = false;
     #[cfg(target_os = "windows")]
     {
-        // Acrylic is designed for transient surfaces such as this prompt. The
-        // transparent WebView lets the CSS tint remain readable over the effect.
+        // System Acrylic becomes opaque when its window is inactive. This
+        // overlay deliberately never takes focus, so the compositor only owns
+        // transparency and CSS owns the stable semi-transparent rounded surface.
         config.transparent = true;
         config.background_color = Some(tauri::utils::config::Color(0, 0, 0, 0));
         config.shadow = false;
-        config.window_effects = Some(
-            tauri::window::EffectsBuilder::new()
-                .effect(tauri::utils::WindowEffect::Acrylic)
-                .build(),
-        );
+        config.window_effects = None;
     }
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let scale = monitor.scale_factor();

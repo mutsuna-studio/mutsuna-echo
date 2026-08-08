@@ -418,7 +418,7 @@
         <div class="prompt-topline">
           <div class="brand-lockup">
             <span class="brand-mark"><AudioWaveform aria-hidden="true" /></span>
-            <div><strong>Mutsuna Echo</strong><small>会議を検出しました</small></div>
+            <div><strong>Mutsuna Echo</strong><small>会議を検出</small></div>
           </div>
           <div class="prompt-badges">
             <Badge variant="secondary">{shownDetection.providerLabel}</Badge>
@@ -435,12 +435,12 @@
           </div>
         </div>
 
-        {#if error}
-          <p class="meeting-error" role="alert">{error}</p>
-        {:else}
-          <p class="meeting-consent"><ShieldCheck aria-hidden="true" />参加者の同意を確認してください。自動では開始しません。</p>
-        {/if}
-        <div class="meeting-actions">
+        <div class="prompt-footer">
+          {#if error}
+            <p class="meeting-error" role="alert">{error}</p>
+          {:else}
+            <p class="meeting-consent"><ShieldCheck aria-hidden="true" />同意を確認して手動で開始</p>
+          {/if}
           <Button size="sm" type="button" icon={Mic} onclick={startRecording} loading={starting} disabled={loading}>
             {starting ? "準備中…" : "録音を開始"}
           </Button>
@@ -509,6 +509,7 @@
   .meeting-prompt { display: grid; gap: 8px; }
 
   .prompt-topline,
+  .prompt-footer,
   .recording-summary,
   .controller-footer {
     display: flex;
@@ -538,7 +539,7 @@
   }
 
   .brand-lockup strong { font-size: 0.76rem; letter-spacing: -0.01em; }
-  .brand-lockup small { color: var(--muted-foreground); font-size: 0.66rem; }
+  .brand-lockup small { color: var(--muted-foreground); font-size: 0.66rem; white-space: nowrap; }
 
   .brand-mark {
     display: grid;
@@ -586,6 +587,7 @@
   }
 
   .meeting-consent {
+    min-width: 0;
     gap: 6px;
     margin: -2px 0 0;
     color: var(--muted-foreground);
@@ -595,6 +597,8 @@
 
   .meeting-consent :global(svg) { width: 13px; height: 13px; flex: none; color: var(--primary); }
   .meeting-error {
+    min-width: 0;
+    flex: 1;
     margin: 0;
     overflow: hidden;
     color: var(--destructive);
@@ -602,7 +606,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .meeting-actions { display: flex; justify-content: flex-end; }
+  .prompt-footer > :global(button) { flex: none; }
 
   .recording-controller { display: grid; min-width: 0; gap: 11px; }
   .phase-state { gap: 6px; color: var(--destructive); }
