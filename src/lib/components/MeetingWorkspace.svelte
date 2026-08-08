@@ -63,6 +63,7 @@
   let detailTab = $state<"transcript" | "info">("transcript");
   let playbackPositionMs = $state(0);
   let timelineFollowRequestId = $state(0);
+  let detailContentElement = $state<HTMLElement | null>(null);
   let seekRequest = $state.raw<AudioSeekRequest | null>(null);
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
@@ -166,10 +167,16 @@
       <button class:active={detailTab === "info"} type="button" role="tab" aria-selected={detailTab === "info"} onclick={() => detailTab = "info"}>会議情報</button>
     </div>
 
-    <div class="detail-content">
+    <div class="detail-content" bind:this={detailContentElement}>
       {#if detailTab === "transcript"}
         {#if transcript}
-          <TranscriptView {transcript} currentPositionMs={playbackPositionMs} followRequestId={timelineFollowRequestId} onSeek={seekFromTranscript} />
+          <TranscriptView
+            {transcript}
+            currentPositionMs={playbackPositionMs}
+            followRequestId={timelineFollowRequestId}
+            scrollContainer={detailContentElement}
+            onSeek={seekFromTranscript}
+          />
         {:else}
           <div class="empty-transcript">
             <FileAudio aria-hidden="true" />

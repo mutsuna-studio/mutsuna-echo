@@ -8,14 +8,15 @@
     transcript: Transcript;
     currentPositionMs: number;
     followRequestId: number;
+    scrollContainer: HTMLElement | null;
     onSeek: (positionMs: number) => void;
   };
 
-  let { transcript, currentPositionMs, followRequestId, onSeek }: Props = $props();
+  let { transcript, currentPositionMs, followRequestId, scrollContainer, onSeek }: Props = $props();
 
   const SEGMENT_PAGE_SIZE = 300;
   let visibleCount = $state(SEGMENT_PAGE_SIZE);
-  let segmentElements = $state.raw<Array<HTMLButtonElement | undefined>>([]);
+  let transcriptElement = $state<HTMLElement | null>(null);
   const visibleSegments = $derived(transcript.segments.slice(0, visibleCount));
   const remainingSegments = $derived(Math.max(0, transcript.segments.length - visibleSegments.length));
   const activeIndex = $derived(segmentIndexAt(transcript, currentPositionMs));
@@ -23,37 +24,42 @@
   $effect(() => {
     transcript;
     visibleCount = SEGMENT_PAGE_SIZE;
-    segmentElements = [];
   });
 
   $effect(() => {
     const index = activeIndex;
     followRequestId;
-    if (index < 0) return;
+    const container = scrollContainer;
+    const root = transcriptElement;
+    if (index < 0 || !container || !root) return;
+    let cancelled = false;
+    let frame = 0;
     if (index >= visibleCount) {
       visibleCount = Math.ceil((index + 1) / SEGMENT_PAGE_SIZE) * SEGMENT_PAGE_SIZE;
     }
     void tick().then(() => {
-      const element = segmentElements[index];
-      if (!element) return;
-      scrollToSegment(element);
+      if (cancelled) return;
+      frame = requestAnimationFrame(() => {
+        const element = root.querySelector<HTMLElement>(`[data-segment-index="${index}"]`);
+        if (!element) return;
+        scrollToSegment(container, element);
+      });
     });
+    return () => {
+      cancelled = true;
+      if (frame) cancelAnimationFrame(frame);
+    };
   });
 
-  function scrollToSegment(element: HTMLElement) {
-    const candidate = element.closest(".detail-content");
-    if (!(candidate instanceof HTMLElement)) {
-      element.scrollIntoView({ behavior: "auto", block: "center" });
-      return;
-    }
-    const viewport = candidate.getBoundingClientRect();
+  function scrollToSegment(container: HTMLElement, element: HTMLElement) {
+    const viewport = container.getBoundingClientRect();
     const segment = element.getBoundingClientRect();
-    const centeredTop = candidate.scrollTop
+    const centeredTop = container.scrollTop
       + segment.top
       - viewport.top
-      - (candidate.clientHeight - segment.height) / 2;
-    const maximum = Math.max(0, candidate.scrollHeight - candidate.clientHeight);
-    candidate.scrollTo({ top: Math.min(Math.max(0, centeredTop), maximum), behavior: "auto" });
+      - (container.clientHeight - segment.height) / 2;
+    const maximum = Math.max(0, container.scrollHeight - container.clientHeight);
+    container.scrollTop = Math.round(Math.min(Math.max(0, centeredTop), maximum));
   }
 
   function segmentIndexAt(value: Transcript, positionMs: number): number {
@@ -75,7 +81,7 @@
   }
 </script>
 
-<section class="transcript-view" aria-label="文字起こし結果">
+<section class="transcript-view" bind:this={transcriptElement} aria-label="文字起こし結果">
   {#if transcript.segments.length > 0}
     <div class="segments">
       {#each visibleSegments as segment, index (`${segment.speaker}-${segment.startMs}-${index}`)}
@@ -83,7 +89,7 @@
           class:active={index === activeIndex}
           class="segment"
           type="button"
-          bind:this={segmentElements[index]}
+          data-segment-index={index}
           aria-current={index === activeIndex ? "true" : undefined}
           aria-label={`${formatTimestamp(segment.startMs)}、${segment.speaker}へ移動`}
           onclick={() => onSeek(segment.startMs)}
