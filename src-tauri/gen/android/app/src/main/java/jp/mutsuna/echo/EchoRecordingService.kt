@@ -151,7 +151,7 @@ class EchoRecordingService : Service() {
 
       RecordingBridge.update { put("phase", "finalizing"); put("microphoneLevel", 0.0); put("systemLevel", 0.0) }
       mic?.stop(); system?.stop()
-      micWriter.close(); micWriter = null
+      micWriter?.close(); micWriter = null
       systemWriter?.close(); systemWriter = null
       mixedWriter.close(); mixedWriter = null
       if (cancel.get()) {

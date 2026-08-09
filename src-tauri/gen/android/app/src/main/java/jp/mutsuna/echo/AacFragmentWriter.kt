@@ -12,12 +12,11 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.channels.Channels
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal class AacFragmentWriter(file: File, private val bitrate: Int) : AutoCloseable {
   private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-  private val muxer = FragmentedMp4Muxer.Builder(Channels.newChannel(FileOutputStream(file)))
+  private val muxer = FragmentedMp4Muxer.Builder(FileOutputStream(file))
     .setFragmentDurationMs(2_000)
     .setSampleCopyingEnabled(true)
     .build()
@@ -42,7 +41,8 @@ internal class AacFragmentWriter(file: File, private val bitrate: Int) : AutoClo
       val inputIndex = codec.dequeueInputBuffer(10_000)
       if (inputIndex < 0) { drain(false); continue }
       val input = codec.getInputBuffer(inputIndex) ?: error("AAC入力バッファを取得できません。")
-      input.clear().order(ByteOrder.LITTLE_ENDIAN)
+      input.clear()
+      input.order(ByteOrder.LITTLE_ENDIAN)
       val count = minOf(samples.size - offset, input.remaining() / 2)
       repeat(count) { input.putShort(samples[offset + it]) }
       val ptsUs = framesWritten * 1_000_000L / SAMPLE_RATE
