@@ -185,8 +185,14 @@ jobs:
           if [ "$MACOS_SIGNING_MODE" = "adhoc" ]; then
             entitlements_path="$RUNNER_TEMP/mutsuna-echo-entitlements.plist"
             codesign --display --entitlements "$entitlements_path" "$executable"
-            entitlement_value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$entitlements_path" 2>/dev/null || true)"
-            if [ "$entitlement_value" != "true" ]; then
+            if grep -F -A 1 '<key>com.apple.security.cs.disable-library-validation</key>' "$entitlements_path" | grep -Fq '<true/>'; then
+              entitlement_present=true
+            elif grep -F -A 2 '[Key] com.apple.security.cs.disable-library-validation' "$entitlements_path" | grep -Fq '[Bool] true'; then
+              entitlement_present=true
+            else
+              entitlement_present=false
+            fi
+            if [ "$entitlement_present" != "true" ]; then
               cat "$entitlements_path" || true
               echo "::error::The ad-hoc application is missing the Disable Library Validation entitlement."
               exit 1
