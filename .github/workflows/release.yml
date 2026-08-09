@@ -31,7 +31,7 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             args: --target aarch64-apple-darwin --bundles app,dmg
-            adhocArgs: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.macos-adhoc.conf.json
+            adhocArgs: --target aarch64-apple-darwin --bundles app,dmg
             environment: release-macos
 
     runs-on: ${{ matrix.platform }}
@@ -91,6 +91,7 @@ jobs:
         run: |
           case "$MACOS_SIGNING_MODE" in
             adhoc)
+              cp src-tauri/tauri.macos-adhoc.conf.json src-tauri/tauri.macos.conf.json
               echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
               ;;
             developer-id)
