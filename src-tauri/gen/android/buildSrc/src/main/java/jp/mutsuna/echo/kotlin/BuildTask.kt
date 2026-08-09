@@ -16,12 +16,9 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        // Keep the generated Android project portable across local Windows
-        // development and Linux CI runners. NODE_BINARY remains available for
-        // environments that need to select a specific Node.js executable.
-        val executable = System.getenv("NODE_BINARY")
-            ?.takeIf { it.isNotBlank() }
-            ?: "node"
+        // Match Tauri's pnpm Android template so Gradle resolves the package
+        // manager from PATH on both local Windows and Linux CI runners.
+        val executable = "pnpm"
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
