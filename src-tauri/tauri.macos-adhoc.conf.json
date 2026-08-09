@@ -5,7 +5,8 @@
       "infoPlist": "Info.plist",
       "frameworks": [
         "target/release/libsherpa-onnx-c-api.dylib",
-        "target/release/libonnxruntime.dylib"
+        "target/release/libonnxruntime.dylib",
+        "target/release/libonnxruntime.1.27.0.dylib"
       ],
       "entitlements": "Entitlements.adhoc.plist"
     }

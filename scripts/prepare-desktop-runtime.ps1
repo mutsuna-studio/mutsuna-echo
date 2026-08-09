@@ -56,7 +56,8 @@ if ($Platform -eq "windows") {
 } else {
     $requiredFiles = @(
         "libsherpa-onnx-c-api.dylib",
-        "libonnxruntime.dylib"
+        "libonnxruntime.dylib",
+        "libonnxruntime.1.27.0.dylib"
     )
     $requiredNativeSdkFiles = $requiredFiles
 
