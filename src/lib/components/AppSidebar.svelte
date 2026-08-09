@@ -4,6 +4,7 @@
   import Settings from "@lucide/svelte/icons/settings";
   import AudioLines from "@lucide/svelte/icons/audio-lines";
   import { Button } from "@mutsuna/ui/button";
+  import * as Sidebar from "@mutsuna/ui/sidebar";
 
   type AppSection = "meetings" | "new" | "settings";
 
@@ -13,31 +14,40 @@
   };
 
   let { section, onNavigate }: Props = $props();
+  const sidebar = Sidebar.useSidebar();
+
+  function navigateTo(nextSection: AppSection) {
+    onNavigate(nextSection);
+    sidebar.setOpenMobile(false);
+  }
 </script>
 
-<aside class="app-sidebar" aria-label="メインナビゲーション">
-  <div class="brand" aria-label="Mutsuna Echo">
-    <span class="brand-mark"><AudioLines aria-hidden="true" /></span>
-    <strong>Mutsuna Echo</strong>
+<Sidebar.Root class="app-sidebar" collapsible="offcanvas">
+  <div class="app-sidebar-content" aria-label="メインナビゲーション">
+    <div class="brand" aria-label="Mutsuna Echo">
+      <span class="brand-mark"><AudioLines aria-hidden="true" /></span>
+      <strong>Mutsuna Echo</strong>
+    </div>
+
+    <Button class="new-meeting" size="lg" type="button" icon={Mic} onclick={() => navigateTo("new")}>
+      新しい録音
+    </Button>
+
+    <nav>
+      <button class:active={section === "meetings"} type="button" aria-current={section === "meetings" ? "page" : undefined} onclick={() => navigateTo("meetings")}>
+        <CalendarDays aria-hidden="true" /><span>会議</span>
+      </button>
+      <button class:active={section === "settings"} type="button" aria-current={section === "settings" ? "page" : undefined} onclick={() => navigateTo("settings")}>
+        <Settings aria-hidden="true" /><span>設定</span>
+      </button>
+    </nav>
   </div>
-
-  <Button class="new-meeting" size="lg" type="button" icon={Mic} onclick={() => onNavigate("new")}>
-    新しい録音
-  </Button>
-
-  <nav>
-    <button class:active={section === "meetings"} type="button" aria-current={section === "meetings" ? "page" : undefined} onclick={() => onNavigate("meetings")}>
-      <CalendarDays aria-hidden="true" /><span>会議</span>
-    </button>
-    <button class:active={section === "settings"} type="button" aria-current={section === "settings" ? "page" : undefined} onclick={() => onNavigate("settings")}>
-      <Settings aria-hidden="true" /><span>設定</span>
-    </button>
-  </nav>
-</aside>
+</Sidebar.Root>
 
 <style>
-  .app-sidebar {
+  .app-sidebar-content {
     display: flex;
+    height: 100%;
     min-width: 0;
     flex-direction: column;
     gap: 26px;
@@ -100,19 +110,6 @@
   nav button :global(svg) { width: 18px; height: 18px; flex: none; stroke-width: 1.8; }
 
   @media (max-width: 780px) {
-    .app-sidebar {
-      flex-direction: row;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 12px;
-      border-right: 0;
-      border-bottom: 1px solid var(--border);
-    }
-    .brand { margin-right: auto; padding: 0; }
-    .brand strong { display: none; }
-    :global(.new-meeting) { width: auto; }
-    nav { display: flex; }
-    nav button { width: 40px; padding: 0; justify-content: center; }
-    nav button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+    .app-sidebar-content { padding: 20px 14px 18px; }
   }
 </style>

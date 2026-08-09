@@ -9,6 +9,7 @@
     showSuccessToast,
     showWarningToast
   } from "@mutsuna/ui/sonner";
+  import { AdminShellFrame } from "@mutsuna/ui/admin-shell-frame";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
@@ -115,6 +116,9 @@
   );
   const hasApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
+  );
+  const pageTitle = $derived(
+    section === "meetings" ? "会議" : section === "new" ? "新しいMeeting" : "設定"
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
@@ -889,22 +893,25 @@
 
 <ThemeProvider theme={echoTheme}>
   <Toaster position="top-right" closeButton />
-  <main class:with-library={section === "meetings" && libraryOpen} class="app-shell">
-    <AppSidebar {section} onNavigate={navigate} />
+  <AdminShellFrame {pageTitle} contentClass="p-0 overflow-hidden" headerClass="bg-background">
+    {#snippet sidebar()}
+      <AppSidebar {section} onNavigate={navigate} />
+    {/snippet}
 
-    {#if section === "meetings" && libraryOpen}
-      <MeetingLibrary
-        {meetings}
-        selectedMeetingId={selectedAudio?.meetingId ?? null}
-        loading={meetingsLoading}
-        busy={meetingBusy || busy}
-        onSelect={selectMeeting}
-        onRefresh={refreshMeetings}
-        onClose={() => libraryOpen = false}
-      />
-    {/if}
+    <div class:with-library={section === "meetings" && libraryOpen} class="app-shell-content">
+      {#if section === "meetings" && libraryOpen}
+        <MeetingLibrary
+          {meetings}
+          selectedMeetingId={selectedAudio?.meetingId ?? null}
+          loading={meetingsLoading}
+          busy={meetingBusy || busy}
+          onSelect={selectMeeting}
+          onRefresh={refreshMeetings}
+          onClose={() => libraryOpen = false}
+        />
+      {/if}
 
-    <div class="app-content">
+      <div class="app-content">
       {#if pendingActionProblem}
         <PendingActionNotice
           action={pendingActionProblem.action}
@@ -1040,8 +1047,9 @@
           </div>
         </section>
       {/if}
+      </div>
     </div>
-  </main>
+  </AdminShellFrame>
 
   {#if OverlayPreviewControls}
     <div class="dev-preview-dock"><OverlayPreviewControls /></div>
