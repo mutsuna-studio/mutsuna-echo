@@ -48,6 +48,10 @@ jobs:
     name: Rust tests and Clippy
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # Runtime DLLs are release bundle resources. CI compiles and tests the
+      # application but does not create an installer, so do not require them.
+      TAURI_CONFIG: '{"bundle":{"resources":null}}'
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
