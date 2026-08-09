@@ -36,8 +36,6 @@ function Invoke-NativeRuntimeBuild {
     }
 }
 
-Invoke-NativeRuntimeBuild
-
 $profileDirectory = if ([string]::IsNullOrWhiteSpace($Target)) {
     Join-Path $tauriDirectory "target/release"
 } else {
@@ -50,12 +48,17 @@ if ($Platform -eq "windows") {
         "onnxruntime_providers_shared.dll",
         "sherpa-onnx-c-api.dll"
     )
+    $requiredNativeSdkFiles = @(
+        "sherpa-onnx-c-api.lib",
+        "onnxruntime.lib"
+    )
     $bundleSourceDirectory = $profileDirectory
 } else {
     $requiredFiles = @(
         "libsherpa-onnx-c-api.dylib",
         "libonnxruntime.dylib"
     )
+    $requiredNativeSdkFiles = $requiredFiles
 
     # tauri.macos.conf.json also supports native Apple Silicon builds where
     # Cargo writes directly to target/release. Keep that stable bundle path and
@@ -64,20 +67,38 @@ if ($Platform -eq "windows") {
     New-Item -ItemType Directory -Path $bundleSourceDirectory -Force | Out-Null
 }
 
+$resolvedTargetDirectory = [System.IO.Path]::GetFullPath((Join-Path $tauriDirectory "target"))
+$nativeCacheDirectory = Join-Path $resolvedTargetDirectory "sherpa-onnx-prebuilt"
+$nativeSdkReady = Test-Path -LiteralPath $nativeCacheDirectory -PathType Container
+if ($nativeSdkReady) {
+    foreach ($fileName in $requiredNativeSdkFiles) {
+        $matchingSdkFile = Get-ChildItem -LiteralPath $nativeCacheDirectory -Recurse -File -Filter $fileName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $matchingSdkFile) {
+            $nativeSdkReady = $false
+            break
+        }
+    }
+}
+
+if ($nativeSdkReady) {
+    Invoke-NativeRuntimeBuild
+} else {
+    Write-Host "The cached native SDK is incomplete; using an isolated sherpa-onnx-sys build."
+}
+
 $missingRuntimeFiles = @(
     $requiredFiles | Where-Object {
         -not (Test-Path -LiteralPath (Join-Path $profileDirectory $_) -PathType Leaf)
     }
 )
 
-if ($missingRuntimeFiles.Count -gt 0) {
+if (-not $nativeSdkReady -or $missingRuntimeFiles.Count -gt 0) {
     # rust-cache intentionally filters non-Cargo artifacts. A restored
     # sherpa-onnx-sys build can therefore look current while its copied shared
     # libraries are absent. Build the dependency in an isolated target so its
     # build script must recreate the runtime files without clearing the shared
     # Cargo cache.
     Write-Host "Native runtime files are missing after the cached build; regenerating sherpa-onnx-sys."
-    $resolvedTargetDirectory = [System.IO.Path]::GetFullPath((Join-Path $tauriDirectory "target"))
     $isolatedTargetDirectory = Join-Path $resolvedTargetDirectory "native-runtime-prep"
     if (Test-Path -LiteralPath $isolatedTargetDirectory) {
         $resolvedIsolatedTargetDirectory = [System.IO.Path]::GetFullPath($isolatedTargetDirectory)
@@ -110,7 +131,6 @@ if ($missingRuntimeFiles.Count -gt 0) {
     # tree. Restore it as well as the runtime DLLs/dylibs; Windows needs the
     # import .lib files from its lib directory during tests and app builds.
     $isolatedNativeCacheDirectory = Join-Path $isolatedTargetDirectory "sherpa-onnx-prebuilt"
-    $nativeCacheDirectory = Join-Path $resolvedTargetDirectory "sherpa-onnx-prebuilt"
     if (-not (Test-Path -LiteralPath $isolatedNativeCacheDirectory -PathType Container)) {
         throw "The isolated native SDK was not generated: $isolatedNativeCacheDirectory"
     }
