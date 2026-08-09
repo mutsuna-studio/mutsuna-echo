@@ -76,3 +76,54 @@ cd src-tauri
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 ```
+
+## リリースとアプリ内更新
+
+`v0.1.0`のようなバージョンタグをpushすると、GitHub ActionsがWindowsとApple Silicon版macOSのデスクトップ版をビルドし、下書きのGitHub Releaseを作成します。Intel Macは配布対象外です。Windowsの配布物はNSISセットアップ（`.exe`）だけです。Releaseを公開すると、アプリは署名済みの`latest.json`を使って更新を検出します。
+
+同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存します。Google Playへの自動アップロードは行わず、初回はPlay Consoleから手動で登録します。
+
+リリースJobはGitHub Environmentsの承認後にだけ署名用Secretへアクセスします。次のEnvironmentを作成し、Required reviewersと`v*`タグのみ許可を設定してください。承認可能なMaintainerが2人以上になったら自己承認も禁止してください（現在の1人構成で禁止するとリリース不能になります）。
+
+| Environment | 登録するGitHub Actions Secrets |
+| --- | --- |
+| `release-windows` | `TAURI_SIGNING_PRIVATE_KEY`、必要な場合は`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
+| `release-macos` | Tauri署名鍵一式とApple署名・Notarization用Secret一式 |
+| `release-android` | AndroidアップロードKeystore用Secret一式 |
+
+初回リリース前に、該当Environmentへ次のSecretを登録してください。Repository Secretへまとめて登録しないでください。
+
+- `TAURI_SIGNING_PRIVATE_KEY`: `.tauri/mutsuna-echo.key`の内容
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: パスワード付きの更新署名鍵を使う場合のみ登録します
+- macOS配布用のApple署名・Notarization Secrets: `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_API_ISSUER`、`APPLE_API_KEY`
+- `APPLE_API_PRIVATE_KEY`: App Store Connectの`.p8`秘密鍵をbase64化した値
+- `ANDROID_KEYSTORE_BASE64`: Androidアップロード用`.jks`をbase64化した値
+- `ANDROID_KEYSTORE_PASSWORD`: Keystoreのパスワード
+- `ANDROID_KEY_ALIAS`: アップロードキーのalias
+- `ANDROID_KEY_PASSWORD`: アップロードキーのパスワード
+
+`.tauri/`はgitignore済みです。更新署名鍵を失うと既存ユーザーへ更新を配信できなくなるため、`.tauri/mutsuna-echo.key`はパスワード管理された保管先へバックアップしてください。公開鍵だけが`tauri.conf.json`へ含まれます。
+
+AndroidのアップロードKeystoreも失うと同じアプリとして更新を公開できなくなるため、GitHub Secretsとは別の安全な場所へバックアップしてください。`keystore.properties`とKeystore本体はリポジトリへコミットしません。
+
+アップロードKeystoreは初回だけ手元で作成します。
+
+```powershell
+keytool -genkeypair -v -keystore mutsuna-echo-upload.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("mutsuna-echo-upload.jks"))
+```
+
+2行目の出力を`ANDROID_KEYSTORE_BASE64`へ登録します。AAB生成後はCI内で`jarsigner`による署名検証を通過した成果物だけをArtifactとして保存します。
+
+## OSSリポジトリのCIと権限
+
+Pull Requestと`main`へのpushでは、`.github/workflows/ci.yml`がSecretを使わずにフロントエンド検査・ビルドとRustテスト・Clippyを実行します。Workflowの既定権限は`contents: read`で、リリース作成Jobだけが`contents: write`を持ちます。Fork由来のコードを署名用Secretへ触れさせないため、`pull_request_target`でPRのコードを実行しないでください。
+
+Public化時にはGitHub側でも次を設定してください。
+
+- `main`はPR、CI成功、Code Owner reviewを必須にし、force pushを禁止する
+- `v*`タグはリリース管理者だけが作成・削除できるRulesetで保護する
+- ActionsのFork pull request workflowにはwrite tokenを渡さない
+- `.github/CODEOWNERS`でWorkflowと署名設定の変更に`@mutsuna-jp`のレビューを必須にする
+
+外部Actionは完全なコミットSHAへ固定し、`.github/dependabot.yml`で週次更新します。

@@ -1,0 +1,7 @@
+# Security-sensitive automation and release configuration require maintainer review.
+/.github/workflows/ @mutsuna-jp
+/.github/dependabot.yml @mutsuna-jp
+/.github/CODEOWNERS @mutsuna-jp
+/src-tauri/tauri.conf.json @mutsuna-jp
+/src-tauri/tauri.windows.conf.json @mutsuna-jp
+/src-tauri/gen/android/app/build.gradle.kts @mutsuna-jp
