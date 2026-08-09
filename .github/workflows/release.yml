@@ -90,6 +90,7 @@ jobs:
           case "$MACOS_SIGNING_MODE" in
             adhoc)
               echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+              echo 'TAURI_CONFIG={"bundle":{"macOS":{"entitlements":"Entitlements.adhoc.plist"}}}' >> "$GITHUB_ENV"
               ;;
             developer-id)
               for name in \
@@ -166,6 +167,41 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      - name: Verify macOS bundle and launch
+        if: startsWith(matrix.name, 'macOS')
+        shell: bash
+        env:
+          MACOS_SIGNING_MODE: ${{ vars.MACOS_SIGNING_MODE || 'adhoc' }}
+        run: |
+          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mutsuna-echo.app"
+          executable="$app_path/Contents/MacOS/mutsuna-echo"
+          launch_log="$RUNNER_TEMP/mutsuna-echo-launch.log"
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
+          if [ "$MACOS_SIGNING_MODE" = "adhoc" ]; then
+            entitlements="$(codesign --display --entitlements :- "$executable" 2>&1)"
+            if ! grep -A1 '<key>com.apple.security.cs.disable-library-validation</key>' <<<"$entitlements" | grep -q '<true/>'; then
+              echo "$entitlements"
+              echo "::error::The ad-hoc application is missing the Disable Library Validation entitlement."
+              exit 1
+            fi
+          fi
+
+          "$executable" >"$launch_log" 2>&1 &
+          app_pid=$!
+          sleep 5
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            exit_code=1
+            wait "$app_pid" || exit_code=$?
+            cat "$launch_log"
+            echo "::error::The packaged macOS application exited during the launch smoke test."
+            exit "$exit_code"
+          fi
+
+          kill "$app_pid" 2>/dev/null || true
+          wait "$app_pid" 2>/dev/null || true
 
   build-android:
     name: Build signed Android AAB
