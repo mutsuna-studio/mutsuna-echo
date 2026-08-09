@@ -5,6 +5,7 @@ pub(crate) mod elevenlabs;
 mod local;
 pub(crate) mod local_models;
 pub(crate) mod providers;
+pub(crate) mod soniox;
 pub mod types;
 #[cfg(desktop)]
 pub(crate) mod vad;
@@ -15,7 +16,9 @@ use std::path::Path;
 
 use tauri::AppHandle;
 
-pub(crate) use types::segments_from_tokens;
+pub(crate) use types::{
+    normalize_transcript_for_display, repair_inferred_token_ends, segments_from_tokens,
+};
 pub use types::{
     TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
     TranscriptionProvider,
@@ -34,6 +37,13 @@ pub(crate) async fn transcribe(
             }
             let api_key = crate::credentials::load_api_key(app)?;
             elevenlabs::transcribe(audio_path, &api_key).await
+        }
+        TranscriptionProvider::Soniox => {
+            if model_id.is_some_and(|model| model != soniox::MODEL_ID) {
+                return Err("選択したSonioxモデルには対応していません。".into());
+            }
+            let api_key = crate::credentials::load(app, crate::credentials::CredentialId::Soniox)?;
+            soniox::transcribe(audio_path, &api_key).await
         }
         TranscriptionProvider::Local => {
             let installed = local_models::list_installed(app)?;

@@ -9,12 +9,14 @@ mod pending_action;
 mod recording;
 #[cfg(desktop)]
 mod resident;
+mod summary;
 mod transcript_store;
 pub mod transcription;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .register_asynchronous_uri_scheme_protocol(
             "mutsuna-audio",
             |context, request, responder| {
@@ -29,6 +31,7 @@ pub fn run() {
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
     let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(meeting_detection::MeetingDetectionState::default())
         .manage(resident::ResidentState::default())
         .plugin(meeting_detection::init())
@@ -39,6 +42,8 @@ pub fn run() {
             commands::api_key::save_api_key,
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,
+            commands::api_key::save_provider_api_key,
+            commands::api_key::delete_provider_api_key,
             transcription::providers::get_transcription_providers,
             transcription::providers::list_installed_local_stt_models,
             transcription::local_models::list_local_stt_model_catalog,
@@ -59,7 +64,17 @@ pub fn run() {
             commands::transcribe::get_transcription_session,
             audio_waveform::get_selected_audio_waveform,
             commands::transcribe::transcribe_selected_audio,
-            commands::transcribe::get_selected_transcript,
+            commands::transcribe::get_selected_transcription_history,
+            commands::transcribe::get_selected_transcription_run,
+            commands::transcribe::select_transcription_run,
+            commands::transcribe::update_transcript_document,
+            commands::transcribe::reset_transcript_document,
+            summary::get_summary_providers,
+            summary::list_summary_agent_install_status,
+            summary::install_summary_agent,
+            summary::delete_summary_agent,
+            summary::get_selected_summary,
+            summary::generate_selected_summary,
             commands::usage::get_transcription_usage,
             commands::recording::get_recording_capabilities,
             commands::recording::get_recording_status,

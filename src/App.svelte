@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { check as checkForAppUpdate } from "@tauri-apps/plugin-updater";
   import { tick, type Component } from "svelte";
   import {
     Toaster,
@@ -10,12 +11,14 @@
   } from "@mutsuna/ui/sonner";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
+  import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import AppSidebar from "./lib/components/AppSidebar.svelte";
   import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
   import LocalModelManager from "./lib/components/LocalModelManager.svelte";
   import MeetingLibrary from "./lib/components/MeetingLibrary.svelte";
   import MeetingWorkspace from "./lib/components/MeetingWorkspace.svelte";
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
+  import SummaryAgentManager from "./lib/components/SummaryAgentManager.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
     getTranscriptionProvider,
@@ -25,18 +28,31 @@
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
+  import type { SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
   import type {
     SelectedAudioFile,
-    Transcript,
+    EditableTranscript,
+    TranscriptionHistory,
     TranscriptionProgress,
     TranscriptionResult,
+    TranscriptionRunDetail,
+    TranscriptionRunSummary,
+    TranscriptSegmentTextChange,
+    TranscriptSaveState,
     TranscriptionSession,
     TranscriptionUsage
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const TRANSCRIPTION_PROVIDER_STORAGE_KEY = "mutsuna-echo.transcription-provider";
+  const SUMMARY_PROVIDER_STORAGE_KEY = "mutsuna-echo.summary-provider";
+  const SUMMARY_MODEL_STORAGE_KEY = "mutsuna-echo.summary-model";
+  const SUMMARY_CUSTOM_MODEL_STORAGE_KEY = "mutsuna-echo.summary-custom-model";
   type AppSection = "meetings" | "new" | "settings";
+  type TranscriptReplacementUndo = {
+    transcriptionId: string;
+    changes: TranscriptSegmentTextChange[];
+  };
 
   function savedTranscriptionProvider(): TranscriptionProviderId {
     try {
@@ -60,11 +76,22 @@
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let usageLoading = $state(false);
   let recordingBusy = $state(false);
+  let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>([]);
-  // Transcriptは読み取り専用の大きな値なので、深いProxy化を避ける。
-  let transcript = $state.raw<Transcript | null>(null);
+  let summaryProviders = $state.raw<SummaryProviderDefinition[]>([]);
+  let summaryProviderId = $state(localStorage.getItem(SUMMARY_PROVIDER_STORAGE_KEY) ?? "codex");
+  let summaryModelId = $state(localStorage.getItem(SUMMARY_MODEL_STORAGE_KEY) ?? "default");
+  let summaryCustomModelId = $state(localStorage.getItem(SUMMARY_CUSTOM_MODEL_STORAGE_KEY) ?? "");
+  let summaryStatus = $state.raw<SummaryStatus | null>(null);
+  let summaryGenerating = $state(false);
+  // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
+  let transcript = $state.raw<EditableTranscript | null>(null);
+  let transcriptionRuns = $state.raw<TranscriptionRunSummary[]>([]);
+  let selectedTranscriptionId = $state<string | null>(null);
+  let selectedTranscriptionRun = $state.raw<TranscriptionRunDetail | null>(null);
+  let transcriptSaveState = $state<TranscriptSaveState>("saved");
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let usageError = $state("");
   let lastErrorToast = $state("");
@@ -75,14 +102,22 @@
   let pendingActionProblem = $state<{ action: PendingAction | null; message: string } | null>(null);
   let pendingActionBusy = $state(false);
   let OverlayPreviewControls = $state<Component | null>(null);
+  let transcriptSaveTimer: number | null = null;
+  let transcriptSavePromise: Promise<void> | null = null;
+  let transcriptReplacementUndo = $state.raw<TranscriptReplacementUndo | null>(null);
+  const pendingTranscriptChanges = new Map<string, string>();
+  const pendingSpeakerLabelChanges = new Map<string, string>();
 
-  const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy);
-  const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing);
+  const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy || updating);
+  const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || updating);
   const currentProvider = $derived(
     getTranscriptionProvider(transcriptionProviders, transcriptionProvider)
   );
   const hasApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
+  );
+  const apiKeyProviders = $derived(
+    transcriptionProviders.filter((provider) => provider.setup === "apiKey")
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
@@ -128,6 +163,10 @@
     );
   }
 
+  async function refreshSummaryProviders() {
+    summaryProviders = await invoke<SummaryProviderDefinition[]>("get_summary_providers");
+  }
+
   async function refreshMeetings() {
     if (meetingsLoading) return;
     meetingsLoading = true;
@@ -144,10 +183,12 @@
     if (meetingBusy) return;
     meetingBusy = true;
     try {
+      await flushTranscriptEdits();
+      if (transcriptSaveState === "error") return;
       selectedAudio = await invoke<SelectedAudioFile>("select_meeting_audio", {
         meetingId: meeting.meetingId
       });
-      await restoreSelectedTranscript();
+      await restoreTranscriptionHistory();
       section = "meetings";
     } catch (error) {
       showError(errorText(error));
@@ -167,8 +208,35 @@
   }
 
   function navigate(nextSection: AppSection) {
+    if (updating) {
+      showWarningToast("更新処理中です。", "完了してアプリが再起動するまでお待ちください。");
+      return;
+    }
     section = nextSection;
     if (nextSection === "meetings") libraryOpen = true;
+  }
+
+  async function checkForAvailableUpdate() {
+    if (import.meta.env.DEV || /Android|iPhone|iPad/i.test(navigator.userAgent)) return;
+    try {
+      const update = await checkForAppUpdate({ timeout: 15_000 });
+      if (!update) return;
+      const version = update.version;
+      await update.close();
+      showSuccessToast(
+        `Mutsuna Echo ${version}を利用できます。`,
+        "設定の「アプリの更新」からインストールできます。"
+      );
+    } catch {
+      // 起動時の自動確認は通信不能でも作業を妨げない。手動確認では詳細を表示する。
+    }
+  }
+
+  async function prepareForUpdate(): Promise<boolean> {
+    await flushTranscriptEdits();
+    if (transcriptSaveState !== "error") return true;
+    showWarningToast("文字起こしを保存できていません。", "編集内容を保存してから更新してください。");
+    return false;
   }
 
   function receivePendingAction(action: PendingAction): Promise<void> {
@@ -188,11 +256,13 @@
   }
 
   async function applyPendingAction(action: PendingAction) {
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error") throw new Error("文字起こしの編集を保存してから再試行してください。");
     const audio = await invoke<SelectedAudioFile>("receive_pending_action", {
       actionId: action.id
     });
     selectedAudio = audio;
-    await restoreSelectedTranscript();
+    await restoreTranscriptionHistory();
     section = "new";
     await focusTranscriptionAction();
     await invoke("acknowledge_pending_action", { actionId: action.id });
@@ -276,8 +346,9 @@
             if (!cancelled) transcriptionProgress = payload;
           })
         ]);
-        const [nextProviders, session, pendingResult, nextMeetings] = await Promise.all([
+        const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
+          invoke<SummaryProviderDefinition[]>("get_summary_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
@@ -289,6 +360,7 @@
         ]);
         if (cancelled) return;
         transcriptionProviders = nextProviders;
+        summaryProviders = nextSummaryProviders;
         meetings = nextMeetings;
         selectedAudio = session.selectedAudio;
         transcribing = session.transcribing;
@@ -299,10 +371,11 @@
         } else if (pendingResult.action) {
           await handlePendingAction(pendingResult.action);
         } else if (selectedAudio) {
-          await restoreSelectedTranscript();
+          await restoreTranscriptionHistory();
         }
         if (hasApiKey) await refreshUsage();
         void ensureStandardVad();
+        void checkForAvailableUpdate();
       } catch (error) {
         showError(errorText(error));
       } finally {
@@ -332,7 +405,7 @@
         selectedAudio = session.selectedAudio;
         transcribing = false;
         if (selectedAudio) {
-          await restoreSelectedTranscript();
+          await restoreTranscriptionHistory();
           await refreshMeetings();
         }
         await refreshUsage();
@@ -349,18 +422,31 @@
     };
   });
 
-  async function saveApiKey(apiKey: string) {
+  $effect(() => {
+    const flushBeforeLeaving = () => void flushTranscriptEdits();
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") void flushTranscriptEdits();
+    };
+    window.addEventListener("beforeunload", flushBeforeLeaving);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("beforeunload", flushBeforeLeaving);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  });
+
+  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string) {
     saving = true;
 
     try {
-      const modelsAccessible = await invoke<boolean>("save_api_key", { apiKey });
+      const modelsAccessible = await invoke<boolean>("save_provider_api_key", { providerId, apiKey });
       await refreshProviders();
       if (modelsAccessible) {
         showSuccessToast("APIキーを確認し、安全に保存しました。");
       } else {
         showWarningToast("制限付きAPIキーとして保存しました。", "各権限は利用時に確認します。");
       }
-      await refreshUsage();
+      if (providerId === "elevenlabs") await refreshUsage();
     } catch (error) {
       showError(errorText(error));
     } finally {
@@ -368,13 +454,15 @@
     }
   }
 
-  async function deleteApiKey() {
+  async function deleteApiKey(providerId: TranscriptionProviderId) {
     deleting = true;
     try {
-      await invoke("delete_api_key");
+      await invoke("delete_provider_api_key", { providerId });
       await refreshProviders();
-      transcriptionUsage = null;
-      usageError = "";
+      if (providerId === "elevenlabs") {
+        transcriptionUsage = null;
+        usageError = "";
+      }
       showSuccessToast("APIキーを削除しました。");
     } catch (error) {
       showError(errorText(error));
@@ -386,10 +474,12 @@
   async function selectAudioFile() {
     selecting = true;
     try {
+      await flushTranscriptEdits();
+      if (transcriptSaveState === "error") return;
       const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
       if (selected) {
         selectedAudio = selected;
-        await restoreSelectedTranscript();
+        await restoreTranscriptionHistory();
       }
     } catch (error) {
       showError(errorText(error));
@@ -401,9 +491,10 @@
   async function transcribeAudio() {
     if (!canTranscribe) return;
 
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error") return;
     transcribing = true;
     transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
-    transcript = null;
     try {
       const result = await invoke<TranscriptionResult>("transcribe_selected_audio", {
         request: {
@@ -411,8 +502,25 @@
           modelId: currentProvider?.modelId ?? null
         }
       });
-      transcript = result.transcript;
-      if (transcript.segments.length > 0) {
+      if (result.run) {
+        setSelectedTranscriptionRun(result.run);
+        await refreshTranscriptionHistoryList();
+      } else {
+        selectedTranscriptionRun = null;
+        selectedTranscriptionId = null;
+        transcript = {
+          ...result.transcript,
+          speakerLabels: [...new Set(result.transcript.segments.map((segment) => segment.speaker))]
+            .sort()
+            .map((speaker) => ({ speaker, label: speaker, edited: false })),
+          segments: result.transcript.segments.map((segment) => ({
+            ...segment,
+            segmentId: "",
+            edited: false
+          }))
+        };
+      }
+      if (result.transcript.segments.length > 0) {
         showSuccessToast("文字起こしが完了しました。");
       } else {
         showWarningToast("文字起こしは完了しました。", "発話を検出できませんでした。");
@@ -421,7 +529,7 @@
         showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
       }
       await refreshMeetings();
-      await refreshUsage();
+      if (transcriptionProvider === "elevenlabs") await refreshUsage();
       section = "meetings";
     } catch (error) {
       showError(errorText(error));
@@ -445,24 +553,308 @@
   }
 
   async function handleRecordedAudio(audio: SelectedAudioFile) {
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error") return;
     selectedAudio = audio;
-    await restoreSelectedTranscript();
+    await restoreTranscriptionHistory();
     await refreshMeetings();
   }
 
-  async function restoreSelectedTranscript(
-    provider: TranscriptionProviderId = transcriptionProvider
-  ) {
+  function clearTranscriptEditingState() {
+    if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
+    transcriptSaveTimer = null;
+    pendingTranscriptChanges.clear();
+    pendingSpeakerLabelChanges.clear();
+    transcriptReplacementUndo = null;
+    transcriptSaveState = "saved";
+  }
+
+  function setSelectedTranscriptionRun(run: TranscriptionRunDetail | null) {
+    clearTranscriptEditingState();
+    selectedTranscriptionRun = run;
+    selectedTranscriptionId = run?.transcriptionId ?? null;
+    transcript = run?.transcript ?? null;
+    summaryStatus = null;
+  }
+
+  async function refreshSummaryStatus() {
+    if (!selectedAudio || !selectedTranscriptionRun) {
+      summaryStatus = null;
+      return;
+    }
     try {
-      const restored = await invoke<Transcript | null>("get_selected_transcript", {
-        request: { provider }
+      summaryStatus = await invoke<SummaryStatus>("get_selected_summary", {
+        meetingId: selectedAudio.meetingId
       });
-      if (provider === transcriptionProvider) transcript = restored;
     } catch (error) {
-      if (provider === transcriptionProvider) {
-        transcript = null;
-        showError(errorText(error));
+      summaryStatus = null;
+      showError(errorText(error));
+    }
+  }
+
+  function changeSummaryProvider(value: string) {
+    summaryProviderId = value;
+    localStorage.setItem(SUMMARY_PROVIDER_STORAGE_KEY, value);
+    const provider = summaryProviders.find((candidate) => candidate.id === value);
+    summaryModelId = provider?.models.find((model) => model.isDefault)?.id ?? provider?.models[0]?.id ?? "default";
+    localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, summaryModelId);
+  }
+
+  function changeSummaryModel(value: string) {
+    summaryModelId = value;
+    localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, value);
+  }
+
+  function changeSummaryCustomModel(value: string) {
+    summaryCustomModelId = value;
+    localStorage.setItem(SUMMARY_CUSTOM_MODEL_STORAGE_KEY, value);
+  }
+
+  async function generateSummary() {
+    if (!selectedAudio || !selectedTranscriptionRun || summaryGenerating) return;
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error") return;
+    summaryGenerating = true;
+    try {
+      summaryStatus = await invoke<SummaryStatus>("generate_selected_summary", {
+        request: {
+          meetingId: selectedAudio.meetingId,
+          providerId: summaryProviderId,
+          modelId: summaryModelId === "custom" ? summaryCustomModelId.trim() : summaryModelId
+        }
+      });
+      showSuccessToast("会議ノートを生成しました。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      summaryGenerating = false;
+    }
+  }
+
+  async function refreshTranscriptionHistoryList() {
+    if (!selectedAudio) {
+      transcriptionRuns = [];
+      selectedTranscriptionId = null;
+      return;
+    }
+    const history = await invoke<TranscriptionHistory>("get_selected_transcription_history");
+    transcriptionRuns = history.runs;
+    selectedTranscriptionId = history.selectedTranscriptionId;
+  }
+
+  async function restoreTranscriptionHistory() {
+    try {
+      const history = await invoke<TranscriptionHistory>("get_selected_transcription_history");
+      transcriptionRuns = history.runs;
+      selectedTranscriptionId = history.selectedTranscriptionId;
+      const run = history.selectedTranscriptionId
+        ? await invoke<TranscriptionRunDetail | null>("get_selected_transcription_run")
+        : null;
+      setSelectedTranscriptionRun(run);
+      await refreshSummaryStatus();
+    } catch (error) {
+      transcriptionRuns = [];
+      setSelectedTranscriptionRun(null);
+      showError(errorText(error));
+    }
+  }
+
+  async function selectTranscriptionRun(transcriptionId: string) {
+    if (transcriptionId === selectedTranscriptionId) return;
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error") return;
+    try {
+      const run = await invoke<TranscriptionRunDetail>("select_transcription_run", {
+        request: { transcriptionId }
+      });
+      setSelectedTranscriptionRun(run);
+      await refreshSummaryStatus();
+    } catch (error) {
+      showError(errorText(error));
+    }
+  }
+
+  function editTranscriptSegment(segmentId: string, text: string) {
+    if (!transcript || !selectedTranscriptionRun || !segmentId) return;
+    transcriptReplacementUndo = null;
+    transcript = {
+      ...transcript,
+      segments: transcript.segments.map((segment) =>
+        segment.segmentId === segmentId ? { ...segment, text, edited: true } : segment
+      )
+    };
+    pendingTranscriptChanges.set(segmentId, text);
+    transcriptSaveState = "unsaved";
+    if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
+    transcriptSaveTimer = window.setTimeout(() => void flushTranscriptEdits(), 500);
+  }
+
+  function queueTranscriptChanges(changes: readonly TranscriptSegmentTextChange[]) {
+    if (!transcript || !selectedTranscriptionRun || changes.length === 0) return;
+    const replacements = new Map(changes.map((change) => [change.segmentId, change.text]));
+    transcript = {
+      ...transcript,
+      segments: transcript.segments.map((segment) => {
+        const text = replacements.get(segment.segmentId);
+        return text == null ? segment : { ...segment, text, edited: true };
+      })
+    };
+    for (const change of changes) pendingTranscriptChanges.set(change.segmentId, change.text);
+    transcriptSaveState = "unsaved";
+    if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
+    transcriptSaveTimer = null;
+  }
+
+  function transcriptSaveFailed(): boolean {
+    return transcriptSaveState === "error";
+  }
+
+  async function replaceTranscriptSegments(changes: TranscriptSegmentTextChange[]): Promise<boolean> {
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error" || !transcript || !selectedTranscriptionRun) return false;
+
+    const currentSegments = new Map(transcript.segments.map((segment) => [segment.segmentId, segment.text]));
+    const effectiveChanges = changes.filter((change) => {
+      const current = currentSegments.get(change.segmentId);
+      return current != null && current !== change.text;
+    });
+    if (effectiveChanges.length === 0) return false;
+
+    transcriptReplacementUndo = {
+      transcriptionId: selectedTranscriptionRun.transcriptionId,
+      changes: effectiveChanges.map((change) => ({
+        segmentId: change.segmentId,
+        text: currentSegments.get(change.segmentId)!
+      }))
+    };
+    queueTranscriptChanges(effectiveChanges);
+    await flushTranscriptEdits();
+    if (transcriptSaveFailed()) {
+      transcriptReplacementUndo = null;
+      return false;
+    }
+    showSuccessToast(effectiveChanges.length === 1 ? "文字起こしを置換しました。" : "文字起こしを一括置換しました。");
+    return true;
+  }
+
+  async function undoTranscriptReplacement(): Promise<void> {
+    const undo = transcriptReplacementUndo;
+    if (!undo) return;
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error" || selectedTranscriptionRun?.transcriptionId !== undo.transcriptionId) return;
+    transcriptReplacementUndo = null;
+    queueTranscriptChanges(undo.changes);
+    await flushTranscriptEdits();
+    if (!transcriptSaveFailed()) showSuccessToast("一括置換を元に戻しました。");
+  }
+
+  function editSpeakerLabel(speaker: string, label: string) {
+    if (!transcript || !selectedTranscriptionRun) return;
+    transcript = {
+      ...transcript,
+      speakerLabels: transcript.speakerLabels.map((entry) =>
+        entry.speaker === speaker
+          ? { ...entry, label, edited: label.trim() !== "" && label.trim() !== speaker }
+          : entry
+      )
+    };
+    pendingSpeakerLabelChanges.set(speaker, label);
+    transcriptSaveState = "unsaved";
+    if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
+    transcriptSaveTimer = window.setTimeout(() => void flushTranscriptEdits(), 500);
+  }
+
+  async function flushTranscriptEdits(): Promise<void> {
+    if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
+    transcriptSaveTimer = null;
+    if (transcriptSavePromise) {
+      await transcriptSavePromise;
+      if ((pendingTranscriptChanges.size > 0 || pendingSpeakerLabelChanges.size > 0)
+        && transcriptSaveState !== "error") {
+        return flushTranscriptEdits();
       }
+      return;
+    }
+    const run = selectedTranscriptionRun;
+    if (!run || (pendingTranscriptChanges.size === 0 && pendingSpeakerLabelChanges.size === 0)) return;
+    const snapshot = new Map(pendingTranscriptChanges);
+    const speakerSnapshot = new Map(pendingSpeakerLabelChanges);
+    pendingTranscriptChanges.clear();
+    pendingSpeakerLabelChanges.clear();
+    transcriptSaveState = "saving";
+    transcriptSavePromise = (async () => {
+      try {
+        const saved = await invoke<TranscriptionRunDetail>("update_transcript_document", {
+          request: {
+            transcriptionId: run.transcriptionId,
+            expectedRevision: run.revision,
+            changes: [...snapshot].map(([segmentId, text]) => ({ segmentId, text })),
+            speakerLabels: [...speakerSnapshot].map(([speaker, label]) => ({ speaker, label }))
+          }
+        });
+        if (selectedTranscriptionRun?.transcriptionId === saved.transcriptionId) {
+          const newerChanges = new Map(pendingTranscriptChanges);
+          const newerSpeakerLabels = new Map(pendingSpeakerLabelChanges);
+          selectedTranscriptionRun = saved;
+          transcript = {
+            ...saved.transcript,
+            speakerLabels: saved.transcript.speakerLabels.map((entry) => {
+              const newerLabel = newerSpeakerLabels.get(entry.speaker);
+              return newerLabel == null
+                ? entry
+                : { ...entry, label: newerLabel, edited: newerLabel.trim() !== "" && newerLabel.trim() !== entry.speaker };
+            }),
+            segments: saved.transcript.segments.map((segment) => {
+              const newerText = newerChanges.get(segment.segmentId);
+              return newerText == null ? segment : { ...segment, text: newerText, edited: true };
+            })
+          };
+          selectedTranscriptionId = saved.transcriptionId;
+          transcriptSaveState = newerChanges.size > 0 || newerSpeakerLabels.size > 0 ? "unsaved" : "saved";
+          if (summaryStatus?.summary) {
+            summaryStatus = { ...summaryStatus, currentRevision: saved.revision, stale: summaryStatus.summary.sourceRevision !== saved.revision };
+          }
+        }
+        await refreshTranscriptionHistoryList();
+      } catch (error) {
+        for (const [segmentId, text] of snapshot) {
+          if (!pendingTranscriptChanges.has(segmentId)) pendingTranscriptChanges.set(segmentId, text);
+        }
+        for (const [speaker, label] of speakerSnapshot) {
+          if (!pendingSpeakerLabelChanges.has(speaker)) pendingSpeakerLabelChanges.set(speaker, label);
+        }
+        transcriptSaveState = "error";
+        showError(errorText(error));
+      } finally {
+        transcriptSavePromise = null;
+        if ((pendingTranscriptChanges.size > 0 || pendingSpeakerLabelChanges.size > 0)
+          && transcriptSaveState !== "error") {
+          transcriptSaveTimer = window.setTimeout(() => void flushTranscriptEdits(), 500);
+        }
+      }
+    })();
+    return transcriptSavePromise;
+  }
+
+  async function resetTranscriptDocument() {
+    const run = selectedTranscriptionRun;
+    if (!run || !run.edited) return;
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error" || !selectedTranscriptionRun) return;
+    if (!window.confirm("この文字起こしの編集内容を破棄し、モデルの出力へ戻しますか？")) return;
+    try {
+      const reset = await invoke<TranscriptionRunDetail>("reset_transcript_document", {
+        request: {
+          transcriptionId: selectedTranscriptionRun.transcriptionId,
+          expectedRevision: selectedTranscriptionRun.revision
+        }
+      });
+      setSelectedTranscriptionRun(reset);
+      await refreshSummaryStatus();
+      await refreshTranscriptionHistoryList();
+      showSuccessToast("モデルの出力へ戻しました。");
+    } catch (error) {
+      showError(errorText(error));
     }
   }
 
@@ -473,8 +865,6 @@
     } catch {
       // 選択はこのセッションでは維持できるため、ストレージ利用不可は無視する。
     }
-    transcript = null;
-    if (selectedAudio) await restoreSelectedTranscript(provider);
   }
 
   function showMessage(nextMessage: string) {
@@ -530,6 +920,16 @@
           {selectedAudio}
           meeting={selectedMeeting}
           {transcript}
+          runs={transcriptionRuns}
+          {selectedTranscriptionId}
+          selectedRun={selectedTranscriptionRun}
+          saveState={transcriptSaveState}
+          {summaryStatus}
+          {summaryProviders}
+          {summaryProviderId}
+          summaryModelId={summaryModelId}
+          summaryCustomModelId={summaryCustomModelId}
+          summaryGenerating={summaryGenerating}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
           providerLabel={currentProvider?.label ?? "プロバイダーを確認中"}
@@ -541,6 +941,18 @@
           onOpenLibrary={() => libraryOpen = true}
           onTranscribe={transcribeAudio}
           onProviderChange={changeTranscriptionProvider}
+          onRunChange={selectTranscriptionRun}
+          onEditSegment={editTranscriptSegment}
+          onEditSpeakerLabel={editSpeakerLabel}
+          onReplaceSegments={replaceTranscriptSegments}
+          canUndoReplacement={transcriptReplacementUndo?.transcriptionId === selectedTranscriptionId}
+          onUndoReplacement={undoTranscriptReplacement}
+          onFlushEdits={flushTranscriptEdits}
+          onResetTranscript={resetTranscriptDocument}
+          onSummaryProviderChange={changeSummaryProvider}
+          onSummaryModelChange={changeSummaryModel}
+          onSummaryCustomModelChange={changeSummaryCustomModel}
+          onGenerateSummary={generateSummary}
           onReveal={revealMeeting}
           onCreate={() => section = "new"}
           onOpenSettings={() => section = "settings"}
@@ -567,7 +979,6 @@
             onSelect={selectAudioFile}
             onTranscribe={transcribeAudio}
             onProviderChange={changeTranscriptionProvider}
-            onProvidersChanged={refreshProviders}
             onRecordedAudio={handleRecordedAudio}
             onRecordingBusyChange={(value) => recordingBusy = value}
             onMessage={showMessage}
@@ -579,8 +990,19 @@
           <header class="page-header">
             <p>SETTINGS</p>
             <h1>設定</h1>
-            <span>文字起こしプロバイダー、ローカルモデル、利用状況を管理します。</span>
+            <span>アプリ更新、文字起こし、要約エージェント、ローカルモデル、利用状況を管理します。</span>
           </header>
+          <div class="settings-section">
+            <div class="settings-section-heading">
+              <h2>Mutsuna Echo</h2>
+              <p>新しいバージョンを安全に確認し、アプリ内からインストールします。</p>
+            </div>
+            <AppUpdateManager
+              disabled={busy && !updating}
+              onBeforeInstall={prepareForUpdate}
+              onBusyChange={(value) => updating = value}
+            />
+          </div>
           <div class="settings-section">
             <div class="settings-section-heading">
               <h2>ローカル文字起こし</h2>
@@ -588,18 +1010,34 @@
             </div>
             <LocalModelManager disabled={busy} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
           </div>
+          <div class="settings-section">
+            <div class="settings-section-heading">
+              <h2>AI会議ノート</h2>
+              <p>要約に使用するACPエージェントを任意で追加します。</p>
+            </div>
+            <SummaryAgentManager disabled={busy} onChanged={refreshSummaryProviders} onMessage={showMessage} onError={showError} />
+          </div>
           {#if hasApiKey}
             <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
           {/if}
-          <ApiKeySettings
-            {loading}
-            {saving}
-            {deleting}
-            {hasApiKey}
-            {busy}
-            onSave={saveApiKey}
-            onDelete={deleteApiKey}
-          />
+          <div class="settings-section">
+            <div class="settings-section-heading">
+              <h2>クラウド文字起こし</h2>
+              <p>サービスごとに認証情報を管理します。</p>
+            </div>
+            {#each apiKeyProviders as provider (provider.id)}
+              <ApiKeySettings
+                {provider}
+                {loading}
+                {saving}
+                {deleting}
+                hasApiKey={provider.configured}
+                {busy}
+                onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
+                onDelete={() => deleteApiKey(provider.id)}
+              />
+            {/each}
+          </div>
         </section>
       {/if}
     </div>

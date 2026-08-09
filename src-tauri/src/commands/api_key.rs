@@ -44,21 +44,46 @@ async fn validate_api_key(api_key: &SecretString) -> Result<bool, String> {
     }
 }
 
+async fn validate_provider_api_key(
+    credential: crate::credentials::CredentialId,
+    api_key: &SecretString,
+) -> Result<bool, String> {
+    match credential {
+        crate::credentials::CredentialId::ElevenLabs => validate_api_key(api_key).await,
+        crate::credentials::CredentialId::Soniox => {
+            crate::transcription::soniox::validate_api_key(api_key).await?;
+            Ok(true)
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn save_provider_api_key(
+    app: AppHandle,
+    provider_id: String,
+    api_key: String,
+) -> Result<bool, String> {
+    let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
+    let received_api_key = SecretString::from(api_key);
+    let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
+    if api_key.expose_secret().is_empty() {
+        return Err("APIキーを入力してください。".into());
+    }
+    let fully_accessible = validate_provider_api_key(credential, &api_key).await?;
+    crate::credentials::save(&app, credential, &api_key)?;
+    Ok(fully_accessible)
+}
+
+#[tauri::command]
+pub(crate) fn delete_provider_api_key(app: AppHandle, provider_id: String) -> Result<(), String> {
+    let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
+    crate::credentials::delete(&app, credential)
+}
+
 /// Validate and store the API key in the operating system's credential store.
 #[tauri::command]
 pub(crate) async fn save_api_key(app: AppHandle, api_key: String) -> Result<bool, String> {
-    let received_api_key = SecretString::from(api_key);
-    let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
-
-    if api_key.expose_secret().is_empty() {
-        return Err("APIキーを入力してください。".to_string());
-    }
-
-    let models_accessible = validate_api_key(&api_key).await?;
-
-    crate::credentials::save_api_key(&app, &api_key)?;
-
-    Ok(models_accessible)
+    save_provider_api_key(app, "elevenlabs".into(), api_key).await
 }
 
 /// Report whether a key is configured without returning the secret to the UI.
@@ -70,7 +95,7 @@ pub(crate) fn has_api_key(app: AppHandle) -> Result<bool, String> {
 /// Remove the saved API key from the operating system's credential store.
 #[tauri::command]
 pub(crate) fn delete_api_key(app: AppHandle) -> Result<(), String> {
-    crate::credentials::delete_api_key(&app)
+    delete_provider_api_key(app, "elevenlabs".into())
 }
 
 /// Load the key for Rust-side ElevenLabs requests. Never expose this via Tauri.

@@ -4,16 +4,19 @@ use serde::{Deserialize, Serialize};
 pub enum TranscriptionProvider {
     #[serde(rename = "elevenlabs")]
     ElevenLabs,
+    #[serde(rename = "soniox")]
+    Soniox,
     #[serde(rename = "local")]
     Local,
 }
 
 impl TranscriptionProvider {
-    pub const ALL: [Self; 2] = [Self::ElevenLabs, Self::Local];
+    pub const ALL: [Self; 3] = [Self::ElevenLabs, Self::Soniox, Self::Local];
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::ElevenLabs => "elevenlabs",
+            Self::Soniox => "soniox",
             Self::Local => "local",
         }
     }
@@ -91,8 +94,67 @@ struct SegmentBuilder {
 }
 
 const SEGMENT_GAP_MS: u64 = 800;
+const INFERRED_SEGMENT_GAP_MS: u64 = 2_500;
 const MAX_SEGMENT_DURATION_MS: u64 = 30_000;
 const MAX_SEGMENT_CHARACTERS: usize = 160;
+const MAX_INFERRED_TOKEN_DURATION_MS: u64 = 1_000;
+const MAX_ORPHAN_CHARACTERS: usize = 1;
+const MAX_ORPHAN_DURATION_MS: u64 = 1_500;
+const MAX_ORPHAN_MERGE_GAP_MS: u64 = 3_000;
+
+/// Repairs missing or implausibly long inferred token ends without modifying
+/// provider- or alignment-authored boundaries.
+pub(crate) fn repair_inferred_token_ends(
+    tokens: &mut [TranscriptToken],
+    timeline_end_ms: Option<u64>,
+) -> bool {
+    let mut changed = false;
+    for index in 0..tokens.len() {
+        if tokens[index].end_time_source != Some(TokenTimeSource::Inferred) {
+            continue;
+        }
+        let Some(start_ms) = tokens[index].start_ms else {
+            continue;
+        };
+        let next_start_ms = tokens
+            .get(index + 1)
+            .and_then(|token| token.start_ms)
+            .filter(|next| *next > start_ms);
+        let existing_end_ms = tokens[index].end_ms.filter(|end| *end > start_ms);
+        let upper_bound = start_ms.saturating_add(MAX_INFERRED_TOKEN_DURATION_MS);
+        let repaired_end_ms = next_start_ms
+            .or(existing_end_ms)
+            .or(timeline_end_ms.filter(|end| *end > start_ms))
+            .map(|end| end.min(upper_bound))
+            .unwrap_or(start_ms);
+        if tokens[index].end_ms != Some(repaired_end_ms) {
+            tokens[index].end_ms = Some(repaired_end_ms);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Rebuilds display segments from provider-neutral tokens. This can be run
+/// when loading stored transcripts, so segmentation improvements do not
+/// require another STT request.
+pub(crate) fn normalize_transcript_for_display(transcript: &mut Transcript) -> bool {
+    if transcript.tokens.is_empty() {
+        return false;
+    }
+    let timeline_end_ms = transcript
+        .segments
+        .iter()
+        .map(|segment| segment.end_ms)
+        .max();
+    let mut changed = repair_inferred_token_ends(&mut transcript.tokens, timeline_end_ms);
+    let segments = segments_from_tokens(&transcript.tokens);
+    if transcript.segments != segments {
+        transcript.segments = segments;
+        changed = true;
+    }
+    changed
+}
 
 /// Builds readable segments without discarding token-level timing.
 pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<TranscriptSegment> {
@@ -114,7 +176,7 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
             current.end_ms
         };
         let gap_threshold = if inferred_end {
-            SEGMENT_GAP_MS + 400
+            INFERRED_SEGMENT_GAP_MS
         } else {
             SEGMENT_GAP_MS
         };
@@ -159,7 +221,61 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         }
     }
     finish_segment(&mut current, &mut segments);
+    merge_orphan_segments(segments)
+}
+
+fn merge_orphan_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+    let mut index = 0;
+    while index < segments.len() {
+        if !is_orphan_segment(&segments[index]) {
+            index += 1;
+            continue;
+        }
+        let previous_gap = index.checked_sub(1).and_then(|previous| {
+            same_speaker(&segments[previous], &segments[index]).then(|| {
+                segments[index]
+                    .start_ms
+                    .saturating_sub(segments[previous].end_ms)
+            })
+        });
+        let next_gap = segments.get(index + 1).and_then(|next| {
+            same_speaker(&segments[index], next)
+                .then(|| next.start_ms.saturating_sub(segments[index].end_ms))
+        });
+        let merge_previous = previous_gap
+            .filter(|gap| *gap <= MAX_ORPHAN_MERGE_GAP_MS)
+            .filter(|gap| next_gap.is_none_or(|next| *gap <= next));
+        if merge_previous.is_some() {
+            let orphan = segments.remove(index);
+            let previous = &mut segments[index - 1];
+            previous.end_ms = previous.end_ms.max(orphan.end_ms);
+            previous.text.push_str(&orphan.text);
+            index = index.saturating_sub(1);
+            continue;
+        }
+        if next_gap.is_some_and(|gap| gap <= MAX_ORPHAN_MERGE_GAP_MS) {
+            let orphan = segments.remove(index);
+            let next = &mut segments[index];
+            next.start_ms = next.start_ms.min(orphan.start_ms);
+            next.text.insert_str(0, &orphan.text);
+            continue;
+        }
+        index += 1;
+    }
     segments
+}
+
+fn is_orphan_segment(segment: &TranscriptSegment) -> bool {
+    segment.text.chars().count() <= MAX_ORPHAN_CHARACTERS
+        && segment.end_ms.saturating_sub(segment.start_ms) <= MAX_ORPHAN_DURATION_MS
+        && !segment
+            .text
+            .trim_end()
+            .ends_with(['。', '！', '？', '!', '?'])
+}
+
+fn same_speaker(left: &TranscriptSegment, right: &TranscriptSegment) -> bool {
+    left.speaker == right.speaker
 }
 
 fn finish_segment(builder: &mut SegmentBuilder, segments: &mut Vec<TranscriptSegment>) {
@@ -182,7 +298,10 @@ fn finish_segment(builder: &mut SegmentBuilder, segments: &mut Vec<TranscriptSeg
 
 #[cfg(test)]
 mod tests {
-    use super::{segments_from_tokens, TokenSpeakerSource, TokenTimeSource, TranscriptToken};
+    use super::{
+        normalize_transcript_for_display, repair_inferred_token_ends, segments_from_tokens,
+        TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+    };
 
     fn token(text: &str, start_ms: u64, end_ms: u64, speaker: Option<&str>) -> TranscriptToken {
         TranscriptToken {
@@ -220,5 +339,73 @@ mod tests {
         let segments = segments_from_tokens(&tokens);
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[1].start_ms, 1_200);
+    }
+
+    #[test]
+    fn inferred_timestamps_use_a_less_aggressive_silence_boundary() {
+        let mut tokens = vec![
+            token("短い", 0, 0, None),
+            token("続きです", 2_000, 2_400, None),
+        ];
+        for token in &mut tokens {
+            token.end_time_source = Some(TokenTimeSource::Inferred);
+        }
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "短い続きです");
+    }
+
+    #[test]
+    fn inferred_timestamps_still_split_on_long_silence() {
+        let mut tokens = vec![token("前半", 0, 0, None), token("後半", 3_000, 3_400, None)];
+        for token in &mut tokens {
+            token.end_time_source = Some(TokenTimeSource::Inferred);
+        }
+        assert_eq!(segments_from_tokens(&tokens).len(), 2);
+    }
+
+    #[test]
+    fn short_orphan_is_merged_without_crossing_speakers() {
+        let tokens = vec![
+            token("本題", 0, 500, Some("Speaker 1")),
+            token("え", 1_500, 1_500, Some("Speaker 1")),
+            token("回答", 5_000, 5_500, Some("Speaker 2")),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "本題え");
+        assert_eq!(segments[1].text, "回答");
+    }
+
+    #[test]
+    fn repairs_only_inferred_token_ends_with_a_sane_cap() {
+        let mut tokens = vec![token("前", 100, 100, None), token("後", 5_000, 5_400, None)];
+        tokens[0].end_time_source = Some(TokenTimeSource::Inferred);
+        assert!(repair_inferred_token_ends(&mut tokens, Some(6_000)));
+        assert_eq!(tokens[0].end_ms, Some(1_100));
+        assert_eq!(tokens[1].end_ms, Some(5_400));
+    }
+
+    #[test]
+    fn stored_transcript_segments_can_be_regenerated_from_tokens() {
+        let mut first = token("会議", 100, 500, None);
+        first.end_time_source = Some(TokenTimeSource::Inferred);
+        let mut second = token("です", 2_000, 2_400, None);
+        second.end_time_source = Some(TokenTimeSource::Inferred);
+        let mut transcript = Transcript {
+            provider: "local".into(),
+            model: "fixture".into(),
+            language: "ja".into(),
+            tokens: vec![first, second],
+            segments: vec![TranscriptSegment {
+                speaker: "Speaker 1".into(),
+                start_ms: 100,
+                end_ms: 500,
+                text: "古い区切り".into(),
+            }],
+        };
+        assert!(normalize_transcript_for_display(&mut transcript));
+        assert_eq!(transcript.segments.len(), 1);
+        assert_eq!(transcript.segments[0].text, "会議です");
     }
 }

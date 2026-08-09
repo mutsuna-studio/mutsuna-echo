@@ -236,13 +236,19 @@ h3 {
 .file-picker {
   display: flex;
   width: 100%;
+  min-height: 76px;
   align-items: center;
-  gap: 14px;
-  margin-top: 22px;
-  padding: 16px;
+  gap: 16px;
+  margin-top: 26px;
+  padding: 18px 20px;
   border-style: dashed;
   border-radius: 12px;
   text-align: left;
+}
+
+.file-picker-selected {
+  border-style: solid;
+  background: color-mix(in oklch, var(--primary) 4%, var(--background));
 }
 
 .input-tabs {

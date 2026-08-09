@@ -5,6 +5,17 @@ export type TranscriptSegment = {
   text: string;
 };
 
+export type EditableTranscriptSegment = TranscriptSegment & {
+  segmentId: string;
+  edited: boolean;
+};
+
+export type TranscriptSpeakerLabel = {
+  speaker: string;
+  label: string;
+  edited: boolean;
+};
+
 export type TokenSpeakerSource = "provider" | "diarization" | "channel" | "user";
 export type TokenTimeSource = "provider" | "alignment" | "inferred" | "user";
 
@@ -27,8 +38,42 @@ export type Transcript = {
   segments: TranscriptSegment[];
 };
 
+export type EditableTranscript = Omit<Transcript, "segments"> & {
+  speakerLabels: TranscriptSpeakerLabel[];
+  segments: EditableTranscriptSegment[];
+};
+
+export type TranscriptionRunSummary = {
+  transcriptionId: string;
+  sequence: number;
+  createdAt: string;
+  updatedAt: string;
+  provider: string;
+  model: string;
+  language: string;
+  edited: boolean;
+};
+
+export type TranscriptionRunDetail = {
+  transcriptionId: string;
+  sequence: number;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  edited: boolean;
+  transcript: EditableTranscript;
+};
+
+export type TranscriptionHistory = {
+  runs: TranscriptionRunSummary[];
+  selectedTranscriptionId: string | null;
+};
+
+export type TranscriptSaveState = "saved" | "unsaved" | "saving" | "error";
+
 export type TranscriptionResult = {
   transcript: Transcript;
+  run: TranscriptionRunDetail | null;
   persistenceWarning: string | null;
 };
 
@@ -56,6 +101,12 @@ export type AudioSeekRequest = {
   meetingId: string;
   requestId: number;
   positionMs: number;
+  autoplay?: boolean;
+};
+
+export type TranscriptSegmentTextChange = {
+  segmentId: string;
+  text: string;
 };
 
 export type TranscriptionSession = {

@@ -101,6 +101,7 @@ pub(crate) fn publish_transcription_progress(app: &AppHandle, progress: Transcri
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionResult {
     transcript: Transcript,
+    run: Option<crate::transcript_store::TranscriptionRunDetail>,
     persistence_warning: Option<String>,
 }
 
@@ -113,8 +114,26 @@ pub(crate) struct TranscriptionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StoredTranscriptRequest {
-    provider: TranscriptionProvider,
+pub(crate) struct SelectTranscriptionRunRequest {
+    transcription_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateTranscriptDocumentRequest {
+    transcription_id: String,
+    expected_revision: u64,
+    #[serde(default)]
+    changes: Vec<crate::transcript_store::TranscriptSegmentChange>,
+    #[serde(default)]
+    speaker_labels: Vec<crate::transcript_store::TranscriptSpeakerLabelChange>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResetTranscriptDocumentRequest {
+    transcription_id: String,
+    expected_revision: u64,
 }
 
 fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioFile, String> {
@@ -622,7 +641,10 @@ pub(crate) async fn transcribe_selected_audio(
     // the actual file once more at the boundary where it is consumed.
     validate_audio_path(&selected.path)?;
 
-    if request.provider == TranscriptionProvider::ElevenLabs {
+    if matches!(
+        request.provider,
+        TranscriptionProvider::ElevenLabs | TranscriptionProvider::Soniox
+    ) {
         publish_transcription_progress(
             &app,
             TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
@@ -635,37 +657,100 @@ pub(crate) async fn transcribe_selected_audio(
         request.model_id.as_deref(),
     )
     .await?;
-    let persistence_warning =
-        match crate::transcript_store::save(&app, &selected.descriptor.meeting_id, &transcript) {
-            Ok(()) => {
-                crate::meeting_store::mark_updated(&app, &selected.descriptor.meeting_id).err()
-            }
-            Err(error) => Some(error),
-        };
+    let (run, persistence_warning) = match crate::transcript_store::create_run(
+        &app,
+        &selected.descriptor.meeting_id,
+        &selected.path,
+        &transcript,
+    ) {
+        Ok(run) => (
+            Some(run),
+            crate::meeting_store::mark_updated(&app, &selected.descriptor.meeting_id).err(),
+        ),
+        Err(error) => (None, Some(error)),
+    };
     Ok(TranscriptionResult {
         transcript,
+        run,
         persistence_warning,
     })
 }
 
 #[tauri::command]
-pub(crate) fn get_selected_transcript(
+pub(crate) fn get_selected_transcription_history(
     app: AppHandle,
     state: State<'_, AudioSelectionState>,
-    request: StoredTranscriptRequest,
-) -> Result<Option<Transcript>, String> {
+) -> Result<crate::transcript_store::TranscriptionHistory, String> {
     let selected = state
         .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
-    crate::transcript_store::load(
+    crate::transcript_store::history(&app, &selected.descriptor.meeting_id, &selected.path)
+}
+
+#[tauri::command]
+pub(crate) fn get_selected_transcription_run(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+) -> Result<Option<crate::transcript_store::TranscriptionRunDetail>, String> {
+    let meeting_id = selected_meeting_id_from_state(&state)?;
+    crate::transcript_store::selected_run(&app, &meeting_id)
+}
+
+#[tauri::command]
+pub(crate) fn select_transcription_run(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+    request: SelectTranscriptionRunRequest,
+) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    let meeting_id = selected_meeting_id_from_state(&state)?;
+    crate::transcript_store::select_run(&app, &meeting_id, &request.transcription_id)
+}
+
+#[tauri::command]
+pub(crate) fn update_transcript_document(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+    request: UpdateTranscriptDocumentRequest,
+) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    let meeting_id = selected_meeting_id_from_state(&state)?;
+    crate::transcript_store::update_run_segments(
         &app,
-        &selected.descriptor.meeting_id,
-        &selected.path,
-        request.provider,
+        &meeting_id,
+        &request.transcription_id,
+        request.expected_revision,
+        request.changes,
+        request.speaker_labels,
     )
+}
+
+#[tauri::command]
+pub(crate) fn reset_transcript_document(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+    request: ResetTranscriptDocumentRequest,
+) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    let meeting_id = selected_meeting_id_from_state(&state)?;
+    crate::transcript_store::reset_run_document(
+        &app,
+        &meeting_id,
+        &request.transcription_id,
+        request.expected_revision,
+    )
+}
+
+fn selected_meeting_id_from_state(
+    state: &State<'_, AudioSelectionState>,
+) -> Result<String, String> {
+    state
+        .selected
+        .lock()
+        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
+        .as_ref()
+        .map(|selected| selected.descriptor.meeting_id.clone())
+        .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())
 }
 
 #[cfg(test)]
@@ -744,6 +829,12 @@ mod tests {
         assert!(
             serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
                 "provider": "local"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
+                "provider": "soniox"
             }))
             .is_ok()
         );

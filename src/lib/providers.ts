@@ -1,4 +1,4 @@
-export type TranscriptionProviderId = "elevenlabs" | "local";
+export type TranscriptionProviderId = "elevenlabs" | "soniox" | "local";
 export type TranscriptionProviderKind = "cloud" | "local";
 export type TranscriptionProviderSetup = "apiKey" | "modelDownload";
 export type TranscriptionProviderAvailability =
@@ -79,7 +79,7 @@ export const VAD_PRESET_OPTIONS = [
 ] as const;
 
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
-  return value === "elevenlabs" || value === "local";
+  return value === "elevenlabs" || value === "soniox" || value === "local";
 }
 
 export function getTranscriptionProvider(
@@ -104,6 +104,6 @@ export function transcriptionProviderLabel(
   providers: readonly TranscriptionProviderDefinition[] = []
 ): string {
   return providers.find((provider) => provider.id === id)?.label
-    ?? ({ elevenlabs: "ElevenLabs", local: "ローカルSTT" } as Record<string, string>)[id]
+    ?? ({ elevenlabs: "ElevenLabs", soniox: "Soniox", local: "ローカルSTT" } as Record<string, string>)[id]
     ?? id;
 }

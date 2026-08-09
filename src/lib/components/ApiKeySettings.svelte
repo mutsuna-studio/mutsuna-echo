@@ -14,8 +14,10 @@
   import { Card } from "@mutsuna/ui/card";
   import { Input } from "@mutsuna/ui/input";
   import { Label } from "@mutsuna/ui/label";
+  import type { TranscriptionProviderDefinition } from "../providers";
 
   interface Props {
+    provider: TranscriptionProviderDefinition;
     loading: boolean;
     saving: boolean;
     deleting: boolean;
@@ -25,7 +27,7 @@
     onDelete: () => void;
   }
 
-  let { loading, saving, deleting, hasApiKey, busy, onSave, onDelete }: Props = $props();
+  let { provider, loading, saving, deleting, hasApiKey, busy, onSave, onDelete }: Props = $props();
   let apiKey = $state("");
   let deleteDialogOpen = $state(false);
 
@@ -38,19 +40,12 @@
 </script>
 
 <Card class="card settings-card" aria-busy={loading || saving || deleting}>
-  <div class="section-heading">
-    <div>
-      <h2>プロバイダー設定</h2>
-      <p class="help">文字起こしサービスごとに認証情報を管理します。</p>
-    </div>
-    <Badge variant="secondary">ElevenLabs</Badge>
-  </div>
-
   <div class="credential-heading">
     <div>
-      <h3>ElevenLabs APIキー</h3>
+      <h3>{provider.label} APIキー</h3>
       <p class="help">キーはOSの暗号化機能で保護し、画面へ読み戻しません。</p>
     </div>
+    <Badge variant="secondary">{provider.modelLabel}</Badge>
     {#if loading}
       <Badge variant="secondary">確認中</Badge>
     {:else if hasApiKey}
@@ -61,12 +56,12 @@
   </div>
 
   <form onsubmit={submit}>
-    <Label for="api-key">API key</Label>
+    <Label for={`${provider.id}-api-key`}>API key</Label>
     <div class="input-row">
       <Input
-        id="api-key"
+        id={`${provider.id}-api-key`}
         type="password"
-        placeholder={hasApiKey ? "新しいキーに置き換える" : "sk_..."}
+        placeholder={hasApiKey ? "新しいキーに置き換える" : "APIキーを入力"}
         autocomplete="off"
         spellcheck="false"
         bind:value={apiKey}
@@ -78,9 +73,15 @@
     </div>
   </form>
 
-  <p class="security-note">
-    ElevenLabsではSpeech to Text、User Read、Workspace Analytics Full Readだけを許可し、利用上限を設定してください。
-  </p>
+  {#if provider.id === "elevenlabs"}
+    <p class="security-note">
+      Speech to Text、User Read、Workspace Analytics Full Readだけを許可し、利用上限を設定してください。
+    </p>
+  {:else}
+    <p class="security-note">
+      Soniox Consoleで文字起こしに必要な範囲だけを許可し、利用上限を設定してください。
+    </p>
+  {/if}
 
   {#if hasApiKey}
     <Button class="danger" variant="link" type="button" onclick={() => deleteDialogOpen = true} disabled={busy} loading={deleting}>
@@ -94,7 +95,7 @@
     <AlertDialogHeader>
       <AlertDialogTitle>保存済みAPIキーを削除しますか？</AlertDialogTitle>
       <AlertDialogDescription>
-        ElevenLabsのAPIキーをこの端末から削除します。再度文字起こしを行うには、APIキーの入力が必要です。
+        {provider.label}のAPIキーをこの端末から削除します。再度文字起こしを行うには、APIキーの入力が必要です。
       </AlertDialogDescription>
     </AlertDialogHeader>
     <AlertDialogFooter>

@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::{
-    audio_decode::decode_mono, local_models, segments_from_tokens, vad, vad_models, vad_settings,
-    TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+    audio_decode::decode_mono, local_models, repair_inferred_token_ends, segments_from_tokens, vad,
+    vad_models, vad_settings, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
 };
 use crate::commands::transcribe::{
     publish_transcription_progress, TranscriptionProgress, TranscriptionStage,
@@ -90,7 +90,7 @@ fn transcribe_speech_regions(
         TranscriptionProgress::new(TranscriptionStage::DetectingSpeech, 0, None),
     );
     let mut total_chunks = 0u32;
-    vad::visit_speech_regions(audio_path, vad_model, preset, |_| {
+    let audio_duration_ms = vad::visit_speech_regions(audio_path, vad_model, preset, |_| {
         total_chunks = total_chunks.saturating_add(1);
         Ok(())
     })?;
@@ -122,6 +122,7 @@ fn transcribe_speech_regions(
         );
         Ok(())
     })?;
+    repair_inferred_token_ends(&mut tokens, Some(audio_duration_ms));
     let segments = segments_from_tokens(&tokens);
     Ok((tokens, segments))
 }
@@ -191,6 +192,10 @@ fn normalize_result(
             confidence: None,
         });
     }
+    repair_inferred_token_ends(
+        &mut tokens,
+        Some(offset_ms.saturating_add(audio_duration_ms)),
+    );
     let mut segments = segments_from_tokens(&tokens);
     if segments.is_empty() && !result.text.trim().is_empty() {
         segments.push(TranscriptSegment {
@@ -249,7 +254,7 @@ mod tests {
         };
         let (tokens, _) = normalize_result(&result, 2_000, 0);
         assert_eq!(tokens[0].end_ms, Some(700));
-        assert_eq!(tokens[1].end_ms, Some(700));
+        assert_eq!(tokens[1].end_ms, Some(1_700));
     }
 
     #[test]

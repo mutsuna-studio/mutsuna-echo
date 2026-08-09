@@ -3,6 +3,7 @@ node_modules
 /dist
 /.svelte-kit
 /package
+/.tauri/
 .env
 .env.*
 !.env.example

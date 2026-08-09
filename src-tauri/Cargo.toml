@@ -34,7 +34,12 @@ tauri-plugin-opener = "2"
 sha2 = "0.10.9"
 uuid = { version = "1", features = ["v7"] }
 futures-util = "0.3"
+tokio = { version = "1", features = ["time"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "pcm", "wav"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+tauri-plugin-process = "2"
 
 [dev-dependencies]
 jni = "0.21.1"
@@ -56,7 +61,9 @@ core-graphics = "0.25.0"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
 ndk-context = "0.1.1"
-tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(all(not(target_os = "windows"), not(target_os = "android")))'.dependencies]
 keyring = "4.1.6"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

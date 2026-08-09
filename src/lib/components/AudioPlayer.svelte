@@ -51,7 +51,7 @@
     seekRequest;
     audio.meetingId;
     element;
-    applySeekRequest();
+    void applySeekRequest();
   });
 
   $effect(() => {
@@ -100,6 +100,11 @@
       element.pause();
       return;
     }
+    await startPlayback();
+  }
+
+  async function startPlayback() {
+    if (!element) return;
     try {
       await element.play();
     } catch {
@@ -123,10 +128,12 @@
     return true;
   }
 
-  function applySeekRequest() {
+  async function applySeekRequest() {
     const request = seekRequest;
     if (!request || request.meetingId !== audio.meetingId || !element || request.requestId === processedSeekRequestId) return;
-    if (seekTo(request.positionMs / 1_000)) processedSeekRequestId = request.requestId;
+    if (!seekTo(request.positionMs / 1_000)) return;
+    processedSeekRequestId = request.requestId;
+    if (request.autoplay) await startPlayback();
   }
 
   function updatePosition(seconds: number, followTimeline = false) {
@@ -140,7 +147,7 @@
 
   function handleLoadedMetadata() {
     durationSeconds = Number.isFinite(element?.duration) ? element!.duration : audio.durationMs / 1_000;
-    applySeekRequest();
+    void applySeekRequest();
   }
 
   function changeVolume(event: Event) {

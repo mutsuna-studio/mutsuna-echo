@@ -2,22 +2,19 @@ use std::{fs, path::PathBuf, slice};
 
 use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager};
-use windows::{
-    core::w,
-    Win32::{
-        Foundation::{LocalFree, HLOCAL},
-        Security::Cryptography::{
-            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-        },
+use windows::Win32::{
+    Foundation::{LocalFree, HLOCAL},
+    Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     },
 };
 
-const CREDENTIAL_FILE: &str = "elevenlabs-api-key.dpapi";
+use super::CredentialId;
 
-fn credential_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn credential_path(app: &AppHandle, credential: CredentialId) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|directory| directory.join(CREDENTIAL_FILE))
+        .map(|directory| directory.join(format!("{}-api-key.dpapi", credential.id())))
         .map_err(|error| {
             eprintln!("Could not resolve app data directory: {error:?}");
             "APIキーの保存先を取得できませんでした。".to_string()
@@ -65,7 +62,7 @@ fn protect(plain_text: &[u8]) -> Result<Vec<u8>, String> {
     unsafe {
         CryptProtectData(
             &input,
-            w!("Mutsuna Echo ElevenLabs API key"),
+            None,
             None,
             None,
             None,
@@ -112,8 +109,12 @@ fn unprotect(encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(Zeroizing::new(copy_and_free(output, true)))
 }
 
-pub(crate) fn save_api_key(app: &AppHandle, api_key: &SecretString) -> Result<(), String> {
-    let path = credential_path(app)?;
+pub(crate) fn save(
+    app: &AppHandle,
+    credential: CredentialId,
+    api_key: &SecretString,
+) -> Result<(), String> {
+    let path = credential_path(app, credential)?;
     let parent = path
         .parent()
         .ok_or_else(|| "APIキーの保存先が不正です。".to_string())?;
@@ -131,8 +132,8 @@ pub(crate) fn save_api_key(app: &AppHandle, api_key: &SecretString) -> Result<()
     })
 }
 
-pub(crate) fn has_api_key(app: &AppHandle) -> Result<bool, String> {
-    let path = credential_path(app)?;
+pub(crate) fn has(app: &AppHandle, credential: CredentialId) -> Result<bool, String> {
+    let path = credential_path(app, credential)?;
 
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len() > 0),
@@ -144,12 +145,12 @@ pub(crate) fn has_api_key(app: &AppHandle) -> Result<bool, String> {
     }
 }
 
-pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
-    let path = credential_path(app)?;
+pub(crate) fn load(app: &AppHandle, credential: CredentialId) -> Result<SecretString, String> {
+    let path = credential_path(app, credential)?;
     let encrypted = match fs::read(path) {
         Ok(encrypted) => encrypted,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err("ElevenLabs APIキーが未設定です。".to_string());
+            return Err(format!("{} APIキーが未設定です。", credential.label()));
         }
         Err(error) => {
             eprintln!("Could not read encrypted API key: {error:?}");
@@ -166,8 +167,8 @@ pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
     Ok(SecretString::from(api_key.to_owned()))
 }
 
-pub(crate) fn delete_api_key(app: &AppHandle) -> Result<(), String> {
-    let path = credential_path(app)?;
+pub(crate) fn delete(app: &AppHandle, credential: CredentialId) -> Result<(), String> {
+    let path = credential_path(app, credential)?;
 
     match fs::remove_file(path) {
         Ok(()) => Ok(()),

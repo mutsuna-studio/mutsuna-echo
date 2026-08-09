@@ -50,6 +50,13 @@ const ELEVENLABS_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabili
     external_diarization: true,
 };
 
+const SONIOX_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
+    timing_granularity: TimingGranularity::Token,
+    speaker_labels: true,
+    confidence_scores: true,
+    external_diarization: true,
+};
+
 const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
     timing_granularity: TimingGranularity::Token,
     speaker_labels: false,
@@ -76,6 +83,16 @@ const ELEVENLABS_DEFINITION: ProviderDefinition = ProviderDefinition {
     default_model_label: "Scribe v2",
     capability_summary: "日本語・話者分離・単語タイムスタンプ",
     capabilities: ELEVENLABS_CAPABILITIES,
+};
+
+const SONIOX_DEFINITION: ProviderDefinition = ProviderDefinition {
+    id: "soniox",
+    label: "Soniox",
+    kind: ProviderKind::Cloud,
+    setup: ProviderSetup::ApiKey,
+    default_model_label: "Soniox v5",
+    capability_summary: "多言語・話者分離・トークンタイムスタンプ",
+    capabilities: SONIOX_CAPABILITIES,
 };
 
 const LOCAL_DEFINITION: ProviderDefinition = ProviderDefinition {
@@ -108,10 +125,17 @@ pub(crate) struct TranscriptionProviderDescriptor {
 }
 
 pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescriptor>, String> {
-    let cloud = match crate::credentials::has_api_key(app) {
+    let elevenlabs = match crate::credentials::has_api_key(app) {
         Ok(has_api_key) => elevenlabs(has_api_key),
         Err(error) => unavailable_provider(
             ELEVENLABS_DEFINITION,
+            format!("APIキーの保存状態を確認できませんでした: {error}"),
+        ),
+    };
+    let soniox = match crate::credentials::has(app, crate::credentials::CredentialId::Soniox) {
+        Ok(has_api_key) => soniox(has_api_key),
+        Err(error) => unavailable_provider(
+            SONIOX_DEFINITION,
             format!("APIキーの保存状態を確認できませんでした: {error}"),
         ),
     };
@@ -123,7 +147,7 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
         ),
         Err(error) => unavailable_provider(LOCAL_DEFINITION, error),
     };
-    Ok(vec![cloud, local])
+    Ok(vec![elevenlabs, soniox, local])
 }
 
 fn unavailable_provider(
@@ -172,6 +196,33 @@ fn elevenlabs(has_api_key: bool) -> TranscriptionProviderDescriptor {
         },
         pricing_usd_per_hour: Some(0.22),
         pricing_verified_on: Some("2026-08-08"),
+    }
+}
+
+fn soniox(has_api_key: bool) -> TranscriptionProviderDescriptor {
+    TranscriptionProviderDescriptor {
+        id: SONIOX_DEFINITION.id,
+        label: SONIOX_DEFINITION.label,
+        kind: SONIOX_DEFINITION.kind,
+        setup: SONIOX_DEFINITION.setup,
+        availability: if has_api_key {
+            ProviderAvailability::Ready
+        } else {
+            ProviderAvailability::ApiKeyRequired
+        },
+        ready: has_api_key,
+        configured: has_api_key,
+        model_id: Some(super::soniox::MODEL_ID.into()),
+        model_label: SONIOX_DEFINITION.default_model_label.into(),
+        capability_summary: SONIOX_DEFINITION.capability_summary,
+        capabilities: SONIOX_DEFINITION.capabilities,
+        status_message: if has_api_key {
+            "クラウドAPIで文字起こしできます。".into()
+        } else {
+            "SonioxのAPIキーを設定してください。".into()
+        },
+        pricing_usd_per_hour: Some(0.10),
+        pricing_verified_on: Some("2026-08-09"),
     }
 }
 
@@ -236,8 +287,8 @@ pub(crate) fn list_installed_local_stt_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_provider, InstalledLocalModel, ProviderAvailability, ProviderKind, ProviderSetup,
-        TimingGranularity,
+        local_provider, soniox, InstalledLocalModel, ProviderAvailability, ProviderKind,
+        ProviderSetup, TimingGranularity,
     };
 
     #[test]
@@ -273,5 +324,19 @@ mod tests {
         );
         assert!(!provider.capabilities.speaker_labels);
         assert!(provider.capabilities.external_diarization);
+    }
+
+    #[test]
+    fn soniox_exposes_v5_provider_capabilities() {
+        let provider = soniox(true);
+        assert!(provider.ready);
+        assert_eq!(provider.model_id.as_deref(), Some("stt-async-v5"));
+        assert_eq!(
+            provider.capabilities.timing_granularity,
+            TimingGranularity::Token
+        );
+        assert!(provider.capabilities.speaker_labels);
+        assert!(provider.capabilities.confidence_scores);
+        assert_eq!(provider.pricing_usd_per_hour, Some(0.10));
     }
 }

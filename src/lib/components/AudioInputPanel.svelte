@@ -1,16 +1,12 @@
 <script lang="ts">
-  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
-  import { Label } from "@mutsuna/ui/label";
   import { Select } from "@mutsuna/ui/select";
   import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
   import RecordingPanel from "./RecordingPanel.svelte";
-  import LocalModelManager from "./LocalModelManager.svelte";
   import { formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import {
     getTranscriptionProvider,
     isTranscriptionProviderId,
-    transcriptionProviderOptions,
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId
   } from "../providers";
@@ -30,7 +26,6 @@
     onSelect: () => void;
     onTranscribe: () => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
-    onProvidersChanged: () => Promise<void>;
     onRecordedAudio: (audio: SelectedAudioFile) => void;
     onRecordingBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -51,7 +46,6 @@
     onSelect,
     onTranscribe,
     onProviderChange,
-    onProvidersChanged,
     onRecordedAudio,
     onRecordingBusyChange,
     onMessage,
@@ -60,7 +54,14 @@
 
   let inputMode = $state<"file" | "record">("file");
   const providerDefinition = $derived(getTranscriptionProvider(providers, provider));
-  const providerOptions = $derived(transcriptionProviderOptions(providers));
+  const usableProviders = $derived(providers.filter((availableProvider) => availableProvider.ready));
+  const providerOptions = $derived(usableProviders.map((availableProvider) => ({
+    value: availableProvider.id,
+    label: `${truncateModelLabel(availableProvider.modelLabel)} · ${formatHourlyPrice(availableProvider)}`,
+    description: availableProvider.kind === "local"
+      ? "ローカル · 音声を外部送信しません"
+      : `クラウド · ${availableProvider.capabilitySummary}`
+  })));
   const estimatedCostUsd = $derived(
     selectedAudio && providerDefinition?.pricingUsdPerHour != null
       ? selectedAudio.durationMs / 3_600_000 * providerDefinition.pricingUsdPerHour
@@ -78,6 +79,18 @@
     return "準備中…";
   });
 
+  function formatHourlyPrice(provider: TranscriptionProviderDefinition): string {
+    return provider.kind === "local"
+      ? "無料"
+      : provider.pricingUsdPerHour == null
+        ? "料金を確認中"
+        : `$${provider.pricingUsdPerHour.toFixed(2)}/時間`;
+  }
+
+  function truncateModelLabel(label: string, maxLength = 16): string {
+    return label.length > maxLength ? `${label.slice(0, maxLength)}...` : label;
+  }
+
   function selectProvider(value: string) {
     if (isTranscriptionProviderId(value)) onProviderChange(value);
   }
@@ -89,9 +102,6 @@
       <h2>音声を用意</h2>
       <p class="section-description">ファイルを読み込むか、この端末で録音します。</p>
     </div>
-    <Badge variant={selectedAudio ? "default" : "secondary"}>
-      {recordingBusy ? "録音中" : selectedAudio ? "準備済み" : "未選択"}
-    </Badge>
   </div>
 
   <Tabs bind:value={inputMode}>
@@ -101,7 +111,7 @@
     </TabsList>
 
   <TabsContent value="file">
-    <Button class="file-picker" variant="outline" size="lg" type="button" onclick={onSelect} disabled={busy}>
+    <Button class={selectedAudio ? "file-picker file-picker-selected" : "file-picker"} variant="outline" size="lg" type="button" onclick={onSelect} disabled={busy}>
       <span class="file-icon" aria-hidden="true">♪</span>
       <span class="file-copy">
         <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
@@ -124,61 +134,31 @@
   </TabsContent>
   </Tabs>
 
-  {#if selectedAudio && providerDefinition?.pricingUsdPerHour != null && estimatedCostUsd != null}
-    <div class="cost-estimate">
-      <div>
-        <span>{providerDefinition.label} {providerDefinition.modelLabel} の推定コスト</span>
-        <strong>{formatEstimatedCost(estimatedCostUsd)}</strong>
-      </div>
-      <small>
-        公開時間単価 ${providerDefinition.pricingUsdPerHour.toFixed(2)}/時間
-        （{providerDefinition.pricingVerifiedOn}確認）に基づく概算です。プラン内枠や請求時の丸めにより実際の請求額とは異なる場合があります。
-      </small>
-    </div>
-  {:else if selectedAudio && providerDefinition?.kind === "local"}
-    <div class="cost-estimate local-processing-note">
-      <div>
-        <span>ローカル処理</span>
-        <strong>クラウドAPI利用料なし</strong>
-      </div>
-      <small>音声は端末内で処理され、文字起こしAPIへ送信されません。</small>
-    </div>
-  {/if}
-
   <div class="transcription-settings">
     <div class="transcription-settings-heading">
       <h2>文字起こし設定</h2>
+      <p>利用可能なモデルから選択してください。料金は音声1時間あたりの目安です。</p>
     </div>
-    <div class="provider-grid">
-      <div class="provider-field">
-        <Label for="transcription-provider">文字起こしモデル</Label>
-        <Select
-          id="transcription-provider"
-          value={provider}
-          options={providerOptions}
-          onValueChange={selectProvider}
-          searchable
-          disabled={busy}
-          ariaLabel="文字起こしモデル"
-        />
-      </div>
-      <div class="provider-summary">
-        <span>モデル</span>
-        <strong>{providerDefinition?.modelLabel ?? "確認中…"}</strong>
-        <small>{providerDefinition?.capabilitySummary ?? "プロバイダー情報を読み込んでいます"}</small>
-      </div>
-    </div>
-    {#if providerDefinition?.kind === "local"}
-      <LocalModelManager
-        disabled={busy}
-        onChanged={onProvidersChanged}
-        {onMessage}
-        {onError}
+    <div class="provider-picker">
+      <Select
+        value={provider}
+        options={providerOptions}
+        onValueChange={selectProvider}
+        searchable
+        class="w-full max-w-[420px]"
+        disabled={busy || usableProviders.length === 0}
+        ariaLabel="文字起こしモデル"
       />
+      {#if usableProviders.length === 0}
+        <p class="provider-unavailable">利用できるモデルがありません。設定画面でモデルを準備してください。</p>
+      {/if}
+    </div>
+    {#if selectedAudio && providerDefinition?.pricingUsdPerHour != null && estimatedCostUsd != null}
+      <p class="selected-cost">この音声の推定料金: <strong>{formatEstimatedCost(estimatedCostUsd)}</strong></p>
     {/if}
     <div class="action-row provider-action" data-transcription-action>
       <p class="action-help">
-        {providerDefinition?.statusMessage ?? "プロバイダー情報を確認しています。"}
+        {selectedAudio ? "選択したモデルで文字起こしを開始します。" : "音声を選択すると文字起こしを開始できます。"}
       </p>
       <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>
         {transcriptionStatus}
@@ -190,4 +170,10 @@
 <style>
   .creation-panel { padding: 0 0 36px; }
   .section-description { margin: 7px 0 0; color: var(--muted-foreground); font-size: 0.82rem; }
+  .transcription-settings-heading p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
+  .provider-picker { display: grid; gap: 10px; }
+  .provider-unavailable { margin: 0; color: var(--muted-foreground); font-size: 0.78rem; }
+  .selected-cost { margin: 12px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
+  .selected-cost strong { color: var(--foreground); }
+
 </style>

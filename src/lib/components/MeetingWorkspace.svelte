@@ -4,6 +4,7 @@
   import FileAudio from "@lucide/svelte/icons/file-audio";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import { Button } from "@mutsuna/ui/button";
   import { Select } from "@mutsuna/ui/select";
   import { formatFileSize, formatTimestamp } from "../format";
@@ -14,14 +15,35 @@
     type TranscriptionProviderId
   } from "../providers";
   import type { RecentMeetingSummary } from "../types/recording";
-  import type { AudioSeekRequest, SelectedAudioFile, Transcript, TranscriptionProgress } from "../types/transcript";
+  import type {
+    AudioSeekRequest,
+    EditableTranscript,
+    SelectedAudioFile,
+    TranscriptionProgress,
+    TranscriptionRunDetail,
+    TranscriptionRunSummary,
+    TranscriptSegmentTextChange,
+    TranscriptSaveState
+  } from "../types/transcript";
+  import type { SummaryProviderDefinition, SummaryStatus } from "../types/summary";
   import AudioPlayer from "./AudioPlayer.svelte";
+  import MeetingSummary from "./MeetingSummary.svelte";
   import TranscriptView from "./TranscriptView.svelte";
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
     meeting: RecentMeetingSummary | null;
-    transcript: Transcript | null;
+    transcript: EditableTranscript | null;
+    runs: readonly TranscriptionRunSummary[];
+    selectedTranscriptionId: string | null;
+    selectedRun: TranscriptionRunDetail | null;
+    saveState: TranscriptSaveState;
+    summaryStatus: SummaryStatus | null;
+    summaryProviders: readonly SummaryProviderDefinition[];
+    summaryProviderId: string;
+    summaryModelId: string;
+    summaryCustomModelId: string;
+    summaryGenerating: boolean;
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
     providerLabel: string;
@@ -33,6 +55,18 @@
     onOpenLibrary: () => void;
     onTranscribe: () => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
+    onRunChange: (transcriptionId: string) => void;
+    onEditSegment: (segmentId: string, text: string) => void;
+    onEditSpeakerLabel: (speaker: string, label: string) => void;
+    onReplaceSegments: (changes: TranscriptSegmentTextChange[]) => Promise<boolean>;
+    canUndoReplacement: boolean;
+    onUndoReplacement: () => Promise<void>;
+    onFlushEdits: () => Promise<void>;
+    onResetTranscript: () => void;
+    onSummaryProviderChange: (value: string) => void;
+    onSummaryModelChange: (value: string) => void;
+    onSummaryCustomModelChange: (value: string) => void;
+    onGenerateSummary: () => void;
     onReveal: (meeting: RecentMeetingSummary) => void;
     onCreate: () => void;
     onOpenSettings: () => void;
@@ -43,6 +77,16 @@
     selectedAudio,
     meeting,
     transcript,
+    runs,
+    selectedTranscriptionId,
+    selectedRun,
+    saveState,
+    summaryStatus,
+    summaryProviders,
+    summaryProviderId,
+    summaryModelId,
+    summaryCustomModelId,
+    summaryGenerating,
     providers,
     provider,
     providerLabel,
@@ -54,19 +98,38 @@
     onOpenLibrary,
     onTranscribe,
     onProviderChange,
+    onRunChange,
+    onEditSegment,
+    onEditSpeakerLabel,
+    onReplaceSegments,
+    canUndoReplacement,
+    onUndoReplacement,
+    onFlushEdits,
+    onResetTranscript,
+    onSummaryProviderChange,
+    onSummaryModelChange,
+    onSummaryCustomModelChange,
+    onGenerateSummary,
     onReveal,
     onCreate,
     onOpenSettings,
     onError
   }: Props = $props();
 
-  let detailTab = $state<"transcript" | "info">("transcript");
+  let detailTab = $state<"summary" | "transcript" | "info">("transcript");
   let playbackPositionMs = $state(0);
   let timelineFollowRequestId = $state(0);
   let detailContentElement = $state<HTMLElement | null>(null);
   let seekRequest = $state.raw<AudioSeekRequest | null>(null);
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
+  const saveStatus = $derived.by(() => {
+    if (!selectedRun) return "";
+    if (saveState === "saving") return "保存中…";
+    if (saveState === "unsaved") return "変更あり";
+    if (saveState === "error") return "保存できませんでした";
+    return selectedRun.edited ? "編集済み・保存済み" : "保存済み";
+  });
 
   const title = $derived(selectedAudio?.name.replace(/\.[^.]+$/, "") ?? "会議を選択");
   const recordedAt = $derived(
@@ -101,9 +164,40 @@
     seekRequest = { meetingId: selectedAudio.meetingId, requestId: ++seekRequestId, positionMs };
   }
 
+  function playFromTranscript(positionMs: number) {
+    if (!selectedAudio) return;
+    const contextPositionMs = Math.max(0, positionMs - 3_000);
+    playbackPositionMs = contextPositionMs;
+    seekRequest = {
+      meetingId: selectedAudio.meetingId,
+      requestId: ++seekRequestId,
+      positionMs: contextPositionMs,
+      autoplay: true
+    };
+  }
+
+  function seekFromSummary(positionMs: number) {
+    detailTab = "transcript";
+    seekFromTranscript(positionMs);
+    timelineFollowRequestId += 1;
+  }
+
   function handlePlaybackPosition(positionMs: number, followTimeline: boolean) {
     playbackPositionMs = positionMs;
     if (followTimeline) timelineFollowRequestId += 1;
+  }
+
+  function runModelLabel(run: TranscriptionRunSummary): string {
+    return providers.find((provider) => provider.modelId === run.model)?.modelLabel
+      ?? ({ scribe_v2: "Scribe v2", "reazonspeech-k2-int8-fp32": "ReazonSpeech K2" } as Record<string, string>)[run.model]
+      ?? run.model;
+  }
+
+  function runDate(value: string): string {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? value
+      : new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
   }
 </script>
 
@@ -162,20 +256,73 @@
       </div>
     </section>
 
+    {#if runs.length > 0}
+      <section class="transcription-history" aria-label="文字起こし履歴">
+        <div class="history-heading">
+          <span>文字起こし履歴</span>
+          <div class="history-status" aria-live="polite" aria-atomic="true">
+            {#if saveStatus}<small class:error={saveState === "error"} class:pending={saveState === "saving" || saveState === "unsaved"}>{saveStatus}</small>{/if}
+            {#if selectedRun?.edited && saveState === "saved"}
+              <Button size="xs" variant="ghost" type="button" icon={RotateCcw} onclick={onResetTranscript}>原文に戻す</Button>
+            {/if}
+          </div>
+        </div>
+        <div class="history-runs">
+          {#each runs as run (run.transcriptionId)}
+            <button
+              class:active={run.transcriptionId === selectedTranscriptionId}
+              type="button"
+              aria-pressed={run.transcriptionId === selectedTranscriptionId}
+              onclick={() => onRunChange(run.transcriptionId)}
+            >
+              <strong>{run.sequence}回目</strong>
+              <span>{runModelLabel(run)}</span>
+              <small>{runDate(run.createdAt)}{run.edited ? "・編集済み" : ""}</small>
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
     <div class="detail-tabs" role="tablist" aria-label="会議の表示内容">
+      <button class:active={detailTab === "summary"} type="button" role="tab" aria-selected={detailTab === "summary"} onclick={() => detailTab = "summary"}>会議ノート</button>
       <button class:active={detailTab === "transcript"} type="button" role="tab" aria-selected={detailTab === "transcript"} onclick={() => detailTab = "transcript"}>文字起こし</button>
       <button class:active={detailTab === "info"} type="button" role="tab" aria-selected={detailTab === "info"} onclick={() => detailTab = "info"}>会議情報</button>
     </div>
 
     <div class="detail-content" bind:this={detailContentElement}>
-      {#if detailTab === "transcript"}
+      {#if detailTab === "summary"}
+        <MeetingSummary
+          {transcript}
+          status={summaryStatus}
+          providers={summaryProviders}
+          providerId={summaryProviderId}
+          modelId={summaryModelId}
+          customModelId={summaryCustomModelId}
+          generating={summaryGenerating}
+          onProviderChange={onSummaryProviderChange}
+          onModelChange={onSummaryModelChange}
+          onCustomModelChange={onSummaryCustomModelChange}
+          onGenerate={onGenerateSummary}
+          onSeekSource={seekFromSummary}
+        />
+      {:else if detailTab === "transcript"}
         {#if transcript}
           <TranscriptView
             {transcript}
+            transcriptionId={selectedTranscriptionId}
             currentPositionMs={playbackPositionMs}
             followRequestId={timelineFollowRequestId}
             scrollContainer={detailContentElement}
             onSeek={seekFromTranscript}
+            onPlay={playFromTranscript}
+            editable={Boolean(selectedRun)}
+            {onEditSegment}
+            {onEditSpeakerLabel}
+            {onReplaceSegments}
+            {canUndoReplacement}
+            {onUndoReplacement}
+            onBlur={onFlushEdits}
           />
         {:else}
           <div class="empty-transcript">
@@ -208,7 +355,7 @@
 </section>
 
 <style>
-  .meeting-workspace { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
+  .meeting-workspace { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
   .workspace-header { padding: 25px 30px 18px; }
   .title-row { display: flex; min-width: 0; align-items: flex-start; gap: 12px; }
   .meeting-title { min-width: 0; flex: 1; }
@@ -229,9 +376,24 @@
   .provider-line small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .provider-line button { flex: none; padding: 0; border: 0; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-weight: 650; }
 
+  .transcription-history { min-width: 0; margin: 0 30px 14px; }
+  .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted-foreground); font-size: 0.7rem; font-weight: 650; }
+  .history-heading small { font-size: inherit; font-weight: 500; }
+  .history-heading small.error { color: var(--destructive); }
+  .history-heading small.pending { color: var(--foreground); }
+  .history-status { display: flex; align-items: center; gap: 8px; }
+  .history-runs { display: flex; min-width: 0; gap: 7px; overflow-x: auto; padding: 1px 1px 5px; scrollbar-width: thin; }
+  .history-runs button { display: grid; min-width: 154px; flex: 0 0 auto; gap: 2px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 30%, var(--background)); cursor: pointer; font: inherit; text-align: left; }
+  .history-runs button:hover { border-color: color-mix(in oklch, var(--primary) 35%, var(--border)); background: color-mix(in oklch, var(--primary) 4%, var(--background)); }
+  .history-runs button.active { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); color: var(--foreground); background: color-mix(in oklch, var(--primary) 9%, var(--background)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 16%, transparent); }
+  .history-runs strong { color: inherit; font-size: 0.76rem; }
+  .history-runs span { overflow: hidden; color: var(--foreground); font-size: 0.78rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .history-runs small { font-size: 0.65rem; }
+  .history-runs button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+
   .audio-player-wrap { min-width: 0; margin: 0 30px 18px; container: audio-player / inline-size; }
 
-  .detail-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 30px; border-bottom: 1px solid var(--border); }
+  .detail-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 30px; border-bottom: 1px solid var(--border); }
   .detail-tabs button { position: relative; height: 42px; border: 0; color: var(--muted-foreground); background: transparent; cursor: pointer; font: inherit; font-size: 0.82rem; font-weight: 650; }
   .detail-tabs button::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: transparent; content: ""; }
   .detail-tabs button.active { color: var(--primary); }
@@ -258,7 +420,7 @@
     .title-row { flex-wrap: wrap; }
     .meeting-title { flex-basis: calc(100% - 44px); }
     .header-actions { width: 100%; justify-content: flex-end; }
-    .audio-player-wrap, .transcription-toolbar, .detail-tabs { margin-right: 18px; margin-left: 18px; }
+    .audio-player-wrap, .transcription-toolbar, .transcription-history, .detail-tabs { margin-right: 18px; margin-left: 18px; }
     .detail-content { padding-right: 18px; padding-left: 18px; }
   }
 
