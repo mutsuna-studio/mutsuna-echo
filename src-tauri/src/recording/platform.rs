@@ -125,7 +125,11 @@ impl M4aWriter {
         // Media Foundation buffers complete AAC access units. Finalizing a
         // newly opened or extremely short stream otherwise returns
         // MF_E_SINK_NO_SAMPLES_PROCESSED (0xC00D4A44).
-        const MIN_FINALIZE_FRAMES: u64 = 2_048;
+        // Windows Media Foundation implementations differ in how much PCM is
+        // buffered before the AAC transform emits its first access unit. A
+        // full second is still negligible for an immediately stopped recording
+        // and reliably flushes both desktop and headless CI encoders.
+        const MIN_FINALIZE_FRAMES: u64 = 48_000;
         let silence = [0.0; 960];
         while self.samples_written < MIN_FINALIZE_FRAMES {
             let frames = (MIN_FINALIZE_FRAMES - self.samples_written).min(960) as usize;
@@ -332,7 +336,7 @@ mod tests {
 
         let _encoder_guard = WINDOWS_ENCODER_TEST_LOCK
             .lock()
-            .expect("lock Windows encoder test");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let path = std::env::temp_dir().join(format!(
             "mutsuna-echo-encoder-smoke-{}.m4a",
@@ -372,7 +376,7 @@ mod tests {
 
         let _encoder_guard = WINDOWS_ENCODER_TEST_LOCK
             .lock()
-            .expect("lock Windows encoder test");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         for captured_frames in [0, 1, 960] {
             let path = std::env::temp_dir().join(format!(
