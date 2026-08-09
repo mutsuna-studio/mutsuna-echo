@@ -16,7 +16,12 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        val executable = """C:\Program Files\nodejs\node""";
+        // Keep the generated Android project portable across local Windows
+        // development and Linux CI runners. NODE_BINARY remains available for
+        // environments that need to select a specific Node.js executable.
+        val executable = System.getenv("NODE_BINARY")
+            ?.takeIf { it.isNotBlank() }
+            ?: "node"
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
@@ -39,7 +44,7 @@ open class BuildTask : DefaultTask() {
                 }
                 throw lastException
             } else {
-                throw e;
+                throw e
             }
         }
     }
@@ -48,7 +53,7 @@ open class BuildTask : DefaultTask() {
         val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
         val target = target ?: throw GradleException("target cannot be null")
         val release = release ?: throw GradleException("release cannot be null")
-        val args = listOf("tauri", "android", "android-studio-script");
+        val args = listOf("tauri", "android", "android-studio-script")
 
         project.exec {
             workingDir(File(project.projectDir, rootDirRel))

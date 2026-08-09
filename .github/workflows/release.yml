@@ -112,6 +112,32 @@ jobs:
           esac
 
       - name: Build and publish release
+        if: >-
+          !startsWith(matrix.name, 'macOS') ||
+          vars.MACOS_SIGNING_MODE != 'developer-id'
+        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Mutsuna Echo __VERSION__
+          releaseBody: |
+            Mutsuna Echo __VERSION__
+
+            WindowsではNSISセットアップ（.exe）のみを配布します。
+            macOS署名: ${{ vars.MACOS_SIGNING_MODE == 'developer-id' && 'Developer ID署名・Notarization済み' || 'アドホック署名（未Notarization。初回起動時にmacOSの手動許可が必要）' }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+      - name: Build and publish Developer ID release
+        if: >-
+          startsWith(matrix.name, 'macOS') &&
+          vars.MACOS_SIGNING_MODE == 'developer-id'
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -128,7 +154,7 @@ jobs:
             Mutsuna Echo __VERSION__
 
             WindowsではNSISセットアップ（.exe）のみを配布します。
-            macOS署名: ${{ vars.MACOS_SIGNING_MODE == 'developer-id' && 'Developer ID署名・Notarization済み' || 'アドホック署名（未Notarization。初回起動時にmacOSの手動許可が必要）' }}
+            macOS署名: Developer ID署名・Notarization済み
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
