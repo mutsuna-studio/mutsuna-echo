@@ -105,6 +105,25 @@ if ($missingRuntimeFiles.Count -gt 0) {
     } else {
         Join-Path $isolatedTargetDirectory "$Target/release"
     }
+
+    # Cached sherpa-onnx-sys metadata points the linker at this native SDK
+    # tree. Restore it as well as the runtime DLLs/dylibs; Windows needs the
+    # import .lib files from its lib directory during tests and app builds.
+    $isolatedNativeCacheDirectory = Join-Path $isolatedTargetDirectory "sherpa-onnx-prebuilt"
+    $nativeCacheDirectory = Join-Path $resolvedTargetDirectory "sherpa-onnx-prebuilt"
+    if (-not (Test-Path -LiteralPath $isolatedNativeCacheDirectory -PathType Container)) {
+        throw "The isolated native SDK was not generated: $isolatedNativeCacheDirectory"
+    }
+    if (Test-Path -LiteralPath $nativeCacheDirectory) {
+        $resolvedNativeCacheDirectory = [System.IO.Path]::GetFullPath($nativeCacheDirectory)
+        $targetPrefix = $resolvedTargetDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedNativeCacheDirectory.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to replace native SDK outside Cargo target: $resolvedNativeCacheDirectory"
+        }
+        Remove-Item -LiteralPath $resolvedNativeCacheDirectory -Recurse -Force
+    }
+    Copy-Item -LiteralPath $isolatedNativeCacheDirectory -Destination $nativeCacheDirectory -Recurse -Force
+
     New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
     foreach ($fileName in $requiredFiles) {
         $isolatedRuntimePath = Join-Path $isolatedProfileDirectory $fileName
