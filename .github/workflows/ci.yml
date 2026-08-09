@@ -71,6 +71,10 @@ jobs:
           shared-key: ci-windows
           cache-on-failure: true
 
+      - name: Prepare native test libraries
+        shell: pwsh
+        run: ./scripts/prepare-desktop-runtime.ps1 -Platform windows
+
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
