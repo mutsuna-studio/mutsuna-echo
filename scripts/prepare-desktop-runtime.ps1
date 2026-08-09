@@ -73,25 +73,46 @@ $missingRuntimeFiles = @(
 if ($missingRuntimeFiles.Count -gt 0) {
     # rust-cache intentionally filters non-Cargo artifacts. A restored
     # sherpa-onnx-sys build can therefore look current while its copied shared
-    # libraries are absent. Remove only the dependency's generated native
-    # cache and force its build script to recreate the runtime files.
+    # libraries are absent. Build the dependency in an isolated target so its
+    # build script must recreate the runtime files without clearing the shared
+    # Cargo cache.
     Write-Host "Native runtime files are missing after the cached build; regenerating sherpa-onnx-sys."
-    $nativeCacheDirectory = Join-Path $tauriDirectory "target/sherpa-onnx-prebuilt"
-    if (Test-Path -LiteralPath $nativeCacheDirectory) {
-        $resolvedTargetDirectory = [System.IO.Path]::GetFullPath((Join-Path $tauriDirectory "target"))
-        $resolvedNativeCacheDirectory = [System.IO.Path]::GetFullPath($nativeCacheDirectory)
+    $resolvedTargetDirectory = [System.IO.Path]::GetFullPath((Join-Path $tauriDirectory "target"))
+    $isolatedTargetDirectory = Join-Path $resolvedTargetDirectory "native-runtime-prep"
+    if (Test-Path -LiteralPath $isolatedTargetDirectory) {
+        $resolvedIsolatedTargetDirectory = [System.IO.Path]::GetFullPath($isolatedTargetDirectory)
         $targetPrefix = $resolvedTargetDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-        if (-not $resolvedNativeCacheDirectory.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to remove native cache outside Cargo target: $resolvedNativeCacheDirectory"
+        if (-not $resolvedIsolatedTargetDirectory.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove isolated build directory outside Cargo target: $resolvedIsolatedTargetDirectory"
         }
-        Remove-Item -LiteralPath $resolvedNativeCacheDirectory -Recurse -Force
+        Remove-Item -LiteralPath $resolvedIsolatedTargetDirectory -Recurse -Force
     }
 
-    & cargo clean --manifest-path $manifestPath --package sherpa-onnx-sys
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to clean the stale native dependency with exit code $LASTEXITCODE."
+    $previousCargoTargetDirectory = $env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR = $isolatedTargetDirectory
+        Invoke-NativeRuntimeBuild
+    } finally {
+        if ([string]::IsNullOrEmpty($previousCargoTargetDirectory)) {
+            Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_TARGET_DIR = $previousCargoTargetDirectory
+        }
     }
-    Invoke-NativeRuntimeBuild
+
+    $isolatedProfileDirectory = if ([string]::IsNullOrWhiteSpace($Target)) {
+        Join-Path $isolatedTargetDirectory "release"
+    } else {
+        Join-Path $isolatedTargetDirectory "$Target/release"
+    }
+    New-Item -ItemType Directory -Path $profileDirectory -Force | Out-Null
+    foreach ($fileName in $requiredFiles) {
+        $isolatedRuntimePath = Join-Path $isolatedProfileDirectory $fileName
+        if (-not (Test-Path -LiteralPath $isolatedRuntimePath -PathType Leaf)) {
+            throw "Required $Platform runtime library was not generated in the isolated build: $isolatedRuntimePath"
+        }
+        Copy-Item -LiteralPath $isolatedRuntimePath -Destination (Join-Path $profileDirectory $fileName) -Force
+    }
 }
 
 foreach ($fileName in $requiredFiles) {
