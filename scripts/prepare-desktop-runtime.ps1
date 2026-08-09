@@ -29,10 +29,14 @@ if (-not [string]::IsNullOrWhiteSpace($Target)) {
     $cargoArguments += @("--target", $Target)
 }
 
-& cargo @cargoArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "The native runtime preparation build failed with exit code $LASTEXITCODE."
+function Invoke-NativeRuntimeBuild {
+    & cargo @cargoArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "The native runtime preparation build failed with exit code $LASTEXITCODE."
+    }
 }
+
+Invoke-NativeRuntimeBuild
 
 $profileDirectory = if ([string]::IsNullOrWhiteSpace($Target)) {
     Join-Path $tauriDirectory "target/release"
@@ -58,6 +62,36 @@ if ($Platform -eq "windows") {
     # copy cross-target output into it on GitHub-hosted runners.
     $bundleSourceDirectory = Join-Path $tauriDirectory "target/release"
     New-Item -ItemType Directory -Path $bundleSourceDirectory -Force | Out-Null
+}
+
+$missingRuntimeFiles = @(
+    $requiredFiles | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $profileDirectory $_) -PathType Leaf)
+    }
+)
+
+if ($missingRuntimeFiles.Count -gt 0) {
+    # rust-cache intentionally filters non-Cargo artifacts. A restored
+    # sherpa-onnx-sys build can therefore look current while its copied shared
+    # libraries are absent. Remove only the dependency's generated native
+    # cache and force its build script to recreate the runtime files.
+    Write-Host "Native runtime files are missing after the cached build; regenerating sherpa-onnx-sys."
+    $nativeCacheDirectory = Join-Path $tauriDirectory "target/sherpa-onnx-prebuilt"
+    if (Test-Path -LiteralPath $nativeCacheDirectory) {
+        $resolvedTargetDirectory = [System.IO.Path]::GetFullPath((Join-Path $tauriDirectory "target"))
+        $resolvedNativeCacheDirectory = [System.IO.Path]::GetFullPath($nativeCacheDirectory)
+        $targetPrefix = $resolvedTargetDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedNativeCacheDirectory.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove native cache outside Cargo target: $resolvedNativeCacheDirectory"
+        }
+        Remove-Item -LiteralPath $resolvedNativeCacheDirectory -Recurse -Force
+    }
+
+    & cargo clean --manifest-path $manifestPath --package sherpa-onnx-sys
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to clean the stale native dependency with exit code $LASTEXITCODE."
+    }
+    Invoke-NativeRuntimeBuild
 }
 
 foreach ($fileName in $requiredFiles) {
