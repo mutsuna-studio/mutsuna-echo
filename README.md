@@ -88,7 +88,7 @@ cargo clippy --all-targets -- -D warnings
 | Environment | 登録するGitHub Actions Secrets |
 | --- | --- |
 | `release-windows` | `TAURI_SIGNING_PRIVATE_KEY`、必要な場合は`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
-| `release-macos` | Tauri署名鍵一式とApple署名・Notarization用Secret一式 |
+| `release-macos` | Tauri署名鍵一式。Developer IDへ移行する場合はApple署名・Notarization用Secret一式も追加 |
 | `release-android` | AndroidアップロードKeystore用Secret一式 |
 
 初回リリース前に、該当Environmentへ次のSecretを登録してください。Repository Secretへまとめて登録しないでください。
@@ -101,6 +101,15 @@ cargo clippy --all-targets -- -D warnings
 - `ANDROID_KEYSTORE_PASSWORD`: Keystoreのパスワード
 - `ANDROID_KEY_ALIAS`: アップロードキーのalias
 - `ANDROID_KEY_PASSWORD`: アップロードキーのパスワード
+
+### macOS署名モード
+
+Repository Variable `MACOS_SIGNING_MODE`でmacOSの署名方法を切り替えます。
+
+- `adhoc`: Apple Developer Programなしでアドホック署名する現在の設定です。Notarizationされないため、利用者は初回起動時にmacOSの「プライバシーとセキュリティ」から手動で許可する必要があります。
+- `developer-id`: Developer ID署名とNotarizationを行います。`release-macos`へ上記6つのApple Secretを登録してから切り替えます。不足しているSecretがある場合は、署名処理前に分かりやすいエラーで停止します。
+
+Apple Developer Program加入後の切り替えではWorkflowの変更は不要です。`release-macos`へApple Secretを登録し、Repository Variableを`developer-id`へ変更してください。
 
 `.tauri/`はgitignore済みです。更新署名鍵を失うと既存ユーザーへ更新を配信できなくなるため、`.tauri/mutsuna-echo.key`はパスワード管理された保管先へバックアップしてください。公開鍵だけが`tauri.conf.json`へ含まれます。
 

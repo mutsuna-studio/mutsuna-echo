@@ -62,16 +62,47 @@ jobs:
       - name: Check frontend
         run: pnpm check
 
-      - name: Prepare App Store Connect private key
+      - name: Configure macOS signing
         if: startsWith(matrix.name, 'macOS')
         shell: bash
         env:
+          MACOS_SIGNING_MODE: ${{ vars.MACOS_SIGNING_MODE || 'adhoc' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
         run: |
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          node -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_API_PRIVATE_KEY, 'base64'))" "$key_path"
-          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          case "$MACOS_SIGNING_MODE" in
+            adhoc)
+              echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+              ;;
+            developer-id)
+              for name in \
+                APPLE_CERTIFICATE \
+                APPLE_CERTIFICATE_PASSWORD \
+                APPLE_SIGNING_IDENTITY_SECRET \
+                APPLE_API_ISSUER \
+                APPLE_API_KEY \
+                APPLE_API_PRIVATE_KEY
+              do
+                if [ -z "${!name:-}" ]; then
+                  echo "::error::Missing release-macos secret: $name"
+                  exit 1
+                fi
+              done
+
+              key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+              node -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_API_PRIVATE_KEY, 'base64'))" "$key_path"
+              echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY_SECRET" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::MACOS_SIGNING_MODE must be 'adhoc' or 'developer-id'."
+              exit 1
+              ;;
+          esac
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
@@ -81,7 +112,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
@@ -91,6 +121,7 @@ jobs:
             Mutsuna Echo __VERSION__
 
             WindowsではNSISセットアップ（.exe）のみを配布します。
+            macOS署名: ${{ vars.MACOS_SIGNING_MODE == 'developer-id' && 'Developer ID署名・Notarization済み' || 'アドホック署名（未Notarization。初回起動時にmacOSの手動許可が必要）' }}
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
