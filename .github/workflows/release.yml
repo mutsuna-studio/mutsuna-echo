@@ -56,6 +56,12 @@ jobs:
           toolchain: stable
           targets: ${{ startsWith(matrix.name, 'macOS') && 'aarch64-apple-darwin' || '' }}
 
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.environment }}
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -205,6 +211,13 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-linux-android
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-android-aarch64
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
