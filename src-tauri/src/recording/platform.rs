@@ -309,6 +309,9 @@ fn soft_limit(sample: f32) -> f32 {
 mod tests {
     use super::mix_with_limiter;
 
+    #[cfg(target_os = "windows")]
+    static WINDOWS_ENCODER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn mix_uses_equal_gain_and_never_clips() {
         let mixed = mix_with_limiter(&[1.0, -1.0, 0.5], &[1.0, -1.0, -0.5]);
@@ -326,6 +329,10 @@ mod tests {
     fn windows_encoder_writes_playable_m4a() {
         use super::M4aWriter;
         use lofty::{file::AudioFile, probe::Probe};
+
+        let _encoder_guard = WINDOWS_ENCODER_TEST_LOCK
+            .lock()
+            .expect("lock Windows encoder test");
 
         let path = std::env::temp_dir().join(format!(
             "mutsuna-echo-encoder-smoke-{}.m4a",
@@ -362,6 +369,10 @@ mod tests {
     fn windows_encoder_can_finalize_without_captured_samples() {
         use super::M4aWriter;
         use lofty::{file::AudioFile, probe::Probe};
+
+        let _encoder_guard = WINDOWS_ENCODER_TEST_LOCK
+            .lock()
+            .expect("lock Windows encoder test");
 
         for captured_frames in [0, 1, 960] {
             let path = std::env::temp_dir().join(format!(

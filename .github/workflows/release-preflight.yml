@@ -1,38 +1,57 @@
-name: Release applications
+name: Release preflight
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Distribution artifact to verify without publishing a release
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - desktop
+          - android
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: release-preflight-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
 
 jobs:
-  publish:
-    name: Build ${{ matrix.name }}
-    permissions:
-      contents: write
-    environment:
-      name: ${{ matrix.environment }}
+  desktop:
+    name: Preflight ${{ matrix.name }}
+    if: inputs.platform == 'all' || inputs.platform == 'desktop'
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Windows NSIS
+            selector: windows
             platform: windows-latest
-            args: --bundles nsis
+            runtime_platform: windows
+            runtime_target: ""
+            build_args: --bundles nsis
             environment: release-windows
+            artifact_name: windows-nsis-preflight
+            artifact_path: src-tauri/target/release/bundle/nsis
           - name: macOS Apple Silicon
+            selector: macos
             platform: macos-latest
-            args: --target aarch64-apple-darwin --bundles app,dmg
+            runtime_platform: macos
+            runtime_target: aarch64-apple-darwin
+            build_args: --target aarch64-apple-darwin --bundles app,dmg
             environment: release-macos
+            artifact_name: macos-apple-silicon-preflight
+            artifact_path: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos
 
     runs-on: ${{ matrix.platform }}
+    environment:
+      name: ${{ matrix.environment }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +73,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: stable
-          targets: ${{ startsWith(matrix.name, 'macOS') && 'aarch64-apple-darwin' || '' }}
+          targets: ${{ matrix.runtime_target }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -66,11 +85,11 @@ jobs:
         shell: pwsh
         run: >-
           ./scripts/prepare-desktop-runtime.ps1
-          -Platform ${{ startsWith(matrix.name, 'macOS') && 'macos' || 'windows' }}
-          ${{ startsWith(matrix.name, 'macOS') && '-Target aarch64-apple-darwin' || '' }}
+          -Platform ${{ matrix.runtime_platform }}
+          ${{ matrix.runtime_target && format('-Target {0}', matrix.runtime_target) || '' }}
 
       - name: Configure macOS signing
-        if: startsWith(matrix.name, 'macOS')
+        if: matrix.selector == 'macos'
         shell: bash
         env:
           MACOS_SIGNING_MODE: ${{ vars.MACOS_SIGNING_MODE || 'adhoc' }}
@@ -111,32 +130,42 @@ jobs:
               ;;
           esac
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
+      - name: Build distribution bundle
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: pnpm tauri build ${{ matrix.build_args }}
+
+      - name: Verify Windows distribution bundle
+        if: matrix.selector == 'windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $installer) { throw 'The NSIS installer was not generated.' }
+          if (-not (Test-Path -LiteralPath "$($installer.FullName).sig")) { throw 'The NSIS updater signature was not generated.' }
+
+      - name: Verify macOS distribution bundle
+        if: matrix.selector == 'macos'
+        shell: pwsh
+        run: |
+          $bundleRoot = 'src-tauri/target/aarch64-apple-darwin/release/bundle'
+          if (-not (Get-ChildItem "$bundleRoot/dmg" -Filter '*.dmg' | Select-Object -First 1)) { throw 'The macOS DMG was not generated.' }
+          if (-not (Get-ChildItem "$bundleRoot/macos" -Filter '*.app' | Select-Object -First 1)) { throw 'The macOS app bundle was not generated.' }
+
+      - name: Upload preflight artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Mutsuna Echo __VERSION__
-          releaseBody: |
-            Mutsuna Echo __VERSION__
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
 
-            WindowsではNSISセットアップ（.exe）のみを配布します。
-            macOS署名: ${{ vars.MACOS_SIGNING_MODE == 'developer-id' && 'Developer ID署名・Notarization済み' || 'アドホック署名（未Notarization。初回起動時にmacOSの手動許可が必要）' }}
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
-
-  build-android:
-    name: Build signed Android AAB
+  android:
+    name: Preflight Android signed AAB
+    if: inputs.platform == 'all' || inputs.platform == 'android'
     runs-on: ubuntu-latest
     environment:
       name: release-android
@@ -220,6 +249,6 @@ jobs:
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: android-aarch64-aab
+          name: android-aarch64-aab-preflight
           path: ${{ steps.verify-android.outputs.aab_path }}
           if-no-files-found: error

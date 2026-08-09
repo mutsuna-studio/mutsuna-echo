@@ -83,6 +83,10 @@ cargo clippy --all-targets -- -D warnings
 
 同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存します。Google Playへの自動アップロードは行わず、初回はPlay Consoleから手動で登録します。
 
+タグを作成する前に、Actionsの`Release preflight`を手動実行してください。`all`はWindows NSIS、Apple Silicon版macOS、署名済みAndroid AABをすべて検証し、`desktop`と`android`では対象を限定できます。PreflightはGitHub Releaseを作成せず、検証済み成果物をActions Artifactへ保存します。各Jobは本番リリースと同じEnvironmentとSecretを使うため、Environmentの承認も含めて事前確認できます。
+
+デスクトップビルドでは、Tauriがバンドル対象を検証する前に`scripts/prepare-desktop-runtime.ps1`が`sherpa-onnx-sys`だけを先行ビルドします。これにより、クリーンなRunnerでもSherpa ONNXとONNX RuntimeのDLL／dylibが確実に生成され、アプリ本体を二重にコンパイルせずに配布物へ含められます。
+
 リリースJobはGitHub Environmentsの承認後にだけ署名用Secretへアクセスします。次のEnvironmentを作成し、Required reviewersと`v*`タグのみ許可を設定してください。承認可能なMaintainerが2人以上になったら自己承認も禁止してください（現在の1人構成で禁止するとリリース不能になります）。
 
 | Environment | 登録するGitHub Actions Secrets |
