@@ -65,6 +65,7 @@
   }
 
   let loading = $state(true);
+  let toasterPosition = $state<"top-right" | "bottom-center">("top-right");
   let section = $state<AppSection>("meetings");
   let libraryOpen = $state(true);
   let meetings = $state.raw<RecentMeetingSummary[]>([]);
@@ -108,6 +109,16 @@
   let transcriptReplacementUndo = $state.raw<TranscriptReplacementUndo | null>(null);
   const pendingTranscriptChanges = new Map<string, string>();
   const pendingSpeakerLabelChanges = new Map<string, string>();
+
+  $effect(() => {
+    const compactViewport = window.matchMedia("(max-width: 600px)");
+    const updateToasterPosition = () => {
+      toasterPosition = compactViewport.matches ? "bottom-center" : "top-right";
+    };
+    updateToasterPosition();
+    compactViewport.addEventListener("change", updateToasterPosition);
+    return () => compactViewport.removeEventListener("change", updateToasterPosition);
+  });
 
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy || updating);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || updating);
@@ -892,7 +903,7 @@
 </svelte:head>
 
 <ThemeProvider theme={echoTheme}>
-  <Toaster position="top-right" closeButton />
+  <Toaster position={toasterPosition} closeButton />
   <AdminShellFrame {pageTitle} contentClass="p-0 overflow-hidden" headerClass="bg-background">
     {#snippet sidebar()}
       <AppSidebar {section} onNavigate={navigate} />
@@ -968,8 +979,6 @@
       {:else if section === "new"}
         <section class="page-view new-meeting-view">
           <header class="page-header">
-            <p>NEW MEETING</p>
-            <h1>新しいMeeting</h1>
             <span>録音を開始するか、既存の音声ファイルを読み込みます。</span>
           </header>
           <AudioInputPanel
@@ -985,6 +994,7 @@
             {canTranscribe}
             onSelect={selectAudioFile}
             onTranscribe={transcribeAudio}
+            onOpenSettings={() => section = "settings"}
             onProviderChange={changeTranscriptionProvider}
             onRecordedAudio={handleRecordedAudio}
             onRecordingBusyChange={(value) => recordingBusy = value}
@@ -995,8 +1005,6 @@
       {:else}
         <section class="page-view settings-view">
           <header class="page-header">
-            <p>SETTINGS</p>
-            <h1>設定</h1>
             <span>アプリ更新、文字起こし、要約エージェント、ローカルモデル、利用状況を管理します。</span>
           </header>
           <div class="settings-section">

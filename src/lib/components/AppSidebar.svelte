@@ -89,7 +89,7 @@
   nav button {
     display: flex;
     width: 100%;
-    height: 42px;
+    height: 44px;
     align-items: center;
     gap: 11px;
     padding: 0 12px;

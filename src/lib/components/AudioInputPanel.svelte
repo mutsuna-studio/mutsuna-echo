@@ -25,6 +25,7 @@
     canTranscribe: boolean;
     onSelect: () => void;
     onTranscribe: () => void;
+    onOpenSettings: () => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
     onRecordedAudio: (audio: SelectedAudioFile) => void;
     onRecordingBusyChange: (busy: boolean) => void;
@@ -45,6 +46,7 @@
     canTranscribe,
     onSelect,
     onTranscribe,
+    onOpenSettings,
     onProviderChange,
     onRecordedAudio,
     onRecordingBusyChange,
@@ -150,7 +152,10 @@
         ariaLabel="文字起こしモデル"
       />
       {#if usableProviders.length === 0}
-        <p class="provider-unavailable">利用できるモデルがありません。設定画面でモデルを準備してください。</p>
+        <div class="provider-unavailable">
+          <p>利用できるモデルがありません。設定画面でモデルを準備してください。</p>
+          <Button size="sm" variant="outline" type="button" onclick={onOpenSettings}>設定を開く</Button>
+        </div>
       {/if}
     </div>
     {#if selectedAudio && providerDefinition?.pricingUsdPerHour != null && estimatedCostUsd != null}
@@ -172,7 +177,8 @@
   .section-description { margin: 7px 0 0; color: var(--muted-foreground); font-size: 0.82rem; }
   .transcription-settings-heading p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
   .provider-picker { display: grid; gap: 10px; }
-  .provider-unavailable { margin: 0; color: var(--muted-foreground); font-size: 0.78rem; }
+  .provider-unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted-foreground); font-size: 0.78rem; }
+  .provider-unavailable p { margin: 0; }
   .selected-cost { margin: 12px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
   .selected-cost strong { color: var(--foreground); }
 

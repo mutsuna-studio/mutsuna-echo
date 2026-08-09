@@ -61,7 +61,7 @@ input {
   scrollbar-gutter: stable;
 }
 
-.page-header { margin-bottom: 30px; }
+.page-header { margin-bottom: 24px; }
 .page-header p { margin: 0 0 7px; color: var(--primary); font-size: 0.67rem; font-weight: 780; letter-spacing: 0.14em; }
 .page-header h1 { margin: 0 0 8px; font-size: 1.65rem; line-height: 1.2; letter-spacing: -0.035em; }
 .page-header span { color: var(--muted-foreground); font-size: 0.86rem; }
@@ -419,6 +419,21 @@ h3 {
 
   .action-row > button,
   .input-row > button { width: 100%; }
+  .new-meeting-view { padding-bottom: 112px; }
+  .new-meeting-view .provider-action {
+    position: fixed;
+    z-index: 20;
+    right: 18px;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    left: 18px;
+    margin: 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in oklch, var(--background) 92%, transparent);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  }
+  .new-meeting-view .provider-action .action-help { display: none; }
   .model { display: none; }
   .usage-grid,
   .input-tabs,
