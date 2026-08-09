@@ -26,10 +26,12 @@ jobs:
           - name: Windows NSIS
             platform: windows-latest
             args: --bundles nsis
+            adhocArgs: --bundles nsis
             environment: release-windows
           - name: macOS Apple Silicon
             platform: macos-latest
             args: --target aarch64-apple-darwin --bundles app,dmg
+            adhocArgs: --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.macos-adhoc.conf.json
             environment: release-macos
 
     runs-on: ${{ matrix.platform }}
@@ -90,7 +92,6 @@ jobs:
           case "$MACOS_SIGNING_MODE" in
             adhoc)
               echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-              echo 'TAURI_CONFIG={"bundle":{"macOS":{"entitlements":"Entitlements.adhoc.plist"}}}' >> "$GITHUB_ENV"
               ;;
             developer-id)
               for name in \
@@ -139,7 +140,7 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.adhocArgs }}
 
       - name: Build and publish Developer ID release
         if: >-
@@ -181,9 +182,11 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app_path"
 
           if [ "$MACOS_SIGNING_MODE" = "adhoc" ]; then
-            entitlements="$(codesign --display --entitlements :- "$executable" 2>&1)"
-            if ! grep -A1 '<key>com.apple.security.cs.disable-library-validation</key>' <<<"$entitlements" | grep -q '<true/>'; then
-              echo "$entitlements"
+            entitlements_path="$RUNNER_TEMP/mutsuna-echo-entitlements.plist"
+            codesign --display --entitlements "$entitlements_path" "$executable"
+            entitlement_value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$entitlements_path" 2>/dev/null || true)"
+            if [ "$entitlement_value" != "true" ]; then
+              cat "$entitlements_path" || true
               echo "::error::The ad-hoc application is missing the Disable Library Validation entitlement."
               exit 1
             fi
