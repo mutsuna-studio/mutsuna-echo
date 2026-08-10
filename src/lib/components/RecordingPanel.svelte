@@ -113,13 +113,23 @@
     return "録音を保存しました。内容を確認してから文字起こしを開始できます。";
   }
 
-  async function deliverCompletedRecording(nextStatus: RecordingStatus) {
-    if (nextStatus.phase !== "completed" || !nextStatus.outputPath || deliveredOutput === nextStatus.outputPath) return;
-    const audio = await invoke<SelectedAudioFile | null>("get_recorded_audio");
-    if (audio) {
-      deliveredOutput = nextStatus.outputPath;
+  async function deliverCompletedRecording(nextStatus: RecordingStatus, completedAudio?: SelectedAudioFile | null) {
+    const outputPath = nextStatus.outputPath;
+    if (nextStatus.phase !== "completed" || !outputPath || deliveredOutput === outputPath) return;
+
+    // 状態イベントと停止操作の結果が並行して届くため、非同期処理の前に予約する。
+    deliveredOutput = outputPath;
+    try {
+      const audio = completedAudio ?? await invoke<SelectedAudioFile | null>("get_recorded_audio");
+      if (!audio) {
+        deliveredOutput = "";
+        return;
+      }
       onAudioReady(audio);
       onMessage(stopMessage(nextStatus.stopReason));
+    } catch (error) {
+      deliveredOutput = "";
+      throw error;
     }
   }
 
@@ -287,11 +297,7 @@
     try {
       const result = await invoke<StopRecordingResult>("stop_recording");
       status = result.status;
-      if (result.audio && deliveredOutput !== result.status.outputPath) {
-        deliveredOutput = result.status.outputPath ?? "";
-        onAudioReady(result.audio);
-      }
-      onMessage(stopMessage(result.status.stopReason));
+      await deliverCompletedRecording(result.status, result.audio);
     } catch (error) {
       onError(errorText(error));
     } finally {
