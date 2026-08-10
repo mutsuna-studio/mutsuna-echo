@@ -107,7 +107,7 @@ cargo clippy --all-targets -- -D warnings
 
 Google Playへの自動公開には、Google CloudでGoogle Play Developer APIを有効化してサービスアカウントを作成し、Play Consoleの「ユーザーと権限」で`jp.mutsuna.echo`をproductionへ公開できる権限を付与します。JSON鍵の内容全体をGitHub Environment `release-android`の`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`へ登録してください。完全自動公開にする場合は、Play ConsoleのManaged publishingを無効にします。
 
-GitHub Environment `release-android`のVariable `ANDROID_RELEASE_TRACK`には、製品版アクセスの承認前は`alpha`、承認後は`production`を設定します。失敗したAndroid公開だけを再実行する場合は、Release applications Workflowを`release_tag=v0.1.2`、`android_only=true`で手動実行します。
+GitHub Environment `release-android`のVariable `ANDROID_RELEASE_TRACK`には、製品版アクセスの承認前は`alpha`、承認後は`production`を設定します。失敗したAndroid公開だけを再実行する場合は、`v0.1.2-android-retry.1`のような再公開専用タグを作成します。この形式ではデスクトップJobをスキップし、元の`v0.1.2`をリリース名としてAndroid Jobだけを実行します。
 
 リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.2`は`1002`になります。
 

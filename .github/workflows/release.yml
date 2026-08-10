@@ -4,29 +4,20 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing release tag to publish
-        required: true
-        type: string
-      android_only:
-        description: Publish only the Android release
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.release_tag || github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate-release:
     name: Validate release version
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release-version.outputs.release_tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,11 +30,12 @@ jobs:
           node-version: 24
 
       - name: Verify tag and application versions
-        run: node scripts/verify-release-version.mjs "${{ inputs.release_tag || github.ref_name }}"
+        id: release-version
+        run: node scripts/verify-release-version.mjs "${{ github.ref_name }}"
 
   publish:
     name: Build ${{ matrix.name }}
-    if: github.event_name != 'workflow_dispatch' || !inputs.android_only
+    if: ${{ !contains(github.ref_name, '-android-retry.') }}
     needs: validate-release
     permissions:
       contents: write
@@ -360,5 +352,5 @@ jobs:
           tracks: ${{ vars.ANDROID_RELEASE_TRACK || 'alpha' }}
           status: completed
           changesNotSentForReview: false
-          releaseName: ${{ inputs.release_tag || github.ref_name }}
+          releaseName: ${{ needs.validate-release.outputs.release_tag }}
           whatsNewDirectory: distribution/whatsnew
