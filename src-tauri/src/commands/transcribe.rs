@@ -22,6 +22,9 @@ pub(crate) struct AudioSelectionState {
     selected: Mutex<Option<SelectedAudio>>,
     meeting_id: Mutex<Option<String>>,
     transcribing: AtomicBool,
+    diarizing: AtomicBool,
+    inference_active: AtomicBool,
+    diarization_cancelled: AtomicBool,
     progress: Mutex<Option<TranscriptionProgress>>,
 }
 
@@ -137,6 +140,14 @@ pub(crate) struct UpdateTranscriptDocumentRequest {
 pub(crate) struct ResetTranscriptDocumentRequest {
     transcription_id: String,
     expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiarizeTranscriptionRequest {
+    transcription_id: String,
+    expected_revision: u64,
+    speaker_count: Option<u8>,
 }
 
 fn describe_audio_path(path: &Path, meeting_id: String) -> Result<SelectedAudioFile, String> {
@@ -337,11 +348,21 @@ struct TranscriptionGuard<'a>(&'a AudioSelectionState);
 impl Drop for TranscriptionGuard<'_> {
     fn drop(&mut self) {
         self.0.transcribing.store(false, Ordering::Release);
+        self.0.inference_active.store(false, Ordering::Release);
         *self
             .0
             .progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+struct DiarizationGuard<'a>(&'a AudioSelectionState);
+
+impl Drop for DiarizationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.diarizing.store(false, Ordering::Release);
+        self.0.inference_active.store(false, Ordering::Release);
     }
 }
 
@@ -681,12 +702,13 @@ pub(crate) async fn transcribe_selected_audio(
     request: TranscriptionRequest,
 ) -> Result<TranscriptionResult, String> {
     if state
-        .transcribing
+        .inference_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err("文字起こしはすでに実行中です。".to_string());
+        return Err("文字起こしまたは話者分離を実行中です。".to_string());
     }
+    state.transcribing.store(true, Ordering::Release);
     let _guard = TranscriptionGuard(&state);
     publish_transcription_progress(
         &app,
@@ -745,6 +767,104 @@ pub(crate) async fn transcribe_selected_audio(
         run,
         persistence_warning,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn diarize_selected_transcription(
+    app: AppHandle,
+    state: State<'_, AudioSelectionState>,
+    request: DiarizeTranscriptionRequest,
+) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    if request
+        .speaker_count
+        .is_some_and(|count| !(1..=10).contains(&count))
+    {
+        return Err("話者数は1〜10人で指定してください。".into());
+    }
+    if state
+        .inference_active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("文字起こしまたは話者分離を実行中です。".into());
+    }
+    state.diarizing.store(true, Ordering::Release);
+    state.diarization_cancelled.store(false, Ordering::Release);
+    let _guard = DiarizationGuard(&state);
+    let selected = state
+        .selected
+        .lock()
+        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
+        .clone()
+        .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
+    validate_audio_path(&selected.path)?;
+    crate::transcript_store::diarization_target(
+        &app,
+        &selected.descriptor.meeting_id,
+        &request.transcription_id,
+        request.expected_revision,
+    )?;
+
+    #[cfg(any(desktop, target_os = "android"))]
+    {
+        let worker_app = app.clone();
+        let audio_path = selected.path.clone();
+        let total_ms = selected.descriptor.duration_ms;
+        let speaker_count = request.speaker_count;
+        let output = tauri::async_runtime::spawn_blocking(move || {
+            let worker_state = worker_app.state::<AudioSelectionState>();
+            crate::transcription::local_diarization::diarize(
+                &worker_app,
+                &audio_path,
+                crate::transcription::local_diarization::LocalDiarizationOptions {
+                    speaker_count,
+                    total_ms: Some(total_ms),
+                },
+                &worker_state.diarization_cancelled,
+                |progress| {
+                    if let Err(error) = worker_app.emit("local-diarization-progress", progress) {
+                        eprintln!("Could not emit diarization progress: {error:?}");
+                    }
+                },
+            )
+        })
+        .await
+        .map_err(|error| format!("話者分離処理を完了できませんでした: {error}"))??;
+        if state.diarization_cancelled.load(Ordering::Acquire) {
+            return Err("話者分離をキャンセルしました。".into());
+        }
+        let metadata = crate::transcript_store::DiarizationMetadata {
+            model_id: output.metadata.model_id,
+            model_version: output.metadata.model_version,
+            completed_at: output.metadata.completed_at,
+            requested_speaker_count: output.metadata.requested_speaker_count,
+            estimated_speaker_count: output.metadata.estimated_speaker_count,
+            chunk_duration_ms: output.metadata.chunk_duration_ms,
+            chunk_overlap_ms: output.metadata.chunk_overlap_ms,
+            local_cluster_threshold: output.metadata.local_cluster_threshold,
+            global_embedding_threshold: output.metadata.global_embedding_threshold,
+        };
+        let run = crate::transcript_store::apply_diarization(
+            &app,
+            &selected.descriptor.meeting_id,
+            &request.transcription_id,
+            request.expected_revision,
+            &output.turns,
+            metadata,
+        )?;
+        let _ = crate::meeting_store::mark_updated(&app, &selected.descriptor.meeting_id);
+        Ok(run)
+    }
+    #[cfg(not(any(desktop, target_os = "android")))]
+    {
+        let _ = (app, request, selected);
+        Err("この端末ではローカル話者分離を利用できません。".into())
+    }
+}
+
+#[tauri::command]
+pub(crate) fn cancel_selected_diarization(state: State<'_, AudioSelectionState>) {
+    state.diarization_cancelled.store(true, Ordering::Release);
 }
 
 #[tauri::command]

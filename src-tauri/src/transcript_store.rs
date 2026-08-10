@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::transcription::{
-    normalize_transcript_for_display, Transcript, TranscriptionProvider,
+    diarization::{merge_speaker_turns, SpeakerMergePolicy, SpeakerTurn},
+    normalize_transcript_for_display, segments_from_tokens, Transcript, TranscriptionProvider,
     DISPLAY_SEGMENTATION_VERSION,
 };
 
@@ -105,8 +106,24 @@ struct StoredTranscriptionRun {
     settings: TranscriptionSettingsSnapshot,
     #[serde(default)]
     cost_usd: Option<String>,
+    #[serde(default)]
+    diarization: Option<DiarizationMetadata>,
     source: Transcript,
     document: TranscriptDocument,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiarizationMetadata {
+    pub(crate) model_id: String,
+    pub(crate) model_version: String,
+    pub(crate) completed_at: String,
+    pub(crate) requested_speaker_count: Option<u8>,
+    pub(crate) estimated_speaker_count: u32,
+    pub(crate) chunk_duration_ms: u64,
+    pub(crate) chunk_overlap_ms: u64,
+    pub(crate) local_cluster_threshold: f32,
+    pub(crate) global_embedding_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -342,6 +359,7 @@ pub(crate) fn create_run(
         language: transcript.language.clone(),
         settings: settings_snapshot(app, transcript),
         cost_usd,
+        diarization: None,
         source: transcript.clone(),
         document: document_from_transcript(transcript, now),
     };
@@ -351,6 +369,150 @@ pub(crate) fn create_run(
     index.runs.push(run_summary(&run));
     write_history_index(&directory, &index)?;
     Ok(run_detail(&run))
+}
+
+pub(crate) fn diarization_target(
+    app: &AppHandle,
+    meeting_id: &str,
+    transcription_id: &str,
+    expected_revision: u64,
+) -> Result<Transcript, String> {
+    validate_transcription_id(transcription_id)?;
+    let _guard = store_guard()?;
+    let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
+    let run = read_run(&directory, meeting_id, transcription_id)?;
+    if run.document.revision != expected_revision {
+        return Err(
+            "文字起こしが別の操作で更新されました。再読み込みしてからやり直してください。".into(),
+        );
+    }
+    if run.source.tokens.is_empty()
+        || run
+            .source
+            .tokens
+            .iter()
+            .all(|token| token.start_ms.is_none())
+    {
+        return Err(
+            "トークン単位の時刻がないため、この文字起こしには話者分離を適用できません。".into(),
+        );
+    }
+    Ok(run.source)
+}
+
+pub(crate) fn apply_diarization(
+    app: &AppHandle,
+    meeting_id: &str,
+    transcription_id: &str,
+    expected_revision: u64,
+    turns: &[SpeakerTurn],
+    metadata: DiarizationMetadata,
+) -> Result<TranscriptionRunDetail, String> {
+    validate_transcription_id(transcription_id)?;
+    let _guard = store_guard()?;
+    let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
+    let mut index = ensure_history_in(&directory, meeting_id)?;
+    let mut run = read_run(&directory, meeting_id, transcription_id)?;
+    if run.document.revision != expected_revision {
+        return Err(
+            "話者分離中に文字起こしが更新されました。再読み込みしてからやり直してください。".into(),
+        );
+    }
+    let old_document = run.document.clone();
+    let mut updated_source = run.source.clone();
+    merge_speaker_turns(
+        &mut updated_source,
+        turns,
+        SpeakerMergePolicy::ReplaceAutomatic,
+    )?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let segments = rebase_document_segments(&old_document.segments, &updated_source, turns);
+    run.source = updated_source;
+    run.document = TranscriptDocument {
+        revision: old_document.revision.saturating_add(1),
+        updated_at: now,
+        edited: segments.iter().any(|segment| segment.edited),
+        segmentation_version: DISPLAY_SEGMENTATION_VERSION,
+        speaker_labels: BTreeMap::new(),
+        segments,
+    };
+    run.diarization = Some(metadata);
+    write_run(&directory, &run)?;
+    if let Some(summary) = index
+        .runs
+        .iter_mut()
+        .find(|summary| summary.transcription_id == transcription_id)
+    {
+        *summary = run_summary(&run);
+    }
+    write_history_index(&directory, &index)?;
+    Ok(run_detail(&run))
+}
+
+fn rebase_document_segments(
+    existing: &[EditableTranscriptSegment],
+    source: &Transcript,
+    turns: &[SpeakerTurn],
+) -> Vec<EditableTranscriptSegment> {
+    let mut rebased = Vec::new();
+    for old in existing {
+        if old.edited {
+            let mut preserved = old.clone();
+            preserved.speaker = dominant_speaker(old.start_ms, old.end_ms, turns)
+                .unwrap_or_else(|| old.speaker.clone());
+            rebased.push(preserved);
+            continue;
+        }
+        let tokens = source
+            .tokens
+            .iter()
+            .filter(|token| {
+                token.start_ms.is_some_and(|start| {
+                    let end = token.end_ms.unwrap_or(start).max(start);
+                    let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
+                    midpoint >= old.start_ms && midpoint < old.end_ms
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let rebuilt = segments_from_tokens(&tokens);
+        if rebuilt.is_empty() {
+            let mut fallback = old.clone();
+            fallback.speaker = dominant_speaker(old.start_ms, old.end_ms, turns)
+                .unwrap_or_else(|| old.speaker.clone());
+            rebased.push(fallback);
+        } else {
+            rebased.extend(
+                rebuilt
+                    .into_iter()
+                    .map(|segment| EditableTranscriptSegment {
+                        segment_id: uuid::Uuid::now_v7().to_string(),
+                        speaker: segment.speaker,
+                        start_ms: segment.start_ms,
+                        end_ms: segment.end_ms,
+                        text: segment.text,
+                        edited: false,
+                    }),
+            );
+        }
+    }
+    rebased.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
+    rebased
+}
+
+fn dominant_speaker(start_ms: u64, end_ms: u64, turns: &[SpeakerTurn]) -> Option<String> {
+    let mut overlap = BTreeMap::<&str, u64>::new();
+    for turn in turns {
+        let start = start_ms.max(turn.start_ms);
+        let end = end_ms.min(turn.end_ms);
+        if end > start {
+            *overlap.entry(turn.speaker.as_str()).or_default() += end - start;
+        }
+    }
+    overlap
+        .into_iter()
+        .max_by_key(|(speaker, duration)| (*duration, std::cmp::Reverse(*speaker)))
+        .map(|(speaker, _)| speaker.to_string())
 }
 
 pub(crate) fn selected_run(
@@ -677,6 +839,7 @@ fn ensure_history_in(
             language: stored.transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
             cost_usd: None,
+            diarization: None,
             document: document_from_transcript(&stored.transcript, stored.saved_at),
             source: stored.transcript,
         };
@@ -1175,15 +1338,70 @@ mod tests {
 
     use super::{
         apply_segment_changes, apply_speaker_label_changes, audio_key, document_from_transcript,
-        ensure_history_in, load_current_in, load_legacy_in, read_run, reset_document_from_source,
-        save_in, transcript_path_in, StoredTranscriptionRun, TranscriptSegmentChange,
-        TranscriptSpeakerLabelChange, TranscriptionSettingsSnapshot, RUN_SCHEMA_VERSION,
-        SCHEMA_VERSION,
+        ensure_history_in, load_current_in, load_legacy_in, read_run, rebase_document_segments,
+        reset_document_from_source, save_in, transcript_path_in, StoredTranscriptionRun,
+        TranscriptSegmentChange, TranscriptSpeakerLabelChange, TranscriptionSettingsSnapshot,
+        RUN_SCHEMA_VERSION, SCHEMA_VERSION,
     };
     use crate::transcription::{
-        TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
-        TranscriptionProvider,
+        diarization::SpeakerTurn, TokenSpeakerSource, TokenTimeSource, Transcript,
+        TranscriptSegment, TranscriptToken, TranscriptionProvider,
     };
+
+    #[test]
+    fn diarization_rebase_preserves_edited_text_and_splits_unedited_text() {
+        let mut source = fixture_transcript();
+        source.tokens = vec![
+            TranscriptToken {
+                text: "前半".into(),
+                start_ms: Some(100),
+                end_ms: Some(250),
+                start_time_source: Some(TokenTimeSource::Provider),
+                end_time_source: Some(TokenTimeSource::Provider),
+                speaker: Some("Speaker 1".into()),
+                speaker_source: Some(TokenSpeakerSource::Diarization),
+                confidence: None,
+            },
+            TranscriptToken {
+                text: "後半".into(),
+                start_ms: Some(250),
+                end_ms: Some(500),
+                start_time_source: Some(TokenTimeSource::Provider),
+                end_time_source: Some(TokenTimeSource::Provider),
+                speaker: Some("Speaker 2".into()),
+                speaker_source: Some(TokenSpeakerSource::Diarization),
+                confidence: None,
+            },
+        ];
+        let turns = vec![
+            SpeakerTurn {
+                speaker: "Speaker 1".into(),
+                start_ms: 100,
+                end_ms: 250,
+                confidence: None,
+            },
+            SpeakerTurn {
+                speaker: "Speaker 2".into(),
+                start_ms: 250,
+                end_ms: 500,
+                confidence: None,
+            },
+        ];
+        let mut edited = document_from_transcript(&fixture_transcript(), "now".into()).segments;
+        edited[0].text = "手で直した本文".into();
+        edited[0].edited = true;
+        let preserved = rebase_document_segments(&edited, &source, &turns);
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(preserved[0].segment_id, edited[0].segment_id);
+        assert_eq!(preserved[0].text, "手で直した本文");
+        assert_eq!(preserved[0].speaker, "Speaker 2");
+
+        edited[0].edited = false;
+        let split = rebase_document_segments(&edited, &source, &turns);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].speaker, "Speaker 1");
+        assert_eq!(split[1].speaker, "Speaker 2");
+    }
 
     fn fixture_transcript() -> Transcript {
         Transcript {
@@ -1286,6 +1504,7 @@ mod tests {
             language: transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
             cost_usd: None,
+            diarization: None,
             document: document_from_transcript(&transcript, "2026-08-09T00:00:00Z".into()),
             source: transcript,
         };
@@ -1362,6 +1581,7 @@ mod tests {
             language: transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
             cost_usd: None,
+            diarization: None,
             document: document_from_transcript(&transcript, "2026-08-09T00:00:00Z".into()),
             source: transcript,
         };

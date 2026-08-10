@@ -1,9 +1,12 @@
 pub(crate) mod audio_decode;
 pub(crate) mod context;
 pub mod diarization;
+pub(crate) mod diarization_models;
 pub(crate) mod elevenlabs;
 #[cfg(any(desktop, target_os = "android"))]
 mod local;
+#[cfg(any(desktop, target_os = "android"))]
+pub(crate) mod local_diarization;
 pub(crate) mod local_models;
 pub(crate) mod local_settings;
 pub(crate) mod providers;

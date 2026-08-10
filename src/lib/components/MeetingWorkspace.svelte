@@ -43,7 +43,8 @@
     TranscriptionRunSummary,
     TranscriptSegmentTextChange,
     TranscriptSaveState,
-    ContextSaveState
+    ContextSaveState,
+    LocalDiarizationProgress
   } from "../types/transcript";
   import type { SummaryProviderDefinition, SummaryStatus } from "../types/summary";
   import AudioPlayer from "./AudioPlayer.svelte";
@@ -73,6 +74,10 @@
     transcribing: boolean;
     progress: TranscriptionProgress | null;
     canTranscribe: boolean;
+    diarizing: boolean;
+    diarizationProgress: LocalDiarizationProgress | null;
+    canDiarize: boolean;
+    diarizationModelReady: boolean;
     contextEnabled: boolean;
     contextSurchargeActive: boolean;
     contextTermCount: number;
@@ -80,6 +85,9 @@
     contextSaveState: ContextSaveState;
     contextLoading: boolean;
     onTranscribe: () => void;
+    onDiarize: (speakerCount: number | null) => void;
+    onCancelDiarization: () => void;
+    onOpenDiarizationSettings: () => void;
     onContextBackgroundChange: (background: string) => void;
     onContextTermsChange: (termsText: string) => void;
     onContextCorrectionsChange: (correctionsText: string) => void;
@@ -124,6 +132,10 @@
     transcribing,
     progress,
     canTranscribe,
+    diarizing,
+    diarizationProgress,
+    canDiarize,
+    diarizationModelReady,
     contextEnabled,
     contextSurchargeActive,
     contextTermCount,
@@ -131,6 +143,9 @@
     contextSaveState,
     contextLoading,
     onTranscribe,
+    onDiarize,
+    onCancelDiarization,
+    onOpenDiarizationSettings,
     onContextBackgroundChange,
     onContextTermsChange,
     onContextCorrectionsChange,
@@ -165,6 +180,7 @@
   let fileNameDraft = $state("");
   let fileNameInput = $state<HTMLInputElement | null>(null);
   let deleteDialogOpen = $state(false);
+  let diarizationSpeakerCount = $state("auto");
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
   const selectedProviderOption = $derived(providerOptions.find((option) => option.value === provider));
@@ -177,6 +193,25 @@
     if (saveState === "error") return "保存できませんでした";
     return selectedRun.edited ? "編集済み・保存済み" : "保存済み";
   });
+  const diarizationProgressLabel = $derived.by(() => {
+    if (!diarizationProgress) return "";
+    if (diarizationProgress.stage === "loadingModel") return "モデルを読み込み中…";
+    if (diarizationProgress.stage === "decodingAudio") return "音声を準備中…";
+    if (diarizationProgress.stage === "stitchingSpeakers") return "長時間音声の話者を統合中…";
+    if (diarizationProgress.stage === "finalizing") return "文字起こしへ反映中…";
+    return diarizationProgress.totalChunks != null
+      ? `${diarizationProgress.completedChunks} / ${diarizationProgress.totalChunks} チャンク`
+      : `${diarizationProgress.completedChunks} チャンク完了`;
+  });
+
+  function startDiarization() {
+    if (!diarizationModelReady) {
+      onOpenDiarizationSettings();
+      return;
+    }
+    const count = diarizationSpeakerCount === "auto" ? null : Number(diarizationSpeakerCount);
+    onDiarize(count);
+  }
 
   const recordedAt = $derived(
     meeting
@@ -396,7 +431,7 @@
                 type="single"
                 value={provider}
                 onValueChange={selectProvider}
-                disabled={transcribing || transcriptFormatting || providerOptions.length === 0}
+                disabled={transcribing || diarizing || transcriptFormatting || providerOptions.length === 0}
               >
                 <SelectTrigger aria-label="文字起こしモデル" class="transcription-model-select">
                   <span>{selectedProviderOption?.label ?? "モデルを選択"}</span>
@@ -411,6 +446,32 @@
                 <Button size="sm" variant="outline" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
               </span>
             </div>
+            <div class="diarization-controls">
+              <Select
+                type="single"
+                value={diarizationSpeakerCount}
+                onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }}
+                disabled={diarizing || transcribing || transcriptFormatting}
+              >
+                <SelectTrigger aria-label="話者数" class="speaker-count-select">
+                  <span>{diarizationSpeakerCount === "auto" ? "話者数: 自動" : `話者数: ${diarizationSpeakerCount}人`}</span>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">話者数: 自動</SelectItem>
+                  {#each Array.from({ length: 10 }, (_, index) => index + 1) as count}
+                    <SelectItem value={String(count)}>話者数: {count}人</SelectItem>
+                  {/each}
+                </SelectContent>
+              </Select>
+              {#if diarizing}
+                <Button size="sm" variant="outline" type="button" onclick={onCancelDiarization}>キャンセル</Button>
+              {:else}
+                <Button size="sm" variant="outline" type="button" onclick={startDiarization} disabled={!canDiarize}>
+                  {diarizationModelReady ? "話者分離" : "話者分離モデルを追加"}
+                </Button>
+              {/if}
+              {#if diarizationProgressLabel}<small aria-live="polite">{diarizationProgressLabel}</small>{/if}
+            </div>
           </section>
           <p class:surcharge={contextSurchargeActive} class="context-status">{contextStatus}</p>
           <TranscriptView
@@ -424,8 +485,8 @@
             onSeek={seekFromTranscript}
             onPlay={playFromTranscript}
             onPause={pauseFromTranscript}
-            editable={Boolean(selectedRun)}
-            formatting={transcriptFormatting}
+            editable={Boolean(selectedRun) && !diarizing}
+            formatting={transcriptFormatting || diarizing}
             {onEditSegment}
             {onEditSpeakerLabel}
             {onReplaceSegments}
@@ -555,6 +616,9 @@
   .transcription-heading span.error { color: var(--destructive); }
   .transcription-heading span.pending { color: var(--foreground); }
   .transcription-controls { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .diarization-controls { display: flex; min-width: 0; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .diarization-controls small { color: var(--muted-foreground); }
+  .diarization-controls :global(.speaker-count-select) { min-width: 132px; }
   .context-status { margin: -10px 0 18px; color: var(--muted-foreground); font-size: 0.72rem; }
   .context-status.surcharge { color: var(--foreground); font-weight: 650; }
   .transcription-toolbar :global([data-slot="select-trigger"]) { width: 240px; }
@@ -621,6 +685,7 @@
   @media (max-width: 520px) {
     .transcription-toolbar { flex-direction: column; align-items: stretch; gap: 14px; margin-top: 20px; padding-bottom: 20px; }
     .transcription-controls { flex-direction: column; align-items: stretch; gap: 10px; }
+    .diarization-controls { align-items: stretch; }
     .transcription-toolbar :global([data-slot="select-trigger"]) { width: 100%; min-height: 44px; }
     .transcription-action { width: 100%; }
     .transcription-action :global(button) { width: 100%; min-height: 48px; padding-right: 18px; padding-left: 18px; font-size: 0.95rem; }

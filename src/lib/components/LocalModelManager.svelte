@@ -11,6 +11,7 @@
     LocalSttModelDownloadProgress,
     LocalRecognitionMode,
     LocalRecognitionSettings,
+    LocalDiarizationModelStatus,
     LocalVadModelStatus,
     VadPreset
   } from "../providers";
@@ -36,6 +37,9 @@
   let recognitionMode = $state<LocalRecognitionMode>("fast");
   let recognitionWorking = $state(false);
   let autoInstallAttempted = $state(false);
+  let diarizationModel = $state.raw<LocalDiarizationModelStatus | null>(null);
+  let diarizationWorking = $state(false);
+  let diarizationProgress = $state<LocalSttModelDownloadProgress | null>(null);
 
   const model = $derived(models[0] ?? null);
   const progressPercent = $derived(
@@ -48,6 +52,11 @@
       ? Math.min(100, vadProgress.downloadedBytes / vadProgress.totalBytes * 100)
       : 0
   );
+  const diarizationProgressPercent = $derived(
+    diarizationProgress && diarizationProgress.totalBytes > 0
+      ? Math.min(100, diarizationProgress.downloadedBytes / diarizationProgress.totalBytes * 100)
+      : 0
+  );
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
@@ -57,21 +66,24 @@
 
   async function refresh() {
     let recognitionSettings: LocalRecognitionSettings;
-    [models, vadModel, vadPreset, recognitionSettings] = await Promise.all([
+    [models, vadModel, vadPreset, recognitionSettings, diarizationModel] = await Promise.all([
       invoke<LocalSttModelCatalogEntry[]>("list_local_stt_model_catalog"),
       invoke<LocalVadModelStatus>("get_local_vad_model_status"),
       invoke<VadPreset>("get_vad_preset"),
-      invoke<LocalRecognitionSettings>("get_local_recognition_settings")
+      invoke<LocalRecognitionSettings>("get_local_recognition_settings"),
+      invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status")
     ]);
     recognitionMode = recognitionSettings.mode;
     working = models.some((entry) => entry.downloading);
     vadWorking = vadModel.downloading;
+    diarizationWorking = diarizationModel.downloading;
   }
 
   $effect(() => {
     if (preview) {
       models = [{ modelId: "reazonspeech-k2", displayName: "ReazonSpeech K2 int8-fp32", version: "preview", languageCodes: ["ja"], sizeBytes: 177_209_344, installed: true, downloading: false, runtimeSupported: true }];
       vadModel = { modelId: "silero-vad", displayName: "Silero VAD", version: "preview", sizeBytes: 2_306_867, installed: true, downloading: false, runtimeSupported: true };
+      diarizationModel = { modelId: "pyannote-3.0-int8-3dspeaker-eres2net-base", displayName: "pyannote 3.0 INT8 + 3D-Speaker ERes2Net Base", version: "preview", sizeBytes: 41_134_267, installed: true, downloading: false, runtimeSupported: true };
       loading = false;
       return;
     }
@@ -99,10 +111,25 @@
             }
           }
         );
+        const unlistenDiarization = await listen<LocalSttModelDownloadProgress>(
+          "local-diarization-model-download-progress",
+          ({ payload }) => {
+            if (!cancelled) {
+              diarizationWorking = true;
+              diarizationProgress = payload;
+              if (payload.totalBytes > 0 && payload.downloadedBytes >= payload.totalBytes) {
+                window.setTimeout(() => {
+                  if (!cancelled) void refresh().catch((error) => onError(errorText(error)));
+                }, 300);
+              }
+            }
+          }
+        );
         const unlistenStt = unlisten;
         unlisten = () => {
           unlistenStt?.();
           unlistenVad();
+          unlistenDiarization();
         };
         if (!cancelled) await refresh();
         if (!cancelled && !autoInstallAttempted && models[0]?.installed && vadModel && !vadModel.installed && !vadModel.downloading && vadModel.runtimeSupported) {
@@ -226,6 +253,47 @@
     }
   }
 
+  async function downloadDiarization() {
+    if (!diarizationModel || diarizationWorking) return;
+    diarizationWorking = true;
+    diarizationProgress = { modelId: diarizationModel.modelId, downloadedBytes: 0, totalBytes: diarizationModel.sizeBytes };
+    try {
+      await invoke("download_local_diarization_models");
+      await refresh();
+      await onChanged();
+      onMessage("端末だけで話者分離できるようになりました。");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      diarizationWorking = false;
+      diarizationProgress = null;
+      try { await refresh(); } catch { /* 次回表示時に再取得する */ }
+    }
+  }
+
+  async function cancelDiarizationDownload() {
+    try {
+      await invoke("cancel_local_diarization_model_download");
+    } catch (error) {
+      onError(errorText(error));
+    }
+  }
+
+  async function removeDiarization() {
+    if (!diarizationModel || diarizationWorking || !window.confirm("端末内の話者分離モデルを削除しますか？")) return;
+    diarizationWorking = true;
+    try {
+      await invoke("delete_local_diarization_models");
+      await refresh();
+      await onChanged();
+      onMessage("端末内の話者分離モデルを削除しました。");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      diarizationWorking = false;
+    }
+  }
+
 </script>
 
 <div class="local-model-manager model-row" aria-busy={loading || working}>
@@ -265,6 +333,29 @@
     <Button type="button" onclick={download} disabled={disabled || loading || !model || !model.runtimeSupported}>
       追加
     </Button>
+  {/if}
+</div>
+
+<div class="local-model-manager model-row" aria-busy={loading || diarizationWorking}>
+  <div class="local-model-copy">
+    <div class="local-model-title">
+      <strong>{diarizationModel?.displayName ?? "pyannote 3.0 INT8 + 3D-Speaker ERes2Net Base"}</strong>
+      <span class:ready={diarizationModel?.installed} class="model-status">{#if diarizationModel?.installed}<CircleCheck aria-hidden="true" />{/if}{diarizationModel?.installed ? "利用可能" : "未追加"}</span>
+    </div>
+    <small>長時間音声対応 · 約{diarizationModel ? formatFileSize(diarizationModel.sizeBytes) : "39 MB"} · 音声は端末外へ送信しません</small>
+    <small>文字起こし後に話者を分けます。人物本人を識別する機能ではありません。</small>
+    {#if diarizationModel && !diarizationModel.runtimeSupported}<small>この端末ではまだ使用できません。</small>{/if}
+    {#if diarizationWorking && diarizationProgress}
+      <progress max="100" value={diarizationProgressPercent} aria-label="話者分離モデルを追加しています"></progress>
+      <small>{formatFileSize(diarizationProgress.downloadedBytes)} / {formatFileSize(diarizationProgress.totalBytes)}</small>
+    {/if}
+  </div>
+  {#if diarizationModel?.installed}
+    <Button variant="outline" type="button" onclick={removeDiarization} disabled={disabled || diarizationWorking}>削除</Button>
+  {:else if diarizationWorking}
+    <Button variant="outline" type="button" onclick={cancelDiarizationDownload}>キャンセル</Button>
+  {:else}
+    <Button type="button" onclick={downloadDiarization} disabled={disabled || loading || !diarizationModel || !diarizationModel.runtimeSupported}>追加</Button>
   {/if}
 </div>
 

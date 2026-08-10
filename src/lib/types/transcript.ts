@@ -136,6 +136,21 @@ export type TranscriptionProgress = {
   totalChunks: number | null;
 };
 
+export type LocalDiarizationStage =
+  | "loadingModel"
+  | "decodingAudio"
+  | "diarizingChunks"
+  | "stitchingSpeakers"
+  | "finalizing";
+
+export type LocalDiarizationProgress = {
+  stage: LocalDiarizationStage;
+  completedChunks: number;
+  totalChunks: number | null;
+  processedMs: number;
+  totalMs: number | null;
+};
+
 export type TranscriptionUsage = {
   availableDurationMs: number | null;
   usedDurationMs: number | null;

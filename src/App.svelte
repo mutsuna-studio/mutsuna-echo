@@ -29,7 +29,8 @@
     getTranscriptionProvider,
     isTranscriptionProviderId,
     type TranscriptionProviderDefinition,
-    type TranscriptionProviderId
+    type TranscriptionProviderId,
+    type LocalDiarizationModelStatus
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
@@ -50,7 +51,8 @@
     SonioxUsage,
     ContextSaveState,
     GlobalTranscriptionContextSettings,
-    MeetingTranscriptionContext
+    MeetingTranscriptionContext,
+    LocalDiarizationProgress
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
@@ -176,6 +178,9 @@
   let selecting = $state(false);
   let transcribing = $state(false);
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
+  let diarizing = $state(false);
+  let diarizationProgress = $state<LocalDiarizationProgress | null>(null);
+  let diarizationModelStatus = $state.raw<LocalDiarizationModelStatus | null>(null);
   let usageLoading = $state(false);
   let sonioxUsageLoading = $state(false);
   let recordingBusy = $state(false);
@@ -274,8 +279,15 @@
   });
 
   const saving = $derived(savingProviderId !== null);
-  const busy = $derived(loading || saving || deleting || selecting || transcribing || transcriptFormatting || recordingBusy || updating);
-  const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || updating);
+  const busy = $derived(loading || saving || deleting || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
+  const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || diarizing || updating);
+  const canDiarize = $derived(Boolean(
+    selectedAudio
+      && selectedTranscriptionRun
+      && selectedTranscriptionRun.transcript.tokens.some((token) => token.startMs != null)
+      && !transcribing
+      && !transcriptFormatting
+  ));
   const currentProvider = $derived(
     getTranscriptionProvider(transcriptionProviders, transcriptionProvider)
   );
@@ -400,6 +412,15 @@
     transcriptionProviders = await invoke<TranscriptionProviderDefinition[]>(
       "get_transcription_providers"
     );
+  }
+
+  async function refreshLocalModels() {
+    const [nextProviders, nextDiarizationStatus] = await Promise.all([
+      invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
+      invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status")
+    ]);
+    transcriptionProviders = nextProviders;
+    diarizationModelStatus = nextDiarizationStatus;
   }
 
   function normalizeSummaryProviderSelections() {
@@ -888,14 +909,18 @@
     let cancelled = false;
     let unlistenPending: UnlistenFn | undefined;
     let unlistenProgress: UnlistenFn | undefined;
+    let unlistenDiarizationProgress: UnlistenFn | undefined;
     void (async () => {
       try {
-        [unlistenPending, unlistenProgress] = await Promise.all([
+        [unlistenPending, unlistenProgress, unlistenDiarizationProgress] = await Promise.all([
           listen<PendingAction>("pending-action-available", ({ payload }) => {
             if (!cancelled) void handlePendingAction(payload);
           }),
           listen<TranscriptionProgress>("transcription-progress", ({ payload }) => {
             if (!cancelled) transcriptionProgress = payload;
+          }),
+          listen<LocalDiarizationProgress>("local-diarization-progress", ({ payload }) => {
+            if (!cancelled) diarizationProgress = payload;
           })
         ]);
         const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
@@ -926,6 +951,7 @@
         selectedMeetingId = session.selectedAudio?.meetingId ?? null;
         transcribing = session.transcribing;
         transcriptionProgress = session.progress;
+        diarizationModelStatus = await invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status");
         if (pendingResult.error) {
           pendingActionProblem = { action: null, message: pendingResult.error };
           showError(pendingResult.error);
@@ -948,6 +974,7 @@
       cancelled = true;
       unlistenPending?.();
       unlistenProgress?.();
+      unlistenDiarizationProgress?.();
     };
   });
 
@@ -1269,6 +1296,55 @@
     } catch (error) {
       transcriptionRuns = [];
       setSelectedTranscriptionRun(null);
+      showError(errorText(error));
+    }
+  }
+
+  function openDiarizationSettings() {
+    section = "settings";
+    settingsPane = "transcription";
+  }
+
+  async function diarizeTranscript(speakerCount: number | null) {
+    const run = selectedTranscriptionRun;
+    if (!run || !selectedAudio || diarizing) return;
+    if (!diarizationModelStatus?.installed) {
+      openDiarizationSettings();
+      showWarningToast("話者分離モデルを追加してください。", "設定の「モデルとサービス」から端末内モデルを追加できます。");
+      return;
+    }
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error" || !selectedTranscriptionRun) {
+      showWarningToast("文字起こしの編集を保存してから再試行してください。");
+      return;
+    }
+    diarizing = true;
+    diarizationProgress = { stage: "loadingModel", completedChunks: 0, totalChunks: null, processedMs: 0, totalMs: selectedAudio.durationMs };
+    try {
+      const saved = await invoke<TranscriptionRunDetail>("diarize_selected_transcription", {
+        request: {
+          transcriptionId: selectedTranscriptionRun.transcriptionId,
+          expectedRevision: selectedTranscriptionRun.revision,
+          speakerCount
+        }
+      });
+      setSelectedTranscriptionRun(saved);
+      await refreshTranscriptionHistoryList();
+      await refreshSummaryStatus();
+      showSuccessToast("話者分離が完了しました。", "既存の話者名は解除し、本文の手修正は保持しました。");
+    } catch (error) {
+      const message = errorText(error);
+      if (!message.includes("キャンセルしました")) showError(message);
+    } finally {
+      diarizing = false;
+      diarizationProgress = null;
+    }
+  }
+
+  async function cancelDiarization() {
+    try {
+      await invoke("cancel_selected_diarization");
+    } catch (error) {
       showError(errorText(error));
     }
   }
@@ -1634,6 +1710,13 @@
           {transcribing}
           progress={transcriptionProgress}
           {canTranscribe}
+          {diarizing}
+          {diarizationProgress}
+          {canDiarize}
+          diarizationModelReady={Boolean(diarizationModelStatus?.installed)}
+          onDiarize={diarizeTranscript}
+          onCancelDiarization={cancelDiarization}
+          onOpenDiarizationSettings={openDiarizationSettings}
           contextEnabled={globalContextSettings.contextEnabled}
           contextSurchargeActive={contextSurchargeActive}
           contextTermCount={effectiveContextTerms.length}
@@ -1701,7 +1784,7 @@
                     <h2>モデルとサービス</h2>
                   </div>
                   <div class="transcription-model-manager">
-                    <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
+                    <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshLocalModels} onMessage={showMessage} onError={showError} />
                     {#each apiKeyProviders as provider (provider.id)}
                       <ApiKeySettings
                         {provider}

@@ -72,6 +72,16 @@ export type LocalVadModelStatus = {
   runtimeSupported: boolean;
 };
 
+export type LocalDiarizationModelStatus = {
+  modelId: string;
+  displayName: string;
+  version: string;
+  sizeBytes: number;
+  installed: boolean;
+  downloading: boolean;
+  runtimeSupported: boolean;
+};
+
 export type VadPreset = "softVoice" | "standard" | "noiseReduction";
 export type LocalRecognitionMode = "fast" | "accurate";
 export type LocalRecognitionSettings = { mode: LocalRecognitionMode };
