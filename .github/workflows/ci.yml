@@ -149,3 +149,34 @@ jobs:
       - name: Warm release build cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: pnpm tauri build ${{ matrix.build-args }}
+
+  warm-android-release-cache:
+    name: Warm Android release cache
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+        with:
+          version: 11.20.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up Android build toolchain
+        uses: ./.github/actions/setup-android-build
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Warm Android release build cache
+        run: pnpm tauri android build --aab --target aarch64

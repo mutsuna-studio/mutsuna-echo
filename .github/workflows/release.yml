@@ -236,7 +236,8 @@ jobs:
           wait "$app_pid" 2>/dev/null || true
 
   build-android:
-    name: Build and publish signed Android AAB
+    name: Build signed Android AAB
+    if: ${{ !contains(github.ref_name, '-android-retry.') }}
     needs: validate-release
     runs-on: ubuntu-latest
     environment:
@@ -258,34 +259,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Set up Java
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+      - name: Set up Android build toolchain
+        uses: ./.github/actions/setup-android-build
         with:
-          distribution: temurin
-          java-version: 17
-          cache: gradle
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-
-      - name: Install Android SDK and NDK
-        shell: bash
-        run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          targets: aarch64-linux-android
-
-      - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: src-tauri -> target
-          shared-key: release-android-aarch64
           cache-on-failure: true
 
       - name: Install frontend dependencies
@@ -331,6 +307,95 @@ jobs:
           name: android-aarch64-aab
           path: ${{ steps.verify-android.outputs.aab_path }}
           if-no-files-found: error
+
+  publish-android:
+    name: Publish signed Android AAB
+    if: >-
+      always() &&
+      needs.validate-release.result == 'success' &&
+      (
+        contains(github.ref_name, '-android-retry.') ||
+        needs.build-android.result == 'success'
+      )
+    needs:
+      - validate-release
+      - build-android
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: release-android
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Find original Android artifact
+        if: contains(github.ref_name, '-android-retry.')
+        id: original-android-run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+        run: |
+          source_run_id=""
+          while read -r run_id; do
+            if gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+              --jq '.artifacts[] | select(.name == "android-aarch64-aab" and .expired == false) | .id' \
+              | grep -q .; then
+              source_run_id="$run_id"
+              break
+            fi
+          done < <(
+            gh run list \
+              --workflow release.yml \
+              --event push \
+              --limit 100 \
+              --json databaseId,headBranch,status \
+              --jq '.[] | select(.headBranch == env.RELEASE_TAG and .status == "completed") | .databaseId'
+          )
+
+          if [ -z "$source_run_id" ]; then
+            echo "::error::No unexpired android-aarch64-aab artifact was found for ${RELEASE_TAG}."
+            exit 1
+          fi
+
+          echo "run_id=$source_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download newly built Android artifact
+        if: ${{ !contains(github.ref_name, '-android-retry.') }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-aarch64-aab
+          path: distribution/android
+
+      - name: Download original Android artifact
+        if: contains(github.ref_name, '-android-retry.')
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-aarch64-aab
+          path: distribution/android
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.original-android-run.outputs.run_id }}
+
+      - name: Verify downloaded AAB signature
+        id: verify-android
+        shell: bash
+        run: |
+          aab_path="$(find distribution/android -type f -name '*.aab' -print -quit)"
+          test -n "$aab_path"
+          jarsigner -verify "$aab_path" > "$RUNNER_TEMP/aab-signature-verification.txt"
+          grep -q "jar verified" "$RUNNER_TEMP/aab-signature-verification.txt"
+          echo "aab_path=$aab_path" >> "$GITHUB_OUTPUT"
 
       - name: Validate Google Play credentials
         shell: bash
