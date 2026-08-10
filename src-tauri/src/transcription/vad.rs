@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::VecDeque, path::Path};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
@@ -8,9 +8,15 @@ use super::{
 };
 
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
+const REGION_PADDING_MS: u64 = 300;
+const REGION_PADDING_SAMPLES: u64 = REGION_PADDING_MS * SAMPLE_RATE as u64 / 1_000;
+const REGION_BUFFER_SAMPLES: usize = 32 * SAMPLE_RATE as usize;
 
 pub(crate) struct SpeechRegion {
+    /// Start of the padded recognition window on the original timeline.
     pub(crate) start_ms: u64,
+    pub(crate) speech_start_ms: u64,
+    pub(crate) speech_end_ms: u64,
     pub(crate) samples: Vec<f32>,
 }
 
@@ -30,6 +36,8 @@ pub(crate) fn visit_speech_regions(
 ) -> Result<u64, String> {
     let detector = create_detector(model_path, preset.parameters())?;
     let mut resampler: Option<StreamingAreaResampler> = None;
+    let mut audio = RegionAudioBuffer::default();
+    let mut pending = VecDeque::new();
     let duration_ms = decode_mono(audio_path, |sample_rate, samples| {
         let resampler =
             resampler.get_or_insert_with(|| StreamingAreaResampler::new(sample_rate, SAMPLE_RATE));
@@ -38,10 +46,13 @@ pub(crate) fn visit_speech_regions(
         }
         let output = resampler.process(samples);
         detector.accept_waveform(&output);
-        drain(&detector, &mut visit)
+        audio.push(&output);
+        collect_detected(&detector, &mut pending);
+        emit_ready_regions(&audio, &mut pending, false, &mut visit)
     })?;
     detector.flush();
-    drain(&detector, &mut visit)?;
+    collect_detected(&detector, &mut pending);
+    emit_ready_regions(&audio, &mut pending, true, &mut visit)?;
     Ok(duration_ms)
 }
 
@@ -101,19 +112,80 @@ impl LiveVoiceActivityDetector {
     }
 }
 
-fn drain(
-    detector: &VoiceActivityDetector,
-    visit: &mut impl FnMut(SpeechRegion) -> Result<(), String>,
-) -> Result<(), String> {
+#[derive(Debug, Clone, Copy)]
+struct DetectedRegion {
+    start_sample: u64,
+    end_sample: u64,
+}
+
+#[derive(Default)]
+struct RegionAudioBuffer {
+    samples: VecDeque<f32>,
+    end_sample: u64,
+}
+
+impl RegionAudioBuffer {
+    fn push(&mut self, samples: &[f32]) {
+        self.samples.extend(samples.iter().copied());
+        self.end_sample = self.end_sample.saturating_add(samples.len() as u64);
+        while self.samples.len() > REGION_BUFFER_SAMPLES {
+            self.samples.pop_front();
+        }
+    }
+
+    fn slice(&self, start: u64, end: u64) -> Option<Vec<f32>> {
+        let buffer_start = self.end_sample.saturating_sub(self.samples.len() as u64);
+        if start < buffer_start || end > self.end_sample || start > end {
+            return None;
+        }
+        let skip = usize::try_from(start - buffer_start).ok()?;
+        let take = usize::try_from(end - start).ok()?;
+        Some(self.samples.iter().skip(skip).take(take).copied().collect())
+    }
+}
+
+fn collect_detected(detector: &VoiceActivityDetector, pending: &mut VecDeque<DetectedRegion>) {
     while let Some(segment) = detector.front() {
         let start_sample = segment.start().max(0) as u64;
-        visit(SpeechRegion {
-            start_ms: start_sample.saturating_mul(1_000) / SAMPLE_RATE as u64,
-            samples: segment.samples().to_vec(),
-        })?;
+        pending.push_back(DetectedRegion {
+            start_sample,
+            end_sample: start_sample.saturating_add(segment.samples().len() as u64),
+        });
         detector.pop();
     }
+}
+
+fn emit_ready_regions(
+    audio: &RegionAudioBuffer,
+    pending: &mut VecDeque<DetectedRegion>,
+    flush: bool,
+    visit: &mut impl FnMut(SpeechRegion) -> Result<(), String>,
+) -> Result<(), String> {
+    while let Some(region) = pending.front().copied() {
+        let padded_start = region.start_sample.saturating_sub(REGION_PADDING_SAMPLES);
+        let padded_end = region
+            .end_sample
+            .saturating_add(REGION_PADDING_SAMPLES)
+            .min(audio.end_sample);
+        if !flush && audio.end_sample < region.end_sample.saturating_add(REGION_PADDING_SAMPLES) {
+            break;
+        }
+        let samples = audio.slice(padded_start, padded_end).ok_or_else(|| {
+            "VAD区間の前後音声を保持できませんでした。短い音声で再試行してください。".to_string()
+        })?;
+        visit(SpeechRegion {
+            start_ms: samples_to_ms(padded_start),
+            speech_start_ms: samples_to_ms(region.start_sample),
+            speech_end_ms: samples_to_ms(region.end_sample),
+            samples,
+        })?;
+        pending.pop_front();
+    }
     Ok(())
+}
+
+const fn samples_to_ms(samples: u64) -> u64 {
+    samples.saturating_mul(1_000) / SAMPLE_RATE as u64
 }
 
 /// Streaming box-filter resampler. It bounds memory to one decoded packet and
@@ -160,7 +232,7 @@ impl StreamingAreaResampler {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamingAreaResampler;
+    use super::{RegionAudioBuffer, StreamingAreaResampler};
 
     #[test]
     fn resamples_48khz_in_streaming_chunks_without_drift() {
@@ -179,5 +251,16 @@ mod tests {
         assert_eq!(down.process(&vec![0.5; 44_100]).len(), 16_000);
         let mut up = StreamingAreaResampler::new(8_000, 16_000);
         assert_eq!(up.process(&vec![0.5; 8_000]).len(), 16_000);
+    }
+
+    #[test]
+    fn rolling_audio_buffer_keeps_real_samples_for_vad_padding() {
+        let mut buffer = RegionAudioBuffer::default();
+        buffer.push(&(0..1_000).map(|value| value as f32).collect::<Vec<_>>());
+        assert_eq!(
+            buffer.slice(100, 104),
+            Some(vec![100.0, 101.0, 102.0, 103.0])
+        );
+        assert!(buffer.slice(0, 1_001).is_none());
     }
 }

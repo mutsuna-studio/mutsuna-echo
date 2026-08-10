@@ -62,7 +62,7 @@
   const API_KEY_SAVE_TIMEOUT_MS = 30_000;
   const summarySettingsPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "summary-settings";
   const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
-    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: false }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・重要用語", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
   ];
@@ -96,11 +96,27 @@
     transcriptionId: string;
     changes: TranscriptSegmentTextChange[];
   };
-  type ContextDraft = { background: string; termsText: string };
+  type ContextDraft = { background: string; termsText: string; correctionsText: string };
   type MeetingContextDraft = ContextDraft & { useGlobal: boolean };
 
   function termsFromText(value: string): string[] {
     return [...new Set(value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean))];
+  }
+
+  function correctionsFromText(value: string): { from: string; to: string }[] {
+    const seen = new Set<string>();
+    return value.split(/\r?\n/).flatMap((line) => {
+      const parts = line.split(/\s*(?:=>|⇒)\s*/, 2);
+      const from = parts[0]?.trim() ?? "";
+      const to = parts[1]?.trim() ?? "";
+      if (!from || !to || from === to || seen.has(from)) return [];
+      seen.add(from);
+      return [{ from, to }];
+    });
+  }
+
+  function correctionsToText(corrections: { from: string; to: string }[]): string {
+    return corrections.map(({ from, to }) => `${from} => ${to}`).join("\n");
   }
 
   function savedTranscriptionProvider(): TranscriptionProviderId {
@@ -168,8 +184,8 @@
   let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
-  let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [] });
-  let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "" });
+  let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [], corrections: [] });
+  let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "", correctionsText: "" });
   let globalContextSaveState = $state<ContextSaveState>("saved");
   let globalContextLoading = $state(!summarySettingsPreview);
   let meetingContextDraft = $state.raw<MeetingContextDraft | null>(null);
@@ -219,6 +235,7 @@
   let mobileMeetingDetail = $state(false);
   let hasAppHistoryEntry = false;
   const pendingTranscriptChanges = new Map<string, string>();
+  const pendingLearnedCorrectionSegments = new Set<string>();
   const pendingSpeakerLabelChanges = new Map<string, string>();
 
   $effect(() => {
@@ -723,7 +740,7 @@
 
   function setGlobalContextFromSettings(settings: GlobalTranscriptionContextSettings) {
     globalContextSettings = settings;
-    globalContextDraft = { background: settings.background, termsText: settings.terms.join("\n") };
+    globalContextDraft = { background: settings.background, termsText: settings.terms.join("\n"), correctionsText: correctionsToText(settings.corrections) };
     globalContextSaveState = "saved";
   }
 
@@ -733,7 +750,8 @@
     }
     globalContextDraft = {
       background: patch.background ?? globalContextDraft.background,
-      termsText: patch.termsText ?? globalContextDraft.termsText
+      termsText: patch.termsText ?? globalContextDraft.termsText,
+      correctionsText: patch.correctionsText ?? globalContextDraft.correctionsText
     };
     globalContextRevision += 1;
     globalContextSaveState = "unsaved";
@@ -753,7 +771,8 @@
     const request: GlobalTranscriptionContextSettings = {
       contextEnabled: globalContextSettings.contextEnabled,
       background: globalContextDraft.background,
-      terms: termsFromText(globalContextDraft.termsText)
+      terms: termsFromText(globalContextDraft.termsText),
+      corrections: correctionsFromText(globalContextDraft.correctionsText)
     };
     globalContextSaveState = "saving";
     const saving = invoke<GlobalTranscriptionContextSettings>("set_global_transcription_context", { settings: request })
@@ -783,6 +802,7 @@
       meetingContextDraft = {
         background: context.background,
         termsText: context.terms.join("\n"),
+        correctionsText: correctionsToText(context.corrections),
         useGlobal: context.useGlobal
       };
     } catch (error) {
@@ -819,6 +839,7 @@
     const request: MeetingTranscriptionContext = {
       background: meetingContextDraft.background,
       terms: termsFromText(meetingContextDraft.termsText),
+      corrections: correctionsFromText(meetingContextDraft.correctionsText),
       useGlobal: meetingContextDraft.useGlobal
     };
     meetingContextSaveState = "saving";
@@ -828,6 +849,7 @@
           meetingContextDraft = {
             background: saved.background,
             termsText: saved.terms.join("\n"),
+            correctionsText: correctionsToText(saved.corrections),
             useGlobal: saved.useGlobal
           };
           meetingContextSaveState = "saved";
@@ -889,7 +911,7 @@
           }),
           invoke<GlobalTranscriptionContextSettings>("get_global_transcription_context").catch((error) => {
             showError(errorText(error));
-            return { contextEnabled: false, background: "", terms: [] };
+            return { contextEnabled: false, background: "", terms: [], corrections: [] };
           })
         ]);
         if (cancelled) return;
@@ -1138,6 +1160,7 @@
     if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
     transcriptSaveTimer = null;
     pendingTranscriptChanges.clear();
+    pendingLearnedCorrectionSegments.clear();
     pendingSpeakerLabelChanges.clear();
     transcriptReplacementUndo = null;
     transcriptSaveState = "saved";
@@ -1275,6 +1298,7 @@
       )
     };
     pendingTranscriptChanges.set(segmentId, text);
+    pendingLearnedCorrectionSegments.add(segmentId);
     transcriptSaveState = "unsaved";
     if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
     transcriptSaveTimer = window.setTimeout(() => void flushTranscriptEdits(), 500);
@@ -1290,7 +1314,10 @@
         return text == null ? segment : { ...segment, text, edited: true };
       })
     };
-    for (const change of changes) pendingTranscriptChanges.set(change.segmentId, change.text);
+    for (const change of changes) {
+      pendingTranscriptChanges.set(change.segmentId, change.text);
+      pendingLearnedCorrectionSegments.delete(change.segmentId);
+    }
     transcriptSaveState = "unsaved";
     if (transcriptSaveTimer != null) window.clearTimeout(transcriptSaveTimer);
     transcriptSaveTimer = null;
@@ -1419,8 +1446,12 @@
     const run = selectedTranscriptionRun;
     if (!run || (pendingTranscriptChanges.size === 0 && pendingSpeakerLabelChanges.size === 0)) return;
     const snapshot = new Map(pendingTranscriptChanges);
+    const learnedCorrectionSnapshot = new Set(
+      [...pendingLearnedCorrectionSegments].filter((segmentId) => snapshot.has(segmentId))
+    );
     const speakerSnapshot = new Map(pendingSpeakerLabelChanges);
     pendingTranscriptChanges.clear();
+    pendingLearnedCorrectionSegments.clear();
     pendingSpeakerLabelChanges.clear();
     transcriptSaveState = "saving";
     transcriptSavePromise = (async () => {
@@ -1430,7 +1461,8 @@
             transcriptionId: run.transcriptionId,
             expectedRevision: run.revision,
             changes: [...snapshot].map(([segmentId, text]) => ({ segmentId, text })),
-            speakerLabels: [...speakerSnapshot].map(([speaker, label]) => ({ speaker, label }))
+            speakerLabels: [...speakerSnapshot].map(([speaker, label]) => ({ speaker, label })),
+            learnCorrectionSegmentIds: [...learnedCorrectionSnapshot]
           }
         });
         if (selectedTranscriptionRun?.transcriptionId === saved.transcriptionId) {
@@ -1459,7 +1491,12 @@
         await refreshTranscriptionHistoryList();
       } catch (error) {
         for (const [segmentId, text] of snapshot) {
-          if (!pendingTranscriptChanges.has(segmentId)) pendingTranscriptChanges.set(segmentId, text);
+          if (!pendingTranscriptChanges.has(segmentId)) {
+            pendingTranscriptChanges.set(segmentId, text);
+            if (learnedCorrectionSnapshot.has(segmentId)) {
+              pendingLearnedCorrectionSegments.add(segmentId);
+            }
+          }
         }
         for (const [speaker, label] of speakerSnapshot) {
           if (!pendingSpeakerLabelChanges.has(speaker)) pendingSpeakerLabelChanges.set(speaker, label);
@@ -1606,6 +1643,7 @@
           onTranscribe={transcribeAudio}
           onContextBackgroundChange={(background) => updateMeetingContext({ background })}
           onContextTermsChange={(termsText) => updateMeetingContext({ termsText })}
+          onContextCorrectionsChange={(correctionsText) => updateMeetingContext({ correctionsText })}
           onContextUseGlobalChange={(useGlobal) => updateMeetingContext({ useGlobal })}
           onProviderChange={changeTranscriptionProvider}
           onRunChange={selectTranscriptionRun}
@@ -1690,12 +1728,14 @@
                       showMasterToggle
                       background={globalContextDraft.background}
                       termsText={globalContextDraft.termsText}
+                      correctionsText={globalContextDraft.correctionsText}
                       saveState={globalContextSaveState}
                       loading={globalContextLoading}
                       disabled={busy}
                       onContextEnabledChange={(contextEnabled) => updateGlobalContext({ contextEnabled })}
                       onBackgroundChange={(background) => updateGlobalContext({ background })}
                       onTermsChange={(termsText) => updateGlobalContext({ termsText })}
+                      onCorrectionsChange={(correctionsText) => updateGlobalContext({ correctionsText })}
                     />
                   </div>
                 </section>

@@ -11,6 +11,7 @@
     showMasterToggle?: boolean;
     background: string;
     termsText: string;
+    correctionsText: string;
     useGlobal?: boolean;
     provider?: TranscriptionProviderDefinition | null;
     saveState: ContextSaveState;
@@ -19,6 +20,7 @@
     onContextEnabledChange?: (enabled: boolean) => void;
     onBackgroundChange: (background: string) => void;
     onTermsChange: (termsText: string) => void;
+    onCorrectionsChange: (correctionsText: string) => void;
     onUseGlobalChange?: (useGlobal: boolean) => void;
   };
 
@@ -29,6 +31,7 @@
     showMasterToggle = false,
     background,
     termsText,
+    correctionsText,
     useGlobal,
     provider = null,
     saveState,
@@ -37,6 +40,7 @@
     onContextEnabledChange,
     onBackgroundChange,
     onTermsChange,
+    onCorrectionsChange,
     onUseGlobalChange
   }: Props = $props();
 
@@ -51,7 +55,7 @@
     return "保存済み";
   });
   const providerMessage = $derived.by(() => {
-    if (!provider) return "Sonioxでは背景情報と重要用語、ElevenLabsでは重要用語だけを使用します。ElevenLabsで重要用語を使うと料金が20%上がります。ローカルSTTには送信しません。";
+    if (!provider) return "Sonioxでは背景情報と重要用語、ElevenLabsとローカルSTTでは重要用語だけを使用します。表記補正はクラウドへ送信せず、端末内の整形時だけ適用します。";
     if (!contextEnabled) return "コンテキストは全体設定でオフになっているため、この内容は送信されません。";
     if (!provider.capabilities.contextText && !provider.capabilities.contextTerms) return `${provider.modelLabel}はコンテキストに対応していません。入力内容は保存されます。`;
     if (!provider.capabilities.contextText) return `${provider.modelLabel}では重要用語だけを使用します。背景情報は保存されますが送信されません。`;
@@ -104,6 +108,18 @@
         aria-label={`${title}の背景情報`}
         {disabled}
       />
+    </label>
+    <label>
+      <span>表記補正 <small>1行に「誤表記 ⇒ 正式表記」</small></span>
+      <Textarea
+        value={correctionsText}
+        oninput={(event) => onCorrectionsChange(event.currentTarget.value)}
+        rows={6}
+        placeholder={'むつなエコー => Mutsuna Echo\n10パーセント => 10％'}
+        aria-label={`${title}の表記補正`}
+        {disabled}
+      />
+      <small>端末内の機械整形時だけ適用します。発話欄で直した短い誤表記も端末内へ自動学習されます。認識原文は保持され、取り消せます。</small>
     </label>
     <label>
       <span>重要用語 <small>{termCount.toLocaleString()} / 1,000件・1行に1用語</small></span>

@@ -13,7 +13,14 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: u8 = 1;
 const MEETING_FILE: &str = "meeting.json";
+const RECORDING_TRACKS_DIRECTORY: &str = "recording-tracks";
 static STORE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordingTrackPaths {
+    pub(crate) microphone: Option<PathBuf>,
+    pub(crate) system: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,7 +251,94 @@ pub(crate) fn detach_audio(app: &AppHandle, meeting_id: &str) -> Result<(), Stri
         .lock()
         .map_err(|_| "Meetingの音声情報を削除できませんでした。".to_string())?;
     validate_meeting_id(meeting_id)?;
+    let tracks = meeting_directory_in(&meetings_directory(app)?, meeting_id)?
+        .join(RECORDING_TRACKS_DIRECTORY);
+    if tracks.exists() {
+        let metadata = fs::symlink_metadata(&tracks)
+            .map_err(|error| format!("録音トラックを確認できませんでした: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("録音トラックを安全に削除できませんでした。".into());
+        }
+        fs::remove_dir_all(&tracks)
+            .map_err(|error| format!("録音トラックを削除できませんでした: {error}"))?;
+    }
     remove_local_state_in(&local_meetings_directory(app)?, meeting_id)
+}
+
+/// Persists channel-isolated recording assets inside the Meeting. These files
+/// are intentionally separate from the user-facing mixed recording so every
+/// transcription provider can use the same channel-aware pipeline.
+pub(crate) fn store_recording_tracks(
+    app: &AppHandle,
+    meeting_id: &str,
+    microphone: Option<&Path>,
+    system: Option<&Path>,
+) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "録音トラックの保存処理を開始できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let directory = meeting_directory_in(&meetings_directory(app)?, meeting_id)?
+        .join(RECORDING_TRACKS_DIRECTORY);
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("録音トラックの保存先を作成できませんでした: {error}"))?;
+    copy_optional_track(microphone, &directory.join("microphone.m4a"))?;
+    copy_optional_track(system, &directory.join("system.m4a"))?;
+    Ok(())
+}
+
+pub(crate) fn recording_tracks(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<RecordingTrackPaths, String> {
+    validate_meeting_id(meeting_id)?;
+    let directory = meeting_directory(app, meeting_id)?.join(RECORDING_TRACKS_DIRECTORY);
+    Ok(RecordingTrackPaths {
+        microphone: safe_track_path(&directory.join("microphone.m4a"))?,
+        system: safe_track_path(&directory.join("system.m4a"))?,
+    })
+}
+
+fn copy_optional_track(source: Option<&Path>, destination: &Path) -> Result<(), String> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("録音トラックを確認できませんでした: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+        return Err("録音トラックを安全に保存できませんでした。".into());
+    }
+    let temporary = destination.with_extension("m4a.tmp");
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            format!("録音トラックの一時ファイルを削除できませんでした: {error}")
+        })?;
+    }
+    fs::copy(source, &temporary)
+        .map_err(|error| format!("録音トラックを保存できませんでした: {error}"))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("録音トラックを安全に書き込めませんでした: {error}"))?;
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|error| format!("古い録音トラックを置き換えられませんでした: {error}"))?;
+    }
+    fs::rename(&temporary, destination)
+        .map_err(|error| format!("録音トラックを確定できませんでした: {error}"))
+}
+
+fn safe_track_path(path: &Path) -> Result<Option<PathBuf>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("録音トラックを確認できませんでした: {error}")),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+        return Err("録音トラックを安全に読み込めませんでした。".into());
+    }
+    Ok(Some(path.to_path_buf()))
 }
 
 pub(crate) fn delete_meeting(app: &AppHandle, meeting_id: &str) -> Result<(), String> {
@@ -596,9 +690,9 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_meeting_in, list_stored_meetings_in, meeting_directory_in, read_json,
-        remove_local_state_in, resolve_or_create_in, validate_meeting_id, LocalMeetingState,
-        MeetingDocument,
+        copy_optional_track, delete_meeting_in, list_stored_meetings_in, meeting_directory_in,
+        read_json, remove_local_state_in, resolve_or_create_in, safe_track_path,
+        validate_meeting_id, LocalMeetingState, MeetingDocument,
     };
 
     #[test]
@@ -619,7 +713,33 @@ mod tests {
         .expect("deserialize legacy meeting");
         assert!(document.transcription_context.background.is_empty());
         assert!(document.transcription_context.terms.is_empty());
+        assert!(document.transcription_context.corrections.is_empty());
         assert!(document.transcription_context.use_global);
+    }
+
+    #[test]
+    fn isolated_recording_track_is_copied_and_discovered() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-recording-track-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).expect("create fixture");
+        let source = root.join("source.m4a");
+        let destination = root.join("recording-tracks").join("microphone.m4a");
+        std::fs::create_dir_all(destination.parent().expect("track parent"))
+            .expect("create track directory");
+        std::fs::write(&source, b"synthetic track").expect("write source");
+        copy_optional_track(Some(&source), &destination).expect("copy track");
+        assert_eq!(
+            safe_track_path(&destination).expect("discover track"),
+            Some(destination.clone())
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read copied track"),
+            b"synthetic track"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

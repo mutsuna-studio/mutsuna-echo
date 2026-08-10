@@ -231,7 +231,17 @@ pub(super) fn recover(app: &AppHandle, session_id: &str) -> Result<PathBuf, Stri
     crate::commands::transcribe::validate_audio_path(&manifest.mixed_file)
         .map_err(|error| format!("録音フラグメントを再生可能なM4Aとして復旧できませんでした。元データは破棄していません: {error}"))?;
     atomic_copy_to_output(&manifest.mixed_file, &manifest.final_file)?;
-    crate::commands::transcribe::set_selected_audio_path(app, manifest.final_file.clone())?;
+    let selected =
+        crate::commands::transcribe::set_selected_audio_path(app, manifest.final_file.clone())?;
+    crate::meeting_store::store_recording_tracks(
+        app,
+        selected.meeting_id(),
+        manifest
+            .microphone_file
+            .as_deref()
+            .filter(|path| path.exists()),
+        manifest.system_file.as_deref().filter(|path| path.exists()),
+    )?;
     remove_session(&directory)?;
     Ok(manifest.final_file)
 }

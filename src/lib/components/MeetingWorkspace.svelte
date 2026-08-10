@@ -51,7 +51,7 @@
   import TranscriptView from "./TranscriptView.svelte";
   import TranscriptionContextEditor from "./TranscriptionContextEditor.svelte";
 
-  type MeetingContextDraft = { background: string; termsText: string; useGlobal: boolean };
+  type MeetingContextDraft = { background: string; termsText: string; correctionsText: string; useGlobal: boolean };
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
@@ -82,6 +82,7 @@
     onTranscribe: () => void;
     onContextBackgroundChange: (background: string) => void;
     onContextTermsChange: (termsText: string) => void;
+    onContextCorrectionsChange: (correctionsText: string) => void;
     onContextUseGlobalChange: (useGlobal: boolean) => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
     onRunChange: (transcriptionId: string) => void;
@@ -132,6 +133,7 @@
     onTranscribe,
     onContextBackgroundChange,
     onContextTermsChange,
+    onContextCorrectionsChange,
     onContextUseGlobalChange,
     onProviderChange,
     onRunChange,
@@ -482,6 +484,7 @@
               {contextEnabled}
               background={contextDraft.background}
               termsText={contextDraft.termsText}
+              correctionsText={contextDraft.correctionsText}
               useGlobal={contextDraft.useGlobal}
               provider={selectedProvider}
               saveState={contextSaveState}
@@ -489,6 +492,7 @@
               disabled={transcribing}
               onBackgroundChange={onContextBackgroundChange}
               onTermsChange={onContextTermsChange}
+              onCorrectionsChange={onContextCorrectionsChange}
               onUseGlobalChange={onContextUseGlobalChange}
             />
           </div>

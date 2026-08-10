@@ -69,7 +69,7 @@ const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabi
     confidence_scores: false,
     external_diarization: true,
     context_text: false,
-    context_terms: false,
+    context_terms: true,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -333,7 +333,7 @@ mod tests {
         assert!(!provider.capabilities.speaker_labels);
         assert!(provider.capabilities.external_diarization);
         assert!(!provider.capabilities.context_text);
-        assert!(!provider.capabilities.context_terms);
+        assert!(provider.capabilities.context_terms);
     }
 
     #[test]

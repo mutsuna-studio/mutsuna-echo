@@ -90,7 +90,7 @@ class EchoRecordingService : Service() {
     var micWriter: AacFragmentWriter? = null
     var systemWriter: AacFragmentWriter? = null
     var mixedWriter: AacFragmentWriter? = null
-    var finalEnhancer: SonoraAudioEnhancer.Session? = null
+    var microphoneEnhancer: SonoraAudioEnhancer.Session? = null
     val startedAt = SystemClock.elapsedRealtime()
     try {
       if (microphoneEnabled) {
@@ -102,7 +102,7 @@ class EchoRecordingService : Service() {
         systemWriter = AacFragmentWriter(systemFile, 96_000)
       }
       mixedWriter = AacFragmentWriter(mixedFile, 64_000)
-      finalEnhancer = SonoraAudioEnhancer.Session(48_000)
+      if (microphoneEnabled) microphoneEnhancer = SonoraAudioEnhancer.Session(48_000)
       writeManifest(manifest, sessionId, startedAt, micFile, systemFile, mixedFile, microphoneEnabled, systemEnabled)
       RecordingBridge.update {
         put("phase", "recording"); put("sessionId", sessionId)
@@ -129,17 +129,20 @@ class EchoRecordingService : Service() {
           continue
         }
         noDataSince = null
-        if (micRead > 0) micWriter?.write(micBuffer.copyOf(micRead))
+        val enhancedMic = if (micRead > 0) {
+          microphoneEnhancer?.process(micBuffer.copyOf(micRead)) ?: ShortArray(0)
+        } else ShortArray(0)
+        if (enhancedMic.isNotEmpty()) micWriter?.write(enhancedMic)
         if (sysRead > 0) systemWriter?.write(sysBuffer.copyOf(sysRead))
-        val mixed = ShortArray(frames) { index ->
-          val a = if (index < micRead) micBuffer[index] / 32768f else 0f
+        val mixedFrames = max(enhancedMic.size, sysRead)
+        val mixed = ShortArray(mixedFrames) { index ->
+          val a = if (index < enhancedMic.size) enhancedMic[index] / 32768f else 0f
           val b = if (index < sysRead) sysBuffer[index] / 32768f else 0f
           val sum = a + b
           val limited = if (abs(sum) <= 0.95f) sum else kotlin.math.sign(sum) * (0.95f + 0.05f * kotlin.math.tanh(((abs(sum) - 0.95f) / 0.05f).toDouble()).toFloat())
           (limited * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
         }
-        val enhanced = finalEnhancer.process(mixed)
-        if (enhanced.isNotEmpty()) mixedWriter.write(enhanced)
+        if (mixed.isNotEmpty()) mixedWriter.write(mixed)
         RecordingBridge.update {
           put("elapsedMs", elapsed)
           put("microphoneLevel", if (micRead > 0) peak(micBuffer, micRead) else 0.0)
@@ -153,10 +156,13 @@ class EchoRecordingService : Service() {
 
       RecordingBridge.update { put("phase", "finalizing"); put("microphoneLevel", 0.0); put("systemLevel", 0.0) }
       mic?.stop(); system?.stop()
-      micWriter?.close(); micWriter = null
       systemWriter?.close(); systemWriter = null
-      val enhancedTail = finalEnhancer.finish(); finalEnhancer = null
-      if (enhancedTail.isNotEmpty()) mixedWriter.write(enhancedTail)
+      val enhancedTail = microphoneEnhancer?.finish() ?: ShortArray(0); microphoneEnhancer = null
+      if (enhancedTail.isNotEmpty()) {
+        micWriter?.write(enhancedTail)
+        mixedWriter.write(enhancedTail)
+      }
+      micWriter?.close(); micWriter = null
       mixedWriter.close(); mixedWriter = null
       if (cancel.get()) {
         session.deleteRecursively()
@@ -165,20 +171,32 @@ class EchoRecordingService : Service() {
         val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")) + ".m4a"
         val cacheOutput = uniqueCacheOutput(name).apply { parentFile?.mkdirs() }
         M4aFinalizer.finalize(mixedFile, cacheOutput)
+        val trackDirectory = File(cacheDir, "recording-tracks/$sessionId").apply { mkdirs() }
+        val finalizedMic = if (microphoneEnabled) File(trackDirectory, "microphone.m4a").also {
+          M4aFinalizer.finalize(micFile, it)
+        } else null
+        val finalizedSystem = if (systemEnabled) File(trackDirectory, "system.m4a").also {
+          M4aFinalizer.finalize(systemFile, it)
+        } else null
         publishToMusic(cacheOutput, name)
         session.deleteRecursively()
         RecordingBridge.update {
           put("phase", "completed")
           put("elapsedMs", SystemClock.elapsedRealtime() - startedAt)
           put("outputPath", cacheOutput.absolutePath)
+          put("microphoneTrackPath", finalizedMic?.absolutePath ?: JSONObject.NULL)
+          put("systemTrackPath", finalizedSystem?.absolutePath ?: JSONObject.NULL)
           put("stopReason", if (SystemClock.elapsedRealtime() - startedAt >= MAX_DURATION_MS) "durationLimit" else "user")
         }
       }
     } catch (error: Throwable) {
       try {
-        val enhancedTail = finalEnhancer?.finish() ?: ShortArray(0)
-        finalEnhancer = null
-        if (enhancedTail.isNotEmpty()) mixedWriter?.write(enhancedTail)
+        val enhancedTail = microphoneEnhancer?.finish() ?: ShortArray(0)
+        microphoneEnhancer = null
+        if (enhancedTail.isNotEmpty()) {
+          micWriter?.write(enhancedTail)
+          mixedWriter?.write(enhancedTail)
+        }
       } catch (_: Throwable) {}
       try { micWriter?.close() } catch (_: Throwable) {}
       try { systemWriter?.close() } catch (_: Throwable) {}
@@ -187,10 +205,21 @@ class EchoRecordingService : Service() {
         try {
           val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")) + ".m4a"
           val output = uniqueCacheOutput(name).apply { parentFile?.mkdirs() }
-          M4aFinalizer.finalize(mixedFile, output); publishToMusic(output, output.name); session.deleteRecursively()
+          M4aFinalizer.finalize(mixedFile, output)
+          val trackDirectory = File(cacheDir, "recording-tracks/$sessionId").apply { mkdirs() }
+          val finalizedMic = if (microphoneEnabled && micFile.length() > 0) File(trackDirectory, "microphone.m4a").also {
+            M4aFinalizer.finalize(micFile, it)
+          } else null
+          val finalizedSystem = if (systemEnabled && systemFile.length() > 0) File(trackDirectory, "system.m4a").also {
+            M4aFinalizer.finalize(systemFile, it)
+          } else null
+          publishToMusic(output, output.name); session.deleteRecursively()
           RecordingBridge.update {
             put("phase", "completed"); put("elapsedMs", SystemClock.elapsedRealtime() - startedAt)
-            put("outputPath", output.absolutePath); put("stopReason", "captureError")
+            put("outputPath", output.absolutePath)
+            put("microphoneTrackPath", finalizedMic?.absolutePath ?: JSONObject.NULL)
+            put("systemTrackPath", finalizedSystem?.absolutePath ?: JSONObject.NULL)
+            put("stopReason", "captureError")
             put("error", error.message ?: "音声の取得が停止したため、途中までの録音を保存しました。")
           }
         } catch (recoveryError: Throwable) {
@@ -201,7 +230,7 @@ class EchoRecordingService : Service() {
         put("stopReason", "captureError")
       }
     } finally {
-      try { finalEnhancer?.close() } catch (_: Throwable) {}
+      try { microphoneEnhancer?.close() } catch (_: Throwable) {}
       try { mic?.release() } catch (_: Throwable) {}
       try { system?.release() } catch (_: Throwable) {}
       projection?.stop(); projection = null

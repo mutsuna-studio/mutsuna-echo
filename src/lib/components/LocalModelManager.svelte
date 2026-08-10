@@ -5,10 +5,12 @@
   import { Button } from "@mutsuna/ui/button";
   import { Select } from "@mutsuna/ui/select";
   import { formatFileSize } from "../format";
-  import { VAD_PRESET_OPTIONS } from "../providers";
+  import { LOCAL_RECOGNITION_MODE_OPTIONS, VAD_PRESET_OPTIONS } from "../providers";
   import type {
     LocalSttModelCatalogEntry,
     LocalSttModelDownloadProgress,
+    LocalRecognitionMode,
+    LocalRecognitionSettings,
     LocalVadModelStatus,
     VadPreset
   } from "../providers";
@@ -31,6 +33,8 @@
   let vadProgress = $state<LocalSttModelDownloadProgress | null>(null);
   let vadPreset = $state<VadPreset>("standard");
   let presetWorking = $state(false);
+  let recognitionMode = $state<LocalRecognitionMode>("fast");
+  let recognitionWorking = $state(false);
   let autoInstallAttempted = $state(false);
 
   const model = $derived(models[0] ?? null);
@@ -52,11 +56,14 @@
   }
 
   async function refresh() {
-    [models, vadModel, vadPreset] = await Promise.all([
+    let recognitionSettings: LocalRecognitionSettings;
+    [models, vadModel, vadPreset, recognitionSettings] = await Promise.all([
       invoke<LocalSttModelCatalogEntry[]>("list_local_stt_model_catalog"),
       invoke<LocalVadModelStatus>("get_local_vad_model_status"),
-      invoke<VadPreset>("get_vad_preset")
+      invoke<VadPreset>("get_vad_preset"),
+      invoke<LocalRecognitionSettings>("get_local_recognition_settings")
     ]);
+    recognitionMode = recognitionSettings.mode;
     working = models.some((entry) => entry.downloading);
     vadWorking = vadModel.downloading;
   }
@@ -190,6 +197,27 @@
     }
   }
 
+  async function changeRecognitionMode(value: string) {
+    if (value !== "fast" && value !== "accurate") return;
+    const previous = recognitionMode;
+    recognitionMode = value;
+    recognitionWorking = true;
+    try {
+      const saved = await invoke<LocalRecognitionSettings>("set_local_recognition_settings", {
+        settings: { mode: recognitionMode }
+      });
+      recognitionMode = saved.mode;
+      onMessage(recognitionMode === "accurate"
+        ? "高精度モードを有効にしました。次回から複数候補と重要用語を使います。"
+        : "高速モードを有効にしました。重要用語がある場合だけ複数候補を使います。");
+    } catch (error) {
+      recognitionMode = previous;
+      onError(errorText(error));
+    } finally {
+      recognitionWorking = false;
+    }
+  }
+
   async function cancelVadDownload() {
     try {
       await invoke("cancel_local_vad_model_download");
@@ -209,6 +237,16 @@
     <small>
       日本語向け · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 音声はこの端末だけで処理します
     </small>
+    {#if model?.installed}
+      <Select
+        value={recognitionMode}
+        options={LOCAL_RECOGNITION_MODE_OPTIONS}
+        onValueChange={changeRecognitionMode}
+        disabled={disabled || working || recognitionWorking}
+        ariaLabel="ローカル文字起こしの精度"
+      />
+      <small>重要用語が設定されている場合は、高速モードでも用語を優先する探索を使用します。</small>
+    {/if}
     {#if model && !model.runtimeSupported}
       <small>この端末ではまだ使用できません。</small>
     {/if}

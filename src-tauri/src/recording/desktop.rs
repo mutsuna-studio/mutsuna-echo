@@ -267,7 +267,12 @@ fn run_desktop_recording(
         None
     };
     let mut mixed_writer = M4aWriter::create(&paths.mixed, FINAL_BITRATE, fragment_seconds)?;
-    let mut final_enhancer = crate::audio_enhancement::StreamingAudioEnhancer::sonora(SAMPLE_RATE)?;
+    // Enhance only the microphone. System playback is already a clean digital
+    // source and must not pass through speech-oriented noise suppression/AGC.
+    let mut microphone_enhancer = request
+        .microphone
+        .then(|| crate::audio_enhancement::StreamingAudioEnhancer::sonora(SAMPLE_RATE))
+        .transpose()?;
 
     let started_at = Utc::now();
     let started = Instant::now();
@@ -324,11 +329,17 @@ fn run_desktop_recording(
                 update_capture_warning(app, status, microphone_stalled, system_stalled);
             }
             while let Some(chunk) = stream.poll_chunk() {
-                if let Some(writer) = microphone_writer.as_mut() {
-                    writer.write(&chunk.data)?;
-                }
                 accumulate_meter_samples(&mut microphone_level, &chunk.data);
-                mic_queue.push_back((chunk.pts_ns, chunk.data));
+                let enhanced = microphone_enhancer
+                    .as_mut()
+                    .expect("microphone enhancer exists when microphone capture is enabled")
+                    .accept(&chunk.data)?;
+                if !enhanced.is_empty() {
+                    if let Some(writer) = microphone_writer.as_mut() {
+                        writer.write(&enhanced)?;
+                    }
+                    mic_queue.push_back((chunk.pts_ns, enhanced));
+                }
             }
         }
 
@@ -348,7 +359,6 @@ fn run_desktop_recording(
 
         drain_mix(
             &mut mixed_writer,
-            &mut final_enhancer,
             &mut mic_queue,
             &mut sys_queue,
             &mut mix_buffer,
@@ -394,7 +404,6 @@ fn run_desktop_recording(
     }
     drain_mix(
         &mut mixed_writer,
-        &mut final_enhancer,
         &mut mic_queue,
         &mut sys_queue,
         &mut mix_buffer,
@@ -407,12 +416,21 @@ fn run_desktop_recording(
             }
         },
     )?;
-    let enhanced_tail = final_enhancer.finish()?;
+    let enhanced_tail = microphone_enhancer
+        .take()
+        .map(|mut enhancer| enhancer.finish())
+        .transpose()?
+        .unwrap_or_default();
     if !enhanced_tail.is_empty() {
+        if let Some(writer) = microphone_writer.as_mut() {
+            writer.write(&enhanced_tail)?;
+        }
         waveform.accept(&enhanced_tail);
         if let Some(detector) = live_vad.as_mut() {
             let _ = detector.accept_waveform(&enhanced_tail);
         }
+        // At shutdown no system samples remain queued, so the microphone tail
+        // is also the final mixed tail.
         mixed_writer.write(&enhanced_tail)?;
     }
 
@@ -452,6 +470,12 @@ fn run_desktop_recording(
 
     let selected =
         crate::commands::transcribe::set_selected_audio_path(app, paths.final_file.clone())?;
+    crate::meeting_store::store_recording_tracks(
+        app,
+        selected.meeting_id(),
+        request.microphone.then_some(paths.microphone.as_path()),
+        request.system_audio.then_some(paths.system.as_path()),
+    )?;
     if let Err(error) =
         crate::audio_waveform::cache_recorded_waveform(app, selected.meeting_id(), waveform)
     {

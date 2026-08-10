@@ -60,6 +60,8 @@ pub fn run() {
             transcription::vad_models::delete_local_vad_model,
             transcription::vad_settings::get_vad_preset,
             transcription::vad_settings::set_vad_preset,
+            transcription::local_settings::get_local_recognition_settings,
+            transcription::local_settings::set_local_recognition_settings,
             transcription::context::get_global_transcription_context,
             transcription::context::set_global_transcription_context,
             transcription::context::get_meeting_transcription_context,

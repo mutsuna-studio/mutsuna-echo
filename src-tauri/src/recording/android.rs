@@ -245,8 +245,16 @@ pub fn copy_completed_recording(recording_id: &str) -> Result<std::path::PathBuf
     Ok(std::path::PathBuf::from(path))
 }
 
-pub fn recover(session_id: &str) -> Result<std::path::PathBuf, String> {
-    let path = with_env(|env, app, bridge| {
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveredRecording {
+    pub path: std::path::PathBuf,
+    pub microphone_track_path: Option<std::path::PathBuf>,
+    pub system_track_path: Option<std::path::PathBuf>,
+}
+
+pub fn recover(session_id: &str) -> Result<RecoveredRecording, String> {
+    let json = with_env(|env, app, bridge| {
         let session_id = env
             .new_string(session_id)
             .map_err(|error| format!("復旧する録音IDをAndroidへ渡せませんでした: {error}"))?;
@@ -266,5 +274,6 @@ pub fn recover(session_id: &str) -> Result<std::path::PathBuf, String> {
             .map(String::from)
             .map_err(|error| format!("復旧した録音の場所を読み取れませんでした: {error}"))
     })?;
-    Ok(std::path::PathBuf::from(path))
+    serde_json::from_str(&json)
+        .map_err(|error| format!("復旧した録音トラックの応答が不正です: {error}"))
 }

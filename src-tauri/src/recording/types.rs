@@ -93,6 +93,10 @@ pub struct RecordingStatus {
     #[serde(default)]
     pub voice_activity: VoiceActivityState,
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub microphone_track_path: Option<String>,
+    #[serde(default)]
+    pub system_track_path: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub warning: Option<String>,
     pub error: Option<String>,
@@ -110,6 +114,8 @@ impl Default for RecordingStatus {
             system_audio: false,
             voice_activity: VoiceActivityState::Unavailable,
             output_path: None,
+            microphone_track_path: None,
+            system_track_path: None,
             stop_reason: None,
             warning: None,
             error: None,

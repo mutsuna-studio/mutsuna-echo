@@ -5,6 +5,7 @@ pub(crate) mod elevenlabs;
 #[cfg(any(desktop, target_os = "android"))]
 mod local;
 pub(crate) mod local_models;
+pub(crate) mod local_settings;
 pub(crate) mod providers;
 pub(crate) mod soniox;
 pub mod types;
@@ -13,7 +14,7 @@ pub(crate) mod vad;
 pub(crate) mod vad_models;
 pub(crate) mod vad_settings;
 
-use std::path::Path;
+use std::{cmp::Ordering, collections::BTreeSet, path::Path};
 
 use tauri::AppHandle;
 
@@ -32,6 +33,41 @@ pub(crate) struct TranscriptionOutcome {
 }
 
 pub(crate) async fn transcribe(
+    app: &AppHandle,
+    meeting_id: &str,
+    audio_path: &Path,
+    provider: TranscriptionProvider,
+    model_id: Option<&str>,
+    context: Option<&context::TranscriptionContext>,
+) -> Result<TranscriptionOutcome, String> {
+    let tracks = crate::meeting_store::recording_tracks(app, meeting_id)?;
+    let mut sources = Vec::new();
+    if let Some(path) = tracks.microphone {
+        sources.push((path, RecordingChannel::Microphone));
+    }
+    if let Some(path) = tracks.system {
+        sources.push((path, RecordingChannel::System));
+    }
+    if sources.is_empty() {
+        return transcribe_one(app, audio_path, provider, model_id, context).await;
+    }
+
+    let mut outcomes = Vec::with_capacity(sources.len());
+    for (path, channel) in sources {
+        let mut outcome = transcribe_one(app, &path, provider, model_id, context).await?;
+        label_channel(&mut outcome.transcript, channel);
+        outcomes.push(outcome);
+    }
+    Ok(merge_channel_outcomes(outcomes))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecordingChannel {
+    Microphone,
+    System,
+}
+
+async fn transcribe_one(
     app: &AppHandle,
     audio_path: &Path,
     provider: TranscriptionProvider,
@@ -71,8 +107,9 @@ pub(crate) async fn transcribe(
                 let app = app.clone();
                 let audio_path = audio_path.to_path_buf();
                 let model_id = model.model_id.clone();
+                let context = context.cloned();
                 let transcript = tauri::async_runtime::spawn_blocking(move || {
-                    local::transcribe(&app, &audio_path, &model_id)
+                    local::transcribe(&app, &audio_path, &model_id, context.as_ref())
                 })
                 .await
                 .map_err(|error| {
@@ -89,5 +126,131 @@ pub(crate) async fn transcribe(
                 Err("この端末ではReazonSpeechのローカル推論をまだ利用できません。".into())
             }
         }
+    }
+}
+
+fn label_channel(transcript: &mut Transcript, channel: RecordingChannel) {
+    let provider_speakers = transcript
+        .tokens
+        .iter()
+        .filter_map(|token| token.speaker.clone())
+        .chain(
+            transcript
+                .segments
+                .iter()
+                .map(|segment| segment.speaker.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let channel_speaker = |provider_speaker: Option<&str>| match channel {
+        RecordingChannel::Microphone => "自分".to_string(),
+        RecordingChannel::System if provider_speakers.len() <= 1 => "相手".to_string(),
+        RecordingChannel::System => provider_speaker
+            .and_then(|speaker| provider_speakers.iter().position(|value| value == speaker))
+            .map(|index| format!("相手 {}", index + 1))
+            .unwrap_or_else(|| "相手".into()),
+    };
+    for token in &mut transcript.tokens {
+        token.speaker = Some(channel_speaker(token.speaker.as_deref()));
+        token.speaker_source = Some(TokenSpeakerSource::Channel);
+    }
+    if transcript.tokens.is_empty() {
+        for segment in &mut transcript.segments {
+            segment.speaker = channel_speaker(Some(&segment.speaker));
+        }
+    } else {
+        transcript.segments = segments_from_tokens(&transcript.tokens);
+    }
+}
+
+fn merge_channel_outcomes(mut outcomes: Vec<TranscriptionOutcome>) -> TranscriptionOutcome {
+    let mut first = outcomes.remove(0);
+    let mut cost = first
+        .cost_usd
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok());
+    for mut outcome in outcomes {
+        first
+            .transcript
+            .tokens
+            .append(&mut outcome.transcript.tokens);
+        first
+            .transcript
+            .segments
+            .append(&mut outcome.transcript.segments);
+        if let Some(value) = outcome
+            .cost_usd
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            cost = Some(cost.unwrap_or(0.0) + value);
+        }
+    }
+    if first.transcript.tokens.is_empty() {
+        first
+            .transcript
+            .segments
+            .sort_by_key(|segment| segment.start_ms);
+    } else {
+        first.transcript.tokens.sort_by(|left, right| {
+            left.start_ms
+                .cmp(&right.start_ms)
+                .then_with(|| left.end_ms.cmp(&right.end_ms))
+                .then_with(
+                    || match (left.speaker.as_deref(), right.speaker.as_deref()) {
+                        (Some("自分"), Some("相手")) => Ordering::Less,
+                        (Some("相手"), Some("自分")) => Ordering::Greater,
+                        _ => Ordering::Equal,
+                    },
+                )
+        });
+        first.transcript.segments = segments_from_tokens(&first.transcript.tokens);
+    }
+    first.cost_usd = cost.map(|value| format!("{value:.6}"));
+    first
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{label_channel, merge_channel_outcomes, RecordingChannel, TranscriptionOutcome};
+    use crate::transcription::{TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptToken};
+
+    fn outcome(text: &str, start_ms: u64, cost: Option<&str>) -> TranscriptionOutcome {
+        let token = TranscriptToken {
+            text: text.into(),
+            start_ms: Some(start_ms),
+            end_ms: Some(start_ms + 300),
+            start_time_source: Some(TokenTimeSource::Provider),
+            end_time_source: Some(TokenTimeSource::Provider),
+            speaker: Some("Speaker 1".into()),
+            speaker_source: Some(TokenSpeakerSource::Provider),
+            confidence: None,
+        };
+        TranscriptionOutcome {
+            transcript: Transcript {
+                provider: "test".into(),
+                model: "test".into(),
+                language: "ja".into(),
+                tokens: vec![token.clone()],
+                segments: crate::transcription::segments_from_tokens(&[token]),
+            },
+            cost_usd: cost.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn channel_transcripts_are_speaker_labeled_and_merged_on_one_timeline() {
+        let mut microphone = outcome("質問", 1_000, Some("0.10"));
+        let mut system = outcome("回答", 900, Some("0.20"));
+        label_channel(&mut microphone.transcript, RecordingChannel::Microphone);
+        label_channel(&mut system.transcript, RecordingChannel::System);
+        let merged = merge_channel_outcomes(vec![microphone, system]);
+        assert_eq!(merged.transcript.tokens[0].speaker.as_deref(), Some("相手"));
+        assert_eq!(merged.transcript.tokens[1].speaker.as_deref(), Some("自分"));
+        assert!(merged
+            .transcript
+            .tokens
+            .iter()
+            .all(|token| token.speaker_source == Some(TokenSpeakerSource::Channel)));
+        assert_eq!(merged.cost_usd.as_deref(), Some("0.300000"));
     }
 }

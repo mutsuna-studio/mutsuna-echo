@@ -153,7 +153,10 @@ export type SonioxUsage = {
 export type TranscriptionContext = {
   background: string;
   terms: string[];
+  corrections: TextCorrection[];
 };
+
+export type TextCorrection = { from: string; to: string };
 
 export type GlobalTranscriptionContextSettings = TranscriptionContext & {
   contextEnabled: boolean;

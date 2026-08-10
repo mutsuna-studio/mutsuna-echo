@@ -25,6 +25,8 @@ function status(mode: Exclude<OverlayPreviewMode, "detection">): RecordingStatus
     systemAudio: true,
     voiceActivity: mode === "recording" ? "speechDetected" : "listening",
     outputPath: mode === "completed" ? "preview.m4a" : null,
+    microphoneTrackPath: null,
+    systemTrackPath: null,
     stopReason: mode === "completed" ? "user" : null,
     warning: null,
     error: mode === "error" ? "システム音声を取得できませんでした。音声出力先を確認してください。" : null

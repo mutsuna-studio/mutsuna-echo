@@ -128,6 +128,8 @@ pub(crate) struct UpdateTranscriptDocumentRequest {
     changes: Vec<crate::transcript_store::TranscriptSegmentChange>,
     #[serde(default)]
     speaker_labels: Vec<crate::transcript_store::TranscriptSpeakerLabelChange>,
+    #[serde(default)]
+    learn_correction_segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -718,6 +720,7 @@ pub(crate) async fn transcribe_selected_audio(
     )?;
     let outcome = crate::transcription::transcribe(
         &app,
+        &selected.descriptor.meeting_id,
         &selected.path,
         request.provider,
         request.model_id.as_deref(),
@@ -793,6 +796,7 @@ pub(crate) fn update_transcript_document(
         request.expected_revision,
         request.changes,
         request.speaker_labels,
+        request.learn_correction_segment_ids,
     )
 }
 

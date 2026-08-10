@@ -381,8 +381,11 @@ async fn format_transcript(
         .ok_or_else(|| "先に文字起こしを作成してください。".to_string())?;
 
     let mut formatted = original.clone();
+    let corrections =
+        crate::transcription::context::effective_corrections(&app, &request.meeting_id)?;
     for segment in &mut formatted.segments {
         segment.text = mechanically_format_transcript_text(&segment.text);
+        segment.text = apply_text_corrections(&segment.text, &corrections);
     }
 
     let mut method = "mechanical";
@@ -399,6 +402,7 @@ async fn format_transcript(
                 apply_formatting_changes(&mut formatted, &llm_changes)?;
                 for segment in &mut formatted.segments {
                     segment.text = mechanically_format_transcript_text(&segment.text);
+                    segment.text = apply_text_corrections(&segment.text, &corrections);
                 }
                 method = "mechanicalAndLlm";
                 provider = Some(provider_id.to_string());
@@ -1033,6 +1037,17 @@ fn mechanically_format_transcript_text(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn apply_text_corrections(
+    text: &str,
+    corrections: &[crate::transcription::context::TextCorrection],
+) -> String {
+    corrections
+        .iter()
+        .fold(text.to_string(), |value, correction| {
+            value.replace(&correction.from, &correction.to)
+        })
 }
 
 fn build_transcript_formatting_prompt(
@@ -1799,6 +1814,18 @@ mod tests {
         assert_eq!(
             mechanically_format_transcript_text("確認します。 ええと 次の項目です。"),
             "確認します。次の項目です。"
+        );
+    }
+
+    #[test]
+    fn local_dictionary_correction_is_deterministic() {
+        let corrections = vec![crate::transcription::context::TextCorrection {
+            from: "むつなエコー".into(),
+            to: "Mutsuna Echo".into(),
+        }];
+        assert_eq!(
+            apply_text_corrections("むつなエコーを使います。", &corrections),
+            "Mutsuna Echoを使います。"
         );
     }
 

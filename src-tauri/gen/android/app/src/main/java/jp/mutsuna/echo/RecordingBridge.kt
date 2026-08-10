@@ -294,8 +294,25 @@ object RecordingBridge {
         ?: throw IllegalStateException("Musicへ録音を書き込めませんでした。")
       context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }, null, null)
     } catch (error: Throwable) { context.contentResolver.delete(uri, null, null); throw error }
+    val trackDirectory = java.io.File(context.cacheDir, "recording-tracks/$sessionId").apply { mkdirs() }
+    val microphoneSource = manifest.optString("microphoneFile")
+      .takeIf { manifest.optBoolean("microphone") && it.isNotBlank() && it != "null" }
+      ?.let { java.io.File(it) }
+    val systemSource = manifest.optString("systemFile")
+      .takeIf { manifest.optBoolean("systemAudio") && it.isNotBlank() && it != "null" }
+      ?.let { java.io.File(it) }
+    val microphoneTrack = microphoneSource?.takeIf { it.isFile && it.length() > 0 }?.let {
+      java.io.File(trackDirectory, "microphone.m4a").also { output -> M4aFinalizer.finalize(it, output) }
+    }
+    val systemTrack = systemSource?.takeIf { it.isFile && it.length() > 0 }?.let {
+      java.io.File(trackDirectory, "system.m4a").also { output -> M4aFinalizer.finalize(it, output) }
+    }
     check(directory.deleteRecursively()) { "復旧後の一時データを削除できませんでした。" }
-    return output.absolutePath
+    return JSONObject().apply {
+      put("path", output.absolutePath)
+      put("microphoneTrackPath", microphoneTrack?.absolutePath ?: JSONObject.NULL)
+      put("systemTrackPath", systemTrack?.absolutePath ?: JSONObject.NULL)
+    }.toString()
   }
 
   internal fun update(block: JSONObject.() -> Unit) = synchronized(lock) { status.apply(block) }
@@ -324,6 +341,6 @@ object RecordingBridge {
 
   private fun defaultStatus() = """{
     "phase":"idle","sessionId":null,"elapsedMs":0,"microphone":false,"systemAudio":false,
-    "microphoneLevel":0.0,"systemLevel":0.0,"outputPath":null,"stopReason":null,"warning":null,"error":null
+    "microphoneLevel":0.0,"systemLevel":0.0,"outputPath":null,"microphoneTrackPath":null,"systemTrackPath":null,"stopReason":null,"warning":null,"error":null
   }""".trimIndent()
 }

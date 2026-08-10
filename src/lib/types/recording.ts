@@ -36,6 +36,8 @@ export interface RecordingStatus {
   systemAudio: boolean;
   voiceActivity: VoiceActivityState;
   outputPath: string | null;
+  microphoneTrackPath: string | null;
+  systemTrackPath: string | null;
   stopReason: StopReason | null;
   warning: string | null;
   error: string | null;

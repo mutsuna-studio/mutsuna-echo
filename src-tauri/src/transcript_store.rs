@@ -435,6 +435,7 @@ pub(crate) fn update_run_segments(
     expected_revision: u64,
     changes: Vec<TranscriptSegmentChange>,
     speaker_labels: Vec<TranscriptSpeakerLabelChange>,
+    learn_correction_segment_ids: Vec<String>,
 ) -> Result<TranscriptionRunDetail, String> {
     validate_transcription_id(transcription_id)?;
     if changes.is_empty() && speaker_labels.is_empty() {
@@ -444,7 +445,15 @@ pub(crate) fn update_run_segments(
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     let mut index = ensure_history_in(&directory, meeting_id)?;
     let mut run = read_run(&directory, meeting_id, transcription_id)?;
-    let text_changed = apply_segment_changes(&mut run, expected_revision, changes)?;
+    let learn_correction_segment_ids = learn_correction_segment_ids
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let (text_changed, learned_corrections) = apply_segment_changes(
+        &mut run,
+        expected_revision,
+        changes,
+        &learn_correction_segment_ids,
+    )?;
     let speaker_changed = apply_speaker_label_changes(&mut run, expected_revision, speaker_labels)?;
     let changed = text_changed || speaker_changed;
     if changed {
@@ -461,6 +470,11 @@ pub(crate) fn update_run_segments(
             *summary = run_summary(&run);
         }
         write_history_index(&directory, &index)?;
+        if let Err(error) =
+            crate::transcription::context::learn_corrections(app, learned_corrections)
+        {
+            eprintln!("手動修正を学習辞書へ保存できませんでした: {error}");
+        }
     }
     Ok(run_detail(&run))
 }
@@ -509,13 +523,15 @@ fn apply_segment_changes(
     run: &mut StoredTranscriptionRun,
     expected_revision: u64,
     changes: Vec<TranscriptSegmentChange>,
-) -> Result<bool, String> {
+    learn_correction_segment_ids: &HashSet<String>,
+) -> Result<(bool, Vec<crate::transcription::context::TextCorrection>), String> {
     if run.document.revision != expected_revision {
         return Err(
             "文字起こしが別の操作で更新されました。再読み込みしてから編集してください。".into(),
         );
     }
     let mut changed = false;
+    let mut learned_corrections = Vec::new();
     let mut seen = HashSet::new();
     for change in changes {
         validate_transcription_id(&change.segment_id)?;
@@ -532,12 +548,20 @@ fn apply_segment_changes(
             .find(|segment| segment.segment_id == change.segment_id)
             .ok_or_else(|| "編集対象の発話区間が見つかりません。".to_string())?;
         if segment.text != change.text {
+            if learn_correction_segment_ids.contains(&change.segment_id) {
+                if let Some(correction) = crate::transcription::context::correction_from_manual_edit(
+                    &segment.text,
+                    &change.text,
+                ) {
+                    learned_corrections.push(correction);
+                }
+            }
             segment.text = change.text;
             segment.edited = true;
             changed = true;
         }
     }
-    Ok(changed)
+    Ok((changed, learned_corrections))
 }
 
 fn apply_speaker_label_changes(
@@ -1147,7 +1171,7 @@ fn meeting_provider_key(meeting_id: &str, provider_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
 
     use super::{
         apply_segment_changes, apply_speaker_label_changes, audio_key, document_from_transcript,
@@ -1266,17 +1290,23 @@ mod tests {
             source: transcript,
         };
         let segment_id = run.document.segments[0].segment_id.clone();
-        assert!(apply_segment_changes(
+        let learn_ids = HashSet::from([segment_id.clone()]);
+        let (changed, learned) = apply_segment_changes(
             &mut run,
             0,
             vec![TranscriptSegmentChange {
                 segment_id: segment_id.clone(),
-                text: "修正しました。".into(),
+                text: "Mutsuna Echoです。".into(),
             }],
+            &learn_ids,
         )
-        .expect("apply edit"));
+        .expect("apply edit");
+        assert!(changed);
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].from, "テスト");
+        assert_eq!(learned[0].to, "Mutsuna Echo");
         assert_eq!(run.source.segments[0].text, "テストです。");
-        assert_eq!(run.document.segments[0].text, "修正しました。");
+        assert_eq!(run.document.segments[0].text, "Mutsuna Echoです。");
         assert!(apply_speaker_label_changes(
             &mut run,
             0,
@@ -1301,6 +1331,7 @@ mod tests {
                 segment_id,
                 text: "競合".into(),
             }],
+            &HashSet::new(),
         )
         .is_err());
         reset_document_from_source(&mut run, 1, "2026-08-09T01:00:00Z".into())
@@ -1345,7 +1376,11 @@ mod tests {
             })
             .collect();
 
-        assert!(apply_segment_changes(&mut run, 0, changes).expect("apply batch edit"));
+        assert!(
+            apply_segment_changes(&mut run, 0, changes, &HashSet::new())
+                .expect("apply batch edit")
+                .0
+        );
         assert_eq!(run.document.segments[0].text, "修正1");
         assert_eq!(run.document.segments[1].text, "修正2");
         assert_eq!(run.source.segments[0].text, "テストです。");

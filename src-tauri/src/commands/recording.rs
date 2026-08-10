@@ -148,6 +148,25 @@ pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult
             .map(std::path::Path::new)
             .map(|path| set_selected_audio_path(&app, path.to_path_buf()))
             .transpose()?;
+        if let Some(audio) = &audio {
+            let microphone = status
+                .microphone_track_path
+                .as_deref()
+                .map(std::path::Path::new);
+            let system = status
+                .system_track_path
+                .as_deref()
+                .map(std::path::Path::new);
+            crate::meeting_store::store_recording_tracks(
+                &app,
+                audio.meeting_id(),
+                microphone,
+                system,
+            )?;
+            for path in [microphone, system].into_iter().flatten() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
         return Ok(StopRecordingResult { status, audio });
     }
     #[cfg(not(target_os = "android"))]
@@ -539,13 +558,23 @@ pub(crate) fn recover_recording(
     session_id: String,
 ) -> Result<SelectedAudioFile, String> {
     #[cfg(target_os = "android")]
-    let path = {
+    let recovered = {
         let _ = app;
         recording::android::recover(&session_id)?
     };
+    #[cfg(target_os = "android")]
+    let path = recovered.path.clone();
     #[cfg(not(target_os = "android"))]
     let path = recording::recover(&app, &session_id)?;
-    set_selected_audio_path(&app, path)
+    let selected = set_selected_audio_path(&app, path)?;
+    #[cfg(target_os = "android")]
+    crate::meeting_store::store_recording_tracks(
+        &app,
+        selected.meeting_id(),
+        recovered.microphone_track_path.as_deref(),
+        recovered.system_track_path.as_deref(),
+    )?;
+    Ok(selected)
 }
 
 #[tauri::command]

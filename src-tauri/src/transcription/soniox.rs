@@ -16,7 +16,7 @@ use super::{
 };
 
 pub(crate) const MODEL_ID: &str = "stt-async-v5";
-const API_BASE_URL: &str = "https://api.soniox.com/v1";
+const API_BASE_URL: &str = "https://api.jp.soniox.com/v1";
 const LANGUAGE_HINT: &str = "ja";
 const MAX_POLL_ATTEMPTS: usize = 10_800;
 const MAX_USAGE_LOG_ATTEMPTS: usize = 5;
@@ -524,9 +524,15 @@ pub(crate) async fn transcribe(
 mod tests {
     use super::{
         error_message, normalize, usage_cost, CreateTranscription, SonioxContext, SonioxTranscript,
+        API_BASE_URL,
     };
     use reqwest::StatusCode;
     use serde_json::json;
+
+    #[test]
+    fn uses_japan_regional_api() {
+        assert_eq!(API_BASE_URL, "https://api.jp.soniox.com/v1");
+    }
 
     #[test]
     fn preserves_provider_timing_speakers_and_confidence() {

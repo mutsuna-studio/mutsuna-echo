@@ -1,8 +1,9 @@
-use std::path::Path;
+use std::{collections::HashMap, fs, path::Path};
 
 use super::{
-    audio_decode::decode_mono, local_models, repair_inferred_token_ends, segments_from_tokens, vad,
-    vad_models, vad_settings, TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
+    audio_decode::decode_mono, context::TranscriptionContext, local_models, local_settings,
+    repair_inferred_token_ends, segments_from_tokens, vad, vad_models, vad_settings,
+    TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
 };
 use crate::commands::transcribe::{
     publish_transcription_progress, TranscriptionProgress, TranscriptionStage,
@@ -21,6 +22,7 @@ pub(crate) fn transcribe(
     app: &tauri::AppHandle,
     audio_path: &Path,
     model_id: &str,
+    context: Option<&TranscriptionContext>,
 ) -> Result<Transcript, String> {
     if model_id != local_models::REAZONSPEECH_MODEL_ID {
         return Err("選択したローカルSTTモデルには対応していません。".into());
@@ -36,21 +38,38 @@ pub(crate) fn transcribe(
     config.model_config.tokens = Some(path_string(TOKENS));
     config.model_config.num_threads = available_threads();
     config.model_config.provider = Some("cpu".into());
-    config.decoding_method = Some("greedy_search".into());
+    let settings = local_settings::current(app)?;
+    let hotwords = encode_hotwords(&model.join(TOKENS), context)?;
+    let accurate = settings.mode == local_settings::LocalRecognitionMode::Accurate;
+    let use_beam = accurate || hotwords.is_some();
+    config.decoding_method = Some(if use_beam {
+        "modified_beam_search".into()
+    } else {
+        "greedy_search".into()
+    });
+    config.max_active_paths = if accurate { 8 } else { 4 };
+    config.hotwords_score = 1.5;
 
     let recognizer = OfflineRecognizer::create(&config)
         .ok_or_else(|| "ReazonSpeechの推論エンジンを初期化できませんでした。モデルを再インストールしてください。".to_string())?;
     let (tokens, segments) = match vad_models::installed_model_path(app)? {
         Some(vad_model) => {
             let preset = vad_settings::current_preset(app)?;
-            transcribe_speech_regions(app, &recognizer, audio_path, &vad_model, preset)?
+            transcribe_speech_regions(
+                app,
+                &recognizer,
+                audio_path,
+                &vad_model,
+                preset,
+                hotwords.as_deref(),
+            )?
         }
         None => {
             publish_transcription_progress(
                 app,
                 TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
             );
-            transcribe_full_audio(&recognizer, audio_path)?
+            transcribe_full_audio(&recognizer, audio_path, hotwords.as_deref())?
         }
     };
     Ok(Transcript {
@@ -65,8 +84,9 @@ pub(crate) fn transcribe(
 fn transcribe_full_audio(
     recognizer: &OfflineRecognizer,
     audio_path: &Path,
+    hotwords: Option<&str>,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
-    let stream = recognizer.create_stream();
+    let stream = create_stream(recognizer, hotwords);
     let duration_ms = decode_mono(audio_path, |sample_rate, samples| {
         stream.accept_waveform(sample_rate as i32, samples);
         Ok(())
@@ -84,6 +104,7 @@ fn transcribe_speech_regions(
     audio_path: &Path,
     vad_model: &Path,
     preset: vad_settings::VadPreset,
+    hotwords: Option<&str>,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
     publish_transcription_progress(
         app,
@@ -102,7 +123,7 @@ fn transcribe_speech_regions(
     let mut tokens = Vec::new();
     let mut completed_chunks = 0u32;
     vad::visit_speech_regions(audio_path, vad_model, preset, |region| {
-        let stream = recognizer.create_stream();
+        let stream = create_stream(recognizer, hotwords);
         stream.accept_waveform(vad::SAMPLE_RATE as i32, &region.samples);
         recognizer.decode(&stream);
         let result = stream
@@ -110,6 +131,15 @@ fn transcribe_speech_regions(
             .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
         let (mut region_tokens, _) =
             normalize_result(&result, region.duration_ms(), region.start_ms);
+        // Padded windows overlap by design. Keep only tokens whose midpoint
+        // belongs to the original VAD region, retaining boundary context for
+        // recognition without duplicating transcript text.
+        region_tokens.retain(|token| {
+            let start = token.start_ms.unwrap_or(region.speech_start_ms);
+            let end = token.end_ms.unwrap_or(start);
+            let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
+            midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
+        });
         tokens.append(&mut region_tokens);
         completed_chunks = completed_chunks.saturating_add(1);
         publish_transcription_progress(
@@ -125,6 +155,84 @@ fn transcribe_speech_regions(
     repair_inferred_token_ends(&mut tokens, Some(audio_duration_ms));
     let segments = segments_from_tokens(&tokens);
     Ok((tokens, segments))
+}
+
+fn create_stream(
+    recognizer: &OfflineRecognizer,
+    hotwords: Option<&str>,
+) -> sherpa_onnx::OfflineStream {
+    hotwords.map_or_else(
+        || recognizer.create_stream(),
+        |value| recognizer.create_stream_with_hotwords(value),
+    )
+}
+
+/// sherpa-onnx expects hotwords as token sequences when the model has no BPE
+/// vocabulary metadata. Convert user-facing terms with the model's pinned
+/// tokens.txt instead of passing arbitrary strings to the native decoder.
+fn encode_hotwords(
+    tokens_path: &Path,
+    context: Option<&TranscriptionContext>,
+) -> Result<Option<String>, String> {
+    let Some(context) = context.filter(|value| !value.terms.is_empty()) else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(tokens_path)
+        .map_err(|error| format!("重要用語の辞書を読み込めませんでした: {error}"))?;
+    let mut vocabulary = text
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|token| !token.starts_with('<') && *token != "▁")
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    vocabulary.sort_by_key(|token| std::cmp::Reverse(token.chars().count()));
+    vocabulary.dedup();
+
+    let encoded = context
+        .terms
+        .iter()
+        .filter_map(|term| tokenize_hotword(term, &vocabulary))
+        .map(|tokens| tokens.join(" "))
+        .collect::<Vec<_>>();
+    Ok((!encoded.is_empty()).then(|| encoded.join("/")))
+}
+
+fn tokenize_hotword(term: &str, vocabulary: &[String]) -> Option<Vec<String>> {
+    fn visit(
+        term: &str,
+        offset: usize,
+        vocabulary: &[String],
+        memo: &mut HashMap<usize, Option<Vec<String>>>,
+    ) -> Option<Vec<String>> {
+        if offset == term.len() {
+            return Some(Vec::new());
+        }
+        if let Some(cached) = memo.get(&offset) {
+            return cached.clone();
+        }
+        let remaining = &term[offset..];
+        let result = vocabulary.iter().find_map(|token| {
+            let surface = token.strip_prefix('▁').unwrap_or(token);
+            if surface.is_empty() || !remaining.starts_with(surface) {
+                return None;
+            }
+            let next = offset + surface.len();
+            if !term.is_char_boundary(next) {
+                return None;
+            }
+            visit(term, next, vocabulary, memo).map(|mut suffix| {
+                suffix.insert(0, token.clone());
+                suffix
+            })
+        });
+        memo.insert(offset, result.clone());
+        result
+    }
+
+    let compact = term.split_whitespace().collect::<String>();
+    (!compact.is_empty())
+        .then(|| visit(&compact, 0, vocabulary, &mut HashMap::new()))
+        .flatten()
 }
 
 fn normalize_result(
@@ -221,7 +329,7 @@ fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_result;
+    use super::{normalize_result, tokenize_hotword};
     use sherpa_onnx::OfflineRecognizerResult;
 
     #[test]
@@ -271,5 +379,21 @@ mod tests {
             (tokens[0].start_ms, tokens[0].end_ms),
             (Some(12_200), Some(12_600))
         );
+    }
+
+    #[test]
+    fn converts_user_terms_to_the_models_longest_token_sequence() {
+        let vocabulary = vec![
+            "Mutsuna".into(),
+            "Mu".into(),
+            "tsu".into(),
+            "na".into(),
+            "Echo".into(),
+        ];
+        assert_eq!(
+            tokenize_hotword("Mutsuna Echo", &vocabulary),
+            Some(vec!["Mutsuna".into(), "Echo".into()])
+        );
+        assert_eq!(tokenize_hotword("未登録", &vocabulary), None);
     }
 }
