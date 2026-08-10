@@ -20,9 +20,12 @@ const SCHEMA_VERSION: u8 = 1;
 const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
+const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const NODE_VERSION: &str = "24.18.0";
 const LEGACY_NODE_VERSIONS: &[&str] = &["22.23.2"];
 const MAX_NODE_ARCHIVE_BYTES: u64 = 100 * 1024 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy)]
 struct AcpAgentDefinition {
@@ -106,7 +109,6 @@ pub(crate) struct SummaryProviderDefinition {
     description: String,
     ready: bool,
     status_message: String,
-    allow_custom_model: bool,
     models: Vec<SummaryModelDefinition>,
 }
 
@@ -183,7 +185,6 @@ pub(crate) async fn providers(app: AppHandle) -> Vec<SummaryProviderDefinition> 
                     } else {
                         agent.install_hint.into()
                     },
-                    allow_custom_model: true,
                     models: vec![SummaryModelDefinition {
                         id: "default".into(),
                         label: format!("{}の既定モデル", agent.label),
@@ -201,6 +202,26 @@ pub(crate) async fn providers(app: AppHandle) -> Vec<SummaryProviderDefinition> 
 #[tauri::command]
 pub(crate) async fn get_summary_providers(app: AppHandle) -> Vec<SummaryProviderDefinition> {
     providers(app).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_summary_models(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<Vec<SummaryModelDefinition>, String> {
+    let agent = ACP_AGENTS
+        .iter()
+        .find(|agent| agent.id == provider_id)
+        .copied()
+        .ok_or_else(|| "選択した要約プロバイダーには対応していません。".to_string())?;
+    let executable =
+        resolve_agent_executable(&app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
+    let node_bin = managed_node_bin_directory(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        discover_models_with_acp(agent, executable, node_bin)
+    })
+    .await
+    .map_err(|_| "ACPエージェントのモデル取得を完了できませんでした。".to_string())?
 }
 
 #[tauri::command]
@@ -310,6 +331,183 @@ pub(crate) async fn generate(
     status(&app, &request.meeting_id)
 }
 
+fn discover_models_with_acp(
+    agent: AcpAgentDefinition,
+    executable: PathBuf,
+    node_bin: Option<PathBuf>,
+) -> Result<Vec<SummaryModelDefinition>, String> {
+    let work_dir = std::env::temp_dir().join(format!(
+        "mutsuna-echo-summary-models-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    fs::create_dir(&work_dir)
+        .map_err(|error| format!("モデル取得用の一時領域を作成できませんでした: {error}"))?;
+    let result = run_acp_model_discovery(agent, executable, node_bin, &work_dir);
+    let _ = fs::remove_dir_all(&work_dir);
+    result
+}
+
+fn run_acp_model_discovery(
+    agent: AcpAgentDefinition,
+    executable: PathBuf,
+    node_bin: Option<PathBuf>,
+    work_dir: &Path,
+) -> Result<Vec<SummaryModelDefinition>, String> {
+    let mut command = Command::new(executable);
+    command.current_dir(work_dir).args(agent.args);
+    configure_background_command(&mut command);
+    if let Some(node_bin) = node_bin {
+        let mut paths = vec![node_bin];
+        if let Some(current) = env::var_os("PATH") {
+            paths.extend(env::split_paths(&current));
+        }
+        if let Ok(path) = env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "{}のACPエージェントを起動できませんでした: {error}",
+                agent.label
+            )
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "ACPエージェントへ接続できませんでした。".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ACPエージェントの応答を取得できませんでした。".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "ACPエージェントのエラー出力を取得できませんでした。".to_string())?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    let stdout_reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut value = String::new();
+        let _ = stderr.read_to_string(&mut value);
+        value
+    });
+
+    let result = (|| {
+        let deadline = Instant::now() + MODEL_DISCOVERY_TIMEOUT;
+        send_rpc(
+            &mut stdin,
+            0,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": { "name": "mutsuna-echo", "title": "Mutsuna Echo", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        )?;
+        let initialized = wait_for_response(&receiver, &mut stdin, 0, deadline, None)?;
+        ensure_rpc_success(&initialized, agent.label)?;
+        send_rpc(
+            &mut stdin,
+            1,
+            "session/new",
+            serde_json::json!({ "cwd": work_dir, "mcpServers": [] }),
+        )?;
+        let session_response = wait_for_response(&receiver, &mut stdin, 1, deadline, None)?;
+        let session_result = ensure_rpc_success(&session_response, agent.label)?;
+        Ok(model_definitions_from_session(session_result, agent.label))
+    })();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_reader.join();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if let Err(error) = result {
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
+        return Err(if detail.is_empty() {
+            error
+        } else {
+            format!("{error} ({})", truncate(detail, 500))
+        });
+    }
+    result
+}
+
+fn model_definitions_from_session(
+    session_result: &serde_json::Value,
+    agent_label: &str,
+) -> Vec<SummaryModelDefinition> {
+    let model_config = session_result
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("category").and_then(serde_json::Value::as_str) == Some("model")
+            })
+        });
+    let current = model_config
+        .and_then(|config| config.get("currentValue"))
+        .and_then(serde_json::Value::as_str);
+    let mut seen = HashSet::new();
+    let mut models: Vec<SummaryModelDefinition> = model_config
+        .and_then(|config| config.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| {
+            let id = option
+                .get("value")
+                .and_then(serde_json::Value::as_str)?
+                .trim();
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                return None;
+            }
+            let label = option
+                .get("name")
+                .or_else(|| option.get("label"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(id);
+            let description = option
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            Some(SummaryModelDefinition {
+                id: id.into(),
+                label: label.into(),
+                description: description.into(),
+                is_default: current == Some(id),
+            })
+        })
+        .collect();
+    if models.is_empty() || !models.iter().any(|model| model.is_default) {
+        models.insert(
+            0,
+            SummaryModelDefinition {
+                id: "default".into(),
+                label: format!("{agent_label}の既定モデル"),
+                description: "ACPエージェント側の既定モデルを使用します。".into(),
+                is_default: true,
+            },
+        );
+    }
+    models
+}
+
 fn generate_with_acp(
     snapshot: &SummaryTranscriptSnapshot,
     agent: AcpAgentDefinition,
@@ -358,6 +556,7 @@ fn run_acp_agent(
 ) -> Result<(String, String), String> {
     let mut command = Command::new(executable);
     command.current_dir(work_dir).args(agent.args);
+    configure_background_command(&mut command);
     if let Some(node_bin) = node_bin {
         let mut paths = vec![node_bin];
         if let Some(current) = env::var_os("PATH") {
@@ -545,7 +744,7 @@ fn wait_for_response(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("ACPによる要約が3分以内に完了しませんでした。".into());
+            return Err("ACP処理が制限時間内に完了しませんでした。".into());
         }
         let line = receiver
             .recv_timeout(remaining)
@@ -1087,6 +1286,7 @@ fn run_npm_install(
 ) -> Result<(), String> {
     let mut command = Command::new(node);
     command.arg(npm_cli);
+    configure_background_command(&mut command);
     if let Some(node_bin) = node.parent() {
         let mut paths = vec![node_bin.to_path_buf()];
         if let Some(current) = env::var_os("PATH") {
@@ -1160,6 +1360,18 @@ fn run_npm_install(
         "要約エージェントをインストールできませんでした: {}",
         truncate(detail, 500)
     ))
+}
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 fn delete_managed_agent(app: &AppHandle, provider_id: &str) -> Result<(), String> {
@@ -1301,5 +1513,40 @@ mod tests {
             action_items: vec![],
         };
         assert!(validate_content(&content, &snapshot()).is_ok());
+    }
+
+    #[test]
+    fn reads_model_options_from_acp_session() {
+        let models = model_definitions_from_session(
+            &serde_json::json!({
+                "configOptions": [{
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": "gpt-5.4",
+                    "options": [
+                        { "value": "gpt-5.4", "name": "GPT-5.4", "description": "推奨" },
+                        { "value": "gpt-5.3-codex", "name": "GPT-5.3 Codex" }
+                    ]
+                }]
+            }),
+            "Codex",
+        );
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-5.4");
+        assert_eq!(models[0].label, "GPT-5.4");
+        assert!(models[0].is_default);
+        assert!(!models[1].is_default);
+    }
+
+    #[test]
+    fn falls_back_to_agent_default_when_acp_has_no_model_config() {
+        let models = model_definitions_from_session(
+            &serde_json::json!({ "sessionId": "session-1" }),
+            "Claude Code",
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "default");
+        assert_eq!(models[0].label, "Claude Codeの既定モデル");
+        assert!(models[0].is_default);
     }
 }

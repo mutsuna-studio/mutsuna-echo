@@ -11,7 +11,6 @@ export type SummaryProviderDefinition = {
   description: string;
   ready: boolean;
   statusMessage: string;
-  allowCustomModel: boolean;
   models: SummaryModelDefinition[];
 };
 

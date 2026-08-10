@@ -42,7 +42,6 @@
     value={mode}
     options={OVERLAY_PREVIEW_OPTIONS}
     onValueChange={changeMode}
-    searchable
     size="sm"
     class="w-24"
     ariaLabel="プレビュー状態"

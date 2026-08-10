@@ -12,13 +12,14 @@ use serde_json::Value;
 
 use super::{
     segments_from_tokens, TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment,
-    TranscriptToken,
+    TranscriptToken, TranscriptionOutcome,
 };
 
 pub(crate) const MODEL_ID: &str = "stt-async-v5";
 const API_BASE_URL: &str = "https://api.soniox.com/v1";
 const LANGUAGE_HINT: &str = "ja";
 const MAX_POLL_ATTEMPTS: usize = 10_800;
+const MAX_USAGE_LOG_ATTEMPTS: usize = 5;
 
 struct SonioxClient {
     http: Client,
@@ -86,6 +87,21 @@ struct CreateTranscription<'a> {
     language_hints: [&'a str; 1],
     enable_speaker_diarization: bool,
     enable_language_identification: bool,
+    client_reference_id: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLogsResponse {
+    #[serde(default)]
+    usage_logs: Vec<UsageLog>,
+    #[serde(default)]
+    next_page_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageLog {
+    client_reference_id: Option<String>,
+    cost_usd: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +276,7 @@ async fn cleanup(client: &SonioxClient, transcription_id: Option<&str>, file_id:
 async fn transcribe_inner(
     client: &SonioxClient,
     file_id: &str,
+    client_reference_id: &str,
 ) -> Result<(String, Transcript), (Option<String>, String)> {
     let request = CreateTranscription {
         model: MODEL_ID,
@@ -267,6 +284,7 @@ async fn transcribe_inner(
         language_hints: [LANGUAGE_HINT],
         enable_speaker_diarization: true,
         enable_language_identification: true,
+        client_reference_id,
     };
     let response = client
         .post("/transcriptions")
@@ -332,8 +350,120 @@ async fn transcribe_inner(
     ))
 }
 
-pub(crate) async fn transcribe(path: &Path, api_key: &SecretString) -> Result<Transcript, String> {
+fn usage_cost(value: &Value) -> Option<String> {
+    let value = value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_f64().map(|value| value.to_string()))?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .map(|_| value)
+}
+
+fn usage_cost_value(value: &Value) -> Option<f64> {
+    usage_cost(value).and_then(|value| value.parse::<f64>().ok())
+}
+
+async fn fetch_usage_logs_page(
+    client: &SonioxClient,
+    start_time: &str,
+    end_time: &str,
+    cursor: Option<&str>,
+) -> Result<UsageLogsResponse, String> {
+    let mut request = client.get("/usage-logs").query(&[
+        ("start_time", start_time),
+        ("end_time", end_time),
+        ("sort", "end_time_desc"),
+        ("limit", "1000"),
+    ]);
+    if let Some(cursor) = cursor {
+        request = request.query(&[("cursor", cursor)]);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Sonioxの利用料金を取得できませんでした: {error}"))?;
+    parse_response(response, "利用料金の取得").await
+}
+
+pub(crate) async fn current_month_cost_usd(api_key: &SecretString) -> Result<String, String> {
+    use chrono::Datelike;
+
     let client = SonioxClient::new(api_key)?;
+    let now = chrono::Utc::now();
+    let start = now
+        .date_naive()
+        .with_day(1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date| date.and_utc())
+        .ok_or_else(|| "Sonioxの利用期間を計算できませんでした。".to_string())?;
+    let start_time = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let end_time = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut cursor = None::<String>;
+    let mut total = 0.0_f64;
+    let mut page_count = 0_u16;
+    loop {
+        page_count += 1;
+        if page_count > 100 {
+            return Err("Sonioxの利用料金が多すぎるため、すべて取得できませんでした。".into());
+        }
+        let page =
+            fetch_usage_logs_page(&client, &start_time, &end_time, cursor.as_deref()).await?;
+        total += page
+            .usage_logs
+            .iter()
+            .filter_map(|log| usage_cost_value(&log.cost_usd))
+            .sum::<f64>();
+        cursor = page.next_page_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    if !total.is_finite() || total < 0.0 {
+        return Err("Sonioxの利用料金レスポンス形式を確認できませんでした。".into());
+    }
+    let formatted = format!("{total:.10}");
+    Ok(formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string())
+}
+
+async fn fetch_usage_cost(
+    client: &SonioxClient,
+    client_reference_id: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<String>, String> {
+    for attempt in 0..MAX_USAGE_LOG_ATTEMPTS {
+        let end_time = chrono::Utc::now() + chrono::Duration::minutes(1);
+        let start_time = started_at - chrono::Duration::minutes(1);
+        let start_time = start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let end_time = end_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let logs = fetch_usage_logs_page(&client, &start_time, &end_time, None).await?;
+        if let Some(cost_usd) = logs
+            .usage_logs
+            .iter()
+            .find(|log| log.client_reference_id.as_deref() == Some(client_reference_id))
+            .and_then(|log| usage_cost(&log.cost_usd))
+        {
+            return Ok(Some(cost_usd));
+        }
+        if attempt + 1 < MAX_USAGE_LOG_ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) async fn transcribe(
+    path: &Path,
+    api_key: &SecretString,
+) -> Result<TranscriptionOutcome, String> {
+    let client = SonioxClient::new(api_key)?;
+    let client_reference_id = uuid::Uuid::now_v7().to_string();
+    let started_at = chrono::Utc::now();
     let form = Form::new().file("file", path).await.map_err(|error| {
         eprintln!("Could not open selected audio for Soniox: {error:?}");
         "選択した音声ファイルを開けませんでした。".to_string()
@@ -345,20 +475,34 @@ pub(crate) async fn transcribe(path: &Path, api_key: &SecretString) -> Result<Tr
         .await
         .map_err(|error| format!("Sonioxへ音声をアップロードできませんでした: {error}"))?;
     let uploaded: UploadedFile = parse_response(response, "音声のアップロード").await?;
-    let result = transcribe_inner(&client, &uploaded.id).await;
+    let result = transcribe_inner(&client, &uploaded.id, &client_reference_id).await;
+    let cost_usd = if result.is_ok() {
+        match fetch_usage_cost(&client, &client_reference_id, started_at).await {
+            Ok(cost) => cost,
+            Err(error) => {
+                eprintln!("Could not retrieve Soniox transcription cost: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let transcription_id = match &result {
         Ok((id, _)) => Some(id.as_str()),
         Err((id, _)) => id.as_deref(),
     };
     cleanup(&client, transcription_id, &uploaded.id).await;
     result
-        .map(|(_, transcript)| transcript)
+        .map(|(_, transcript)| TranscriptionOutcome {
+            transcript,
+            cost_usd,
+        })
         .map_err(|(_, error)| error)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{error_message, normalize, SonioxTranscript};
+    use super::{error_message, normalize, usage_cost, SonioxTranscript};
     use reqwest::StatusCode;
     use serde_json::json;
 
@@ -378,6 +522,16 @@ mod tests {
         assert_eq!(transcript.tokens[0].confidence, Some(0.97));
         assert_eq!(transcript.tokens[1].speaker.as_deref(), Some("Speaker 2"));
         assert_eq!(transcript.segments.len(), 2);
+    }
+
+    #[test]
+    fn reads_decimal_usage_cost_without_losing_provider_value() {
+        assert_eq!(
+            usage_cost(&json!("0.0081000000")),
+            Some("0.0081000000".into())
+        );
+        assert_eq!(usage_cost(&json!(-0.1)), None);
+        assert_eq!(usage_cost(&json!("not-a-cost")), None);
     }
 
     #[test]

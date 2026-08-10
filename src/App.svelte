@@ -14,12 +14,14 @@
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import AppSidebar from "./lib/components/AppSidebar.svelte";
-  import AudioInputPanel from "./lib/components/AudioInputPanel.svelte";
   import LocalModelManager from "./lib/components/LocalModelManager.svelte";
-  import MeetingLibrary from "./lib/components/MeetingLibrary.svelte";
+  import MeetingHome from "./lib/components/MeetingHome.svelte";
   import MeetingWorkspace from "./lib/components/MeetingWorkspace.svelte";
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
+  import RecordingMode from "./lib/components/RecordingMode.svelte";
   import SummaryAgentManager from "./lib/components/SummaryAgentManager.svelte";
+  import SummaryDefaultsSettings from "./lib/components/SummaryDefaultsSettings.svelte";
+  import SonioxUsagePanel from "./lib/components/SonioxUsagePanel.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
     getTranscriptionProvider,
@@ -29,7 +31,7 @@
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
-  import type { SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
+  import type { SummaryModelDefinition, SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
   import type {
     SelectedAudioFile,
     EditableTranscript,
@@ -41,15 +43,48 @@
     TranscriptSegmentTextChange,
     TranscriptSaveState,
     TranscriptionSession,
-    TranscriptionUsage
+    TranscriptionUsage,
+    SonioxUsage
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
   const TRANSCRIPTION_PROVIDER_STORAGE_KEY = "mutsuna-echo.transcription-provider";
   const SUMMARY_PROVIDER_STORAGE_KEY = "mutsuna-echo.summary-provider";
   const SUMMARY_MODEL_STORAGE_KEY = "mutsuna-echo.summary-model";
-  const SUMMARY_CUSTOM_MODEL_STORAGE_KEY = "mutsuna-echo.summary-custom-model";
-  type AppSection = "meetings" | "new" | "settings";
+  const SUMMARY_PROVIDER_MODEL_DEFAULTS_STORAGE_KEY = "mutsuna-echo.summary-provider-model-defaults";
+  const SONIOX_USAGE_STORAGE_KEY = "mutsuna-echo.soniox-usage";
+  const API_KEY_SAVE_TIMEOUT_MS = 30_000;
+  const summarySettingsPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "summary-settings";
+  const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
+    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
+  ];
+  const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
+    {
+      id: "codex",
+      label: "Codex",
+      description: "ローカルでログイン済みのCodexをACP経由で使用します。",
+      ready: true,
+      statusMessage: "ACP接続可能",
+      models: [
+        { id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark-Preview", description: "", isDefault: true },
+        { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", description: "", isDefault: false }
+      ]
+    },
+    {
+      id: "claude",
+      label: "Claude Code",
+      description: "ローカルのClaude Agent認証をACP経由で使用します。",
+      ready: true,
+      statusMessage: "ACP接続可能",
+      models: [
+        { id: "claude-sonnet", label: "Claude Sonnet 4.6 (1M context)", description: "", isDefault: true },
+        { id: "claude-opus", label: "Claude Opus 4.6", description: "", isDefault: false }
+      ]
+    }
+  ];
+  type AppSection = "meetings" | "recording" | "settings";
   type TranscriptReplacementUndo = {
     transcriptionId: string;
     changes: TranscriptSegmentTextChange[];
@@ -64,28 +99,68 @@
     }
   }
 
-  let loading = $state(true);
+  function savedSummaryProviderModelDefaults(): Record<string, string> {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SUMMARY_PROVIDER_MODEL_DEFAULTS_STORAGE_KEY) ?? "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+      );
+    } catch {
+      return {};
+    }
+  }
+
+  function savedSonioxUsage(): SonioxUsage | null {
+    try {
+      const value = JSON.parse(localStorage.getItem(SONIOX_USAGE_STORAGE_KEY) ?? "null");
+      const usage = value
+        && typeof value.monthlyCostUsd === "string"
+        && typeof value.periodStart === "string"
+        && typeof value.fetchedAt === "string"
+        ? value as SonioxUsage
+        : null;
+      if (!usage) return null;
+      const now = new Date();
+      const periodStart = new Date(usage.periodStart);
+      return periodStart.getUTCFullYear() === now.getUTCFullYear()
+        && periodStart.getUTCMonth() === now.getUTCMonth()
+        ? usage
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const savedSummaryProviderId = localStorage.getItem(SUMMARY_PROVIDER_STORAGE_KEY) ?? "codex";
+  const savedSummaryModelId = localStorage.getItem(SUMMARY_MODEL_STORAGE_KEY) ?? "default";
+
+  let loading = $state(!summarySettingsPreview);
   let toasterPosition = $state<"top-right" | "bottom-center">("top-right");
-  let section = $state<AppSection>("meetings");
-  let libraryOpen = $state(true);
+  let section = $state<AppSection>(summarySettingsPreview ? "settings" : "meetings");
   let meetings = $state.raw<RecentMeetingSummary[]>([]);
   let meetingsLoading = $state(false);
   let meetingBusy = $state(false);
-  let saving = $state(false);
+  let savingProviderId = $state<TranscriptionProviderId | null>(null);
   let deleting = $state(false);
   let selecting = $state(false);
   let transcribing = $state(false);
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let usageLoading = $state(false);
+  let sonioxUsageLoading = $state(false);
   let recordingBusy = $state(false);
   let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
+  let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
-  let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>([]);
-  let summaryProviders = $state.raw<SummaryProviderDefinition[]>([]);
-  let summaryProviderId = $state(localStorage.getItem(SUMMARY_PROVIDER_STORAGE_KEY) ?? "codex");
-  let summaryModelId = $state(localStorage.getItem(SUMMARY_MODEL_STORAGE_KEY) ?? "default");
-  let summaryCustomModelId = $state(localStorage.getItem(SUMMARY_CUSTOM_MODEL_STORAGE_KEY) ?? "");
+  let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
+  let summaryProviders = $state.raw<SummaryProviderDefinition[]>(summarySettingsPreview ? SUMMARY_SETTINGS_PREVIEW_PROVIDERS : []);
+  let summaryDefaultProviderId = $state(savedSummaryProviderId);
+  let summaryDefaultModelId = $state(savedSummaryModelId);
+  let summaryProviderModelDefaults = $state.raw<Record<string, string>>(savedSummaryProviderModelDefaults());
+  let summaryProviderId = $state(savedSummaryProviderId);
+  let summaryModelId = $state(savedSummaryModelId);
+  let summaryModelsLoading = $state(false);
   let summaryStatus = $state.raw<SummaryStatus | null>(null);
   let summaryGenerating = $state(false);
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
@@ -95,7 +170,9 @@
   let selectedTranscriptionRun = $state.raw<TranscriptionRunDetail | null>(null);
   let transcriptSaveState = $state<TranscriptSaveState>("saved");
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
+  let sonioxUsage = $state.raw<SonioxUsage | null>(savedSonioxUsage());
   let usageError = $state("");
+  let sonioxUsageError = $state("");
   let lastErrorToast = $state("");
   let lastErrorToastAt = $state(0);
   let pendingActionPromise: Promise<void> | null = null;
@@ -107,19 +184,50 @@
   let transcriptSaveTimer: number | null = null;
   let transcriptSavePromise: Promise<void> | null = null;
   let transcriptReplacementUndo = $state.raw<TranscriptReplacementUndo | null>(null);
+  let summaryModelRequestId = 0;
+  let lastSummaryMeetingId = "";
+  let compactViewport = $state(false);
+  let mobileMeetingDetail = $state(false);
+  let hasAppHistoryEntry = false;
   const pendingTranscriptChanges = new Map<string, string>();
   const pendingSpeakerLabelChanges = new Map<string, string>();
 
   $effect(() => {
-    const compactViewport = window.matchMedia("(max-width: 600px)");
+    const compactViewportQuery = window.matchMedia("(max-width: 600px)");
     const updateToasterPosition = () => {
-      toasterPosition = compactViewport.matches ? "bottom-center" : "top-right";
+      compactViewport = compactViewportQuery.matches;
+      toasterPosition = compactViewport ? "bottom-center" : "top-right";
     };
     updateToasterPosition();
-    compactViewport.addEventListener("change", updateToasterPosition);
-    return () => compactViewport.removeEventListener("change", updateToasterPosition);
+    compactViewportQuery.addEventListener("change", updateToasterPosition);
+    return () => compactViewportQuery.removeEventListener("change", updateToasterPosition);
   });
 
+  $effect(() => {
+    const meetingId = selectedMeetingId ?? "";
+    if (!meetingId || meetingId === lastSummaryMeetingId) return;
+    lastSummaryMeetingId = meetingId;
+    summaryProviderId = summaryDefaultProviderId;
+    summaryModelId = summaryDefaultModelId;
+    void refreshSummaryModels(summaryProviderId);
+  });
+
+  $effect(() => {
+    const handlePopState = () => {
+      hasAppHistoryEntry = false;
+      if (recordingBusy) {
+        pushAppHistoryEntry();
+        showWarningToast("録音処理中です。", "録音を停止してから会議一覧へ戻ってください。");
+        return;
+      }
+      section = "meetings";
+      mobileMeetingDetail = false;
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  });
+
+  const saving = $derived(savingProviderId !== null);
   const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy || updating);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || updating);
   const currentProvider = $derived(
@@ -128,8 +236,17 @@
   const hasApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
   );
+  const hasSonioxApiKey = $derived(
+    transcriptionProviders.find((provider) => provider.id === "soniox")?.configured ?? false
+  );
   const pageTitle = $derived(
-    section === "meetings" ? "会議" : section === "new" ? "新しいMeeting" : "設定"
+    section === "meetings"
+      ? !mobileMeetingDetail
+        ? "会議"
+        : meetings.find((meeting) => meeting.meetingId === selectedMeetingId)?.title ?? "会議"
+      : section === "recording"
+        ? "録音モード"
+        : "設定"
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
@@ -137,8 +254,18 @@
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
   const selectedMeeting = $derived(
-    meetings.find((meeting) => meeting.meetingId === selectedAudio?.meetingId) ?? null
+    meetings.find((meeting) => meeting.meetingId === selectedMeetingId) ?? null
   );
+
+  $effect(() => {
+    const availableProvider = transcriptionProviders.find((provider) => provider.ready);
+    const selectedProviderIsAvailable = transcriptionProviders.some(
+      (provider) => provider.id === transcriptionProvider && provider.ready
+    );
+    if (availableProvider && !selectedProviderIsAvailable) {
+      void changeTranscriptionProvider(availableProvider.id);
+    }
+  });
 
   $effect(() => {
     if (!import.meta.env.DEV) return;
@@ -172,14 +299,119 @@
     }
   }
 
+  async function refreshSonioxUsage() {
+    if (!hasSonioxApiKey || sonioxUsageLoading) return;
+
+    sonioxUsageLoading = true;
+    sonioxUsageError = "";
+    try {
+      sonioxUsage = await invoke<SonioxUsage>("get_soniox_usage");
+      localStorage.setItem(SONIOX_USAGE_STORAGE_KEY, JSON.stringify(sonioxUsage));
+    } catch (error) {
+      sonioxUsageError = errorText(error);
+    } finally {
+      sonioxUsageLoading = false;
+    }
+  }
+
+  function clearSonioxUsage() {
+    sonioxUsage = null;
+    sonioxUsageError = "";
+    localStorage.removeItem(SONIOX_USAGE_STORAGE_KEY);
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    let timeoutId: number | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    }
+  }
+
   async function refreshProviders() {
     transcriptionProviders = await invoke<TranscriptionProviderDefinition[]>(
       "get_transcription_providers"
     );
   }
 
+  function normalizeSummaryProviderSelections() {
+    const fallbackProvider = summaryProviders.find((provider) => provider.ready) ?? summaryProviders[0];
+    if (!fallbackProvider) return;
+    if (!summaryProviders.some((provider) => provider.id === summaryDefaultProviderId && provider.ready)) {
+      summaryDefaultProviderId = fallbackProvider.id;
+      summaryDefaultModelId = fallbackSummaryModel(fallbackProvider.models);
+      localStorage.setItem(SUMMARY_PROVIDER_STORAGE_KEY, summaryDefaultProviderId);
+      localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, summaryDefaultModelId);
+    }
+    if (!summaryProviders.some((provider) => provider.id === summaryProviderId && provider.ready)) {
+      summaryProviderId = summaryDefaultProviderId;
+      summaryModelId = summaryDefaultModelId;
+    }
+  }
+
   async function refreshSummaryProviders() {
     summaryProviders = await invoke<SummaryProviderDefinition[]>("get_summary_providers");
+    normalizeSummaryProviderSelections();
+    void refreshSummaryModels(summaryProviderId);
+  }
+
+  function fallbackSummaryModel(models: readonly SummaryModelDefinition[]): string {
+    return models.find((model) => model.isDefault)?.id ?? models[0]?.id ?? "default";
+  }
+
+  function saveSummaryProviderModelDefaults(defaults: Record<string, string>) {
+    summaryProviderModelDefaults = defaults;
+    localStorage.setItem(SUMMARY_PROVIDER_MODEL_DEFAULTS_STORAGE_KEY, JSON.stringify(defaults));
+  }
+
+  function repairSummaryDefaults(providerId: string, models: readonly SummaryModelDefinition[]) {
+    const fallback = fallbackSummaryModel(models);
+    const providerDefault = summaryProviderModelDefaults[providerId];
+    if (!providerDefault || !models.some((model) => model.id === providerDefault)) {
+      saveSummaryProviderModelDefaults({ ...summaryProviderModelDefaults, [providerId]: fallback });
+    }
+    if (providerId === summaryDefaultProviderId && !models.some((model) => model.id === summaryDefaultModelId)) {
+      summaryDefaultModelId = fallback;
+      localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, fallback);
+    }
+  }
+
+  async function refreshSummaryModels(providerId: string, reportError = false) {
+    if (summarySettingsPreview) return;
+    const provider = summaryProviders.find((candidate) => candidate.id === providerId);
+    if (!provider?.ready) {
+      if (providerId === summaryProviderId) {
+        summaryModelsLoading = false;
+        summaryModelId = provider?.models.find((model) => model.isDefault)?.id ?? provider?.models[0]?.id ?? "default";
+      }
+      return;
+    }
+    const requestId = ++summaryModelRequestId;
+    if (providerId === summaryProviderId) summaryModelsLoading = true;
+    try {
+      const models = await invoke<SummaryModelDefinition[]>("get_summary_models", { providerId });
+      if (models.length === 0) return;
+      summaryProviders = summaryProviders.map((candidate) =>
+        candidate.id === providerId ? { ...candidate, models } : candidate
+      );
+      repairSummaryDefaults(providerId, models);
+      if (providerId === summaryProviderId) {
+        const selectedStillAvailable = models.some((model) => model.id === summaryModelId);
+        if (!selectedStillAvailable) {
+          summaryModelId = summaryProviderModelDefaults[providerId] && models.some((model) => model.id === summaryProviderModelDefaults[providerId])
+            ? summaryProviderModelDefaults[providerId]
+            : fallbackSummaryModel(models);
+        }
+      }
+    } catch (error) {
+      if (reportError) showError(errorText(error));
+    } finally {
+      if (requestId === summaryModelRequestId) summaryModelsLoading = false;
+    }
   }
 
   async function refreshMeetings() {
@@ -200,11 +432,14 @@
     try {
       await flushTranscriptEdits();
       if (transcriptSaveState === "error") return;
-      selectedAudio = await invoke<SelectedAudioFile>("select_meeting_audio", {
+      selectedAudio = await invoke<SelectedAudioFile | null>("select_meeting_audio", {
         meetingId: meeting.meetingId
       });
+      selectedMeetingId = meeting.meetingId;
       await restoreTranscriptionHistory();
+      pushAppHistoryEntry();
       section = "meetings";
+      mobileMeetingDetail = true;
     } catch (error) {
       showError(errorText(error));
       await refreshMeetings();
@@ -222,13 +457,94 @@
     }
   }
 
+  async function renameMeeting(meeting: RecentMeetingSummary, newFileName: string) {
+    const requested = newFileName.trim();
+    if (!requested || requested === meeting.fileName) return;
+    try {
+      await invoke("rename_meeting_audio", {
+        meetingId: meeting.meetingId,
+        newFileName: requested
+      });
+      if (selectedAudio?.meetingId === meeting.meetingId) {
+        selectedAudio = { ...selectedAudio, name: requested };
+      }
+      await refreshMeetings();
+    } catch (error) {
+      showError(errorText(error));
+    }
+  }
+
+  async function deleteMeeting(meeting: RecentMeetingSummary, mode: "audioOnly" | "all") {
+    if (meetingBusy) return;
+    meetingBusy = true;
+    try {
+      await flushTranscriptEdits();
+      if (transcriptSaveState === "error") return;
+      selectedAudio = null;
+      await tick();
+      await invoke("delete_meeting", { meetingId: meeting.meetingId, mode });
+      if (mode === "audioOnly") {
+        selectedMeetingId = meeting.meetingId;
+        showSuccessToast("音声ファイルを削除しました。文字起こしと会議ノートは残っています。");
+      } else {
+        selectedMeetingId = null;
+        setSelectedTranscriptionRun(null);
+        transcriptionRuns = [];
+        mobileMeetingDetail = false;
+        showSuccessToast("会議と関連ファイルを削除しました。");
+      }
+      await refreshMeetings();
+    } catch (error) {
+      showError(errorText(error));
+      await refreshMeetings();
+      try {
+        selectedAudio = await invoke<SelectedAudioFile | null>("select_meeting_audio", {
+          meetingId: meeting.meetingId
+        });
+        selectedMeetingId = meeting.meetingId;
+      } catch {
+        selectedMeetingId = null;
+      }
+    } finally {
+      meetingBusy = false;
+    }
+  }
+
   function navigate(nextSection: AppSection) {
     if (updating) {
       showWarningToast("更新処理中です。", "完了してアプリが再起動するまでお待ちください。");
       return;
     }
+    if (nextSection === "meetings") {
+      if (hasAppHistoryEntry) window.history.back();
+      else mobileMeetingDetail = false;
+      return;
+    }
+    pushAppHistoryEntry();
     section = nextSection;
-    if (nextSection === "meetings") libraryOpen = true;
+  }
+
+  function startMobileRecording() {
+    navigate("recording");
+  }
+
+  async function selectHomeAudioFile() {
+    const selected = await selectAudioFile();
+    if (!selected) return;
+    await refreshMeetings();
+    pushAppHistoryEntry();
+    mobileMeetingDetail = true;
+    section = "meetings";
+  }
+
+  function createRecording() {
+    startMobileRecording();
+  }
+
+  function pushAppHistoryEntry() {
+    if (hasAppHistoryEntry) return;
+    window.history.pushState({ mutsunaEchoView: true }, "");
+    hasAppHistoryEntry = true;
   }
 
   async function checkForAvailableUpdate() {
@@ -277,8 +593,11 @@
       actionId: action.id
     });
     selectedAudio = audio;
+    selectedMeetingId = audio.meetingId;
     await restoreTranscriptionHistory();
-    section = "new";
+    pushAppHistoryEntry();
+    mobileMeetingDetail = true;
+    section = "meetings";
     await focusTranscriptionAction();
     await invoke("acknowledge_pending_action", { actionId: action.id });
     lastAcknowledgedActionId = action.id;
@@ -348,6 +667,7 @@
   }
 
   $effect(() => {
+    if (summarySettingsPreview) return;
     let cancelled = false;
     let unlistenPending: UnlistenFn | undefined;
     let unlistenProgress: UnlistenFn | undefined;
@@ -376,8 +696,11 @@
         if (cancelled) return;
         transcriptionProviders = nextProviders;
         summaryProviders = nextSummaryProviders;
+        normalizeSummaryProviderSelections();
+        void refreshSummaryModels(summaryProviderId);
         meetings = nextMeetings;
         selectedAudio = session.selectedAudio;
+        selectedMeetingId = session.selectedAudio?.meetingId ?? null;
         transcribing = session.transcribing;
         transcriptionProgress = session.progress;
         if (pendingResult.error) {
@@ -418,6 +741,7 @@
         transcriptionProgress = session.progress;
         if (session.transcribing) return;
         selectedAudio = session.selectedAudio;
+        selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
         transcribing = false;
         if (selectedAudio) {
           await restoreTranscriptionHistory();
@@ -450,23 +774,36 @@
     };
   });
 
-  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string) {
-    saving = true;
+  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string): Promise<boolean> {
+    if (savingProviderId !== null) return false;
+    savingProviderId = providerId;
+    let saved = false;
 
     try {
-      const modelsAccessible = await invoke<boolean>("save_provider_api_key", { providerId, apiKey });
-      await refreshProviders();
+      const modelsAccessible = await withTimeout(
+        invoke<boolean>("save_provider_api_key", { providerId, apiKey }),
+        API_KEY_SAVE_TIMEOUT_MS,
+        "APIキーの確認に時間がかかっています。通信状態を確認して、もう一度お試しください。"
+      );
+      await withTimeout(
+        refreshProviders(),
+        10_000,
+        "保存状態を更新できませんでした。設定画面を開き直して確認してください。"
+      );
+      saved = true;
       if (modelsAccessible) {
-        showSuccessToast("APIキーを確認し、安全に保存しました。");
+        showSuccessToast("APIキーを確認して保存しました。");
       } else {
-        showWarningToast("制限付きAPIキーとして保存しました。", "各権限は利用時に確認します。");
+        showWarningToast("APIキーを保存しました。", "必要な権限があるか、使用するときにもう一度確認します。");
       }
-      if (providerId === "elevenlabs") await refreshUsage();
     } catch (error) {
       showError(errorText(error));
     } finally {
-      saving = false;
+      savingProviderId = null;
     }
+    if (saved && providerId === "elevenlabs") void refreshUsage();
+    if (saved && providerId === "soniox") clearSonioxUsage();
+    return saved;
   }
 
   async function deleteApiKey(providerId: TranscriptionProviderId) {
@@ -478,6 +815,7 @@
         transcriptionUsage = null;
         usageError = "";
       }
+      if (providerId === "soniox") clearSonioxUsage();
       showSuccessToast("APIキーを削除しました。");
     } catch (error) {
       showError(errorText(error));
@@ -486,18 +824,21 @@
     }
   }
 
-  async function selectAudioFile() {
+  async function selectAudioFile(): Promise<SelectedAudioFile | null> {
     selecting = true;
     try {
       await flushTranscriptEdits();
-      if (transcriptSaveState === "error") return;
+      if (transcriptSaveState === "error") return null;
       const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
       if (selected) {
         selectedAudio = selected;
+        selectedMeetingId = selected.meetingId;
         await restoreTranscriptionHistory();
       }
+      return selected;
     } catch (error) {
       showError(errorText(error));
+      return null;
     } finally {
       selecting = false;
     }
@@ -571,8 +912,11 @@
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     selectedAudio = audio;
+    selectedMeetingId = audio.meetingId;
     await restoreTranscriptionHistory();
     await refreshMeetings();
+    mobileMeetingDetail = true;
+    section = "meetings";
   }
 
   function clearTranscriptEditingState() {
@@ -593,13 +937,13 @@
   }
 
   async function refreshSummaryStatus() {
-    if (!selectedAudio || !selectedTranscriptionRun) {
+    if (!selectedMeetingId || !selectedTranscriptionRun) {
       summaryStatus = null;
       return;
     }
     try {
       summaryStatus = await invoke<SummaryStatus>("get_selected_summary", {
-        meetingId: selectedAudio.meetingId
+        meetingId: selectedMeetingId
       });
     } catch (error) {
       summaryStatus = null;
@@ -609,33 +953,50 @@
 
   function changeSummaryProvider(value: string) {
     summaryProviderId = value;
-    localStorage.setItem(SUMMARY_PROVIDER_STORAGE_KEY, value);
     const provider = summaryProviders.find((candidate) => candidate.id === value);
-    summaryModelId = provider?.models.find((model) => model.isDefault)?.id ?? provider?.models[0]?.id ?? "default";
-    localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, summaryModelId);
+    const configuredDefault = summaryProviderModelDefaults[value];
+    summaryModelId = configuredDefault && provider?.models.some((model) => model.id === configuredDefault)
+      ? configuredDefault
+      : fallbackSummaryModel(provider?.models ?? []);
+    void refreshSummaryModels(value, true);
   }
 
   function changeSummaryModel(value: string) {
     summaryModelId = value;
+  }
+
+  function changeSummaryDefaultProvider(value: string) {
+    summaryDefaultProviderId = value;
+    localStorage.setItem(SUMMARY_PROVIDER_STORAGE_KEY, value);
+    const provider = summaryProviders.find((candidate) => candidate.id === value);
+    const providerDefault = summaryProviderModelDefaults[value];
+    summaryDefaultModelId = providerDefault && provider?.models.some((model) => model.id === providerDefault)
+      ? providerDefault
+      : fallbackSummaryModel(provider?.models ?? []);
+    localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, summaryDefaultModelId);
+    void refreshSummaryModels(value, true);
+  }
+
+  function changeSummaryDefaultModel(value: string) {
+    summaryDefaultModelId = value;
     localStorage.setItem(SUMMARY_MODEL_STORAGE_KEY, value);
   }
 
-  function changeSummaryCustomModel(value: string) {
-    summaryCustomModelId = value;
-    localStorage.setItem(SUMMARY_CUSTOM_MODEL_STORAGE_KEY, value);
+  function changeSummaryProviderDefaultModel(providerId: string, modelId: string) {
+    saveSummaryProviderModelDefaults({ ...summaryProviderModelDefaults, [providerId]: modelId });
   }
 
   async function generateSummary() {
-    if (!selectedAudio || !selectedTranscriptionRun || summaryGenerating) return;
+    if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating) return;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
     try {
       summaryStatus = await invoke<SummaryStatus>("generate_selected_summary", {
         request: {
-          meetingId: selectedAudio.meetingId,
+          meetingId: selectedMeetingId,
           providerId: summaryProviderId,
-          modelId: summaryModelId === "custom" ? summaryCustomModelId.trim() : summaryModelId
+          modelId: summaryModelId
         }
       });
       showSuccessToast("会議ノートを生成しました。");
@@ -647,7 +1008,7 @@
   }
 
   async function refreshTranscriptionHistoryList() {
-    if (!selectedAudio) {
+    if (!selectedMeetingId) {
       transcriptionRuns = [];
       selectedTranscriptionId = null;
       return;
@@ -904,24 +1265,25 @@
 
 <ThemeProvider theme={echoTheme}>
   <Toaster position={toasterPosition} closeButton />
-  <AdminShellFrame {pageTitle} contentClass="p-0 overflow-hidden" headerClass="bg-background">
+  <AdminShellFrame
+    {pageTitle}
+    contentClass="p-0 overflow-hidden"
+    headerClass="app-main-header bg-background"
+  >
     {#snippet sidebar()}
-      <AppSidebar {section} onNavigate={navigate} />
+      <AppSidebar
+        {section}
+        {meetings}
+        {selectedMeetingId}
+        loading={meetingsLoading}
+        busy={meetingBusy || busy}
+        onNavigate={navigate}
+        onSelectMeeting={selectMeeting}
+        onRefreshMeetings={refreshMeetings}
+      />
     {/snippet}
 
-    <div class:with-library={section === "meetings" && libraryOpen} class="app-shell-content">
-      {#if section === "meetings" && libraryOpen}
-        <MeetingLibrary
-          {meetings}
-          selectedMeetingId={selectedAudio?.meetingId ?? null}
-          loading={meetingsLoading}
-          busy={meetingBusy || busy}
-          onSelect={selectMeeting}
-          onRefresh={refreshMeetings}
-          onClose={() => libraryOpen = false}
-        />
-      {/if}
-
+    <div class="app-shell-content">
       <div class="app-content">
       {#if pendingActionProblem}
         <PendingActionNotice
@@ -934,6 +1296,19 @@
       {/if}
 
       {#if section === "meetings"}
+        <div class:mobile-detail-open={mobileMeetingDetail} class="mobile-home-container">
+          <MeetingHome
+            {meetings}
+            loading={meetingsLoading}
+            busy={meetingBusy || busy}
+            {selecting}
+            onSelectMeeting={selectMeeting}
+            onRefresh={refreshMeetings}
+            onRecord={startMobileRecording}
+            onSelectFile={selectHomeAudioFile}
+          />
+        </div>
+        <div class:mobile-detail-open={mobileMeetingDetail} class="meeting-workspace-container">
         <MeetingWorkspace
           {selectedAudio}
           meeting={selectedMeeting}
@@ -946,17 +1321,13 @@
           {summaryProviders}
           {summaryProviderId}
           summaryModelId={summaryModelId}
-          summaryCustomModelId={summaryCustomModelId}
+          {summaryModelsLoading}
           summaryGenerating={summaryGenerating}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
-          providerLabel={currentProvider?.label ?? "プロバイダーを確認中"}
-          providerStatus={currentProvider?.statusMessage ?? "文字起こしプロバイダーを確認しています。"}
           {transcribing}
           progress={transcriptionProgress}
           {canTranscribe}
-          {libraryOpen}
-          onOpenLibrary={() => libraryOpen = true}
           onTranscribe={transcribeAudio}
           onProviderChange={changeTranscriptionProvider}
           onRunChange={selectTranscriptionRun}
@@ -969,90 +1340,97 @@
           onResetTranscript={resetTranscriptDocument}
           onSummaryProviderChange={changeSummaryProvider}
           onSummaryModelChange={changeSummaryModel}
-          onSummaryCustomModelChange={changeSummaryCustomModel}
           onGenerateSummary={generateSummary}
           onReveal={revealMeeting}
-          onCreate={() => section = "new"}
-          onOpenSettings={() => section = "settings"}
+          onRename={renameMeeting}
+          onDelete={deleteMeeting}
+          onCreate={createRecording}
           onError={showError}
         />
-      {:else if section === "new"}
-        <section class="page-view new-meeting-view">
-          <header class="page-header">
-            <span>録音を開始するか、既存の音声ファイルを読み込みます。</span>
-          </header>
-          <AudioInputPanel
-            {selectedAudio}
-            providers={transcriptionProviders}
-            provider={transcriptionProvider}
-            {selecting}
-            {transcribing}
-            {transcriptionProgress}
-            {recordingBusy}
-            {busy}
-            {recordingDisabled}
-            {canTranscribe}
-            onSelect={selectAudioFile}
-            onTranscribe={transcribeAudio}
-            onOpenSettings={() => section = "settings"}
-            onProviderChange={changeTranscriptionProvider}
-            onRecordedAudio={handleRecordedAudio}
-            onRecordingBusyChange={(value) => recordingBusy = value}
-            onMessage={showMessage}
-            onError={showError}
-          />
-        </section>
+        </div>
+      {:else if section === "recording"}
+        <RecordingMode
+          disabled={recordingDisabled}
+          busy={recordingBusy}
+          onBack={() => navigate("meetings")}
+          onAudioReady={handleRecordedAudio}
+          onBusyChange={(value) => recordingBusy = value}
+          onMessage={showMessage}
+          onError={showError}
+        />
       {:else}
         <section class="page-view settings-view">
           <header class="page-header">
-            <span>アプリ更新、文字起こし、要約エージェント、ローカルモデル、利用状況を管理します。</span>
+            <span>アプリの更新や、文字起こし・AI会議ノートで使う機能を設定できます。</span>
           </header>
+          {#if !summarySettingsPreview}
+            <div class="settings-section">
+              <div class="settings-section-heading">
+                <h2>Mutsuna Echo</h2>
+                <p>新しいバージョンがあるか確認し、この画面から更新できます。</p>
+              </div>
+              <AppUpdateManager
+                disabled={busy && !updating}
+                onBeforeInstall={prepareForUpdate}
+                onBusyChange={(value) => updating = value}
+              />
+            </div>
+          {/if}
           <div class="settings-section">
             <div class="settings-section-heading">
-              <h2>Mutsuna Echo</h2>
-              <p>新しいバージョンを安全に確認し、アプリ内からインストールします。</p>
+              <h2>文字起こし</h2>
+              <p>音声を文字にする方法を選びます。端末だけで処理する方法と、外部サービスを使う方法があります。</p>
             </div>
-            <AppUpdateManager
-              disabled={busy && !updating}
-              onBeforeInstall={prepareForUpdate}
-              onBusyChange={(value) => updating = value}
-            />
-          </div>
-          <div class="settings-section">
-            <div class="settings-section-heading">
-              <h2>ローカル文字起こし</h2>
-              <p>端末内で使用するモデルを管理します。</p>
+            <div class="transcription-model-manager">
+              <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
+              {#each apiKeyProviders as provider (provider.id)}
+                <ApiKeySettings
+                  {provider}
+                  {loading}
+                  saving={savingProviderId === provider.id}
+                  {deleting}
+                  hasApiKey={provider.configured}
+                  {busy}
+                  onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
+                  onDelete={() => deleteApiKey(provider.id)}
+                />
+              {/each}
             </div>
-            <LocalModelManager disabled={busy} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
           </div>
           <div class="settings-section">
             <div class="settings-section-heading">
               <h2>AI会議ノート</h2>
-              <p>要約に使用するACPエージェントを任意で追加します。</p>
+              <p>会議ノートを作るときに使うAIと、最初に選ばれるAIを設定します。</p>
             </div>
-            <SummaryAgentManager disabled={busy} onChanged={refreshSummaryProviders} onMessage={showMessage} onError={showError} />
+            <SummaryDefaultsSettings
+              providers={summaryProviders}
+              defaultProviderId={summaryDefaultProviderId}
+              defaultModelId={summaryDefaultModelId}
+              disabled={busy}
+              onLoadModels={(providerId) => refreshSummaryModels(providerId)}
+              onDefaultProviderChange={changeSummaryDefaultProvider}
+              onDefaultModelChange={changeSummaryDefaultModel}
+            />
+            <SummaryAgentManager
+              disabled={busy}
+              providers={summaryProviders}
+              providerModelDefaults={summaryProviderModelDefaults}
+              preview={summarySettingsPreview}
+              onChanged={refreshSummaryProviders}
+              onLoadModels={(providerId) => refreshSummaryModels(providerId)}
+              onProviderDefaultModelChange={changeSummaryProviderDefaultModel}
+              onMessage={showMessage}
+              onError={showError}
+            />
           </div>
-          {#if hasApiKey}
-            <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
+          {#if !summarySettingsPreview}
+            {#if hasApiKey}
+              <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
+            {/if}
+            {#if hasSonioxApiKey}
+              <SonioxUsagePanel usage={sonioxUsage} loading={sonioxUsageLoading} error={sonioxUsageError} onRefresh={refreshSonioxUsage} />
+            {/if}
           {/if}
-          <div class="settings-section">
-            <div class="settings-section-heading">
-              <h2>クラウド文字起こし</h2>
-              <p>サービスごとに認証情報を管理します。</p>
-            </div>
-            {#each apiKeyProviders as provider (provider.id)}
-              <ApiKeySettings
-                {provider}
-                {loading}
-                {saving}
-                {deleting}
-                hasApiKey={provider.configured}
-                {busy}
-                onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
-                onDelete={() => deleteApiKey(provider.id)}
-              />
-            {/each}
-          </div>
         </section>
       {/if}
       </div>

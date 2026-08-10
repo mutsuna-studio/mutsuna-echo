@@ -19,6 +19,14 @@ export function formatEstimatedCost(costUsd: number): string {
   return `約 $${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
 }
 
+export function formatActualCost(costUsd: string): string {
+  const cost = Number(costUsd);
+  if (!Number.isFinite(cost) || cost < 0) return costUsd;
+  if (cost === 0) return "$0.00";
+  if (cost < 0.0001) return "$0.0001未満";
+  return `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
+}
+
 export function formatDuration(milliseconds: number): string {
   const totalMinutes = Math.max(0, Math.round(milliseconds / 60_000));
   const hours = Math.floor(totalMinutes / 60);

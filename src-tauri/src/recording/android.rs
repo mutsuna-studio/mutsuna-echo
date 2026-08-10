@@ -1,26 +1,20 @@
-use jni::{
-    objects::{JObject, JString, JValue},
-    JavaVM,
-};
+use jni::objects::{JClass, JObject, JString, JValue};
 
 use super::types::{
     RecordedAudioSummary, RecordingCapabilities, RecordingStatus, StartRecordingRequest, CHANNELS,
     FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
 };
 
-const BRIDGE: &str = "jp/mutsuna/echo/RecordingBridge";
+const BRIDGE: &str = "jp.mutsuna.echo.RecordingBridge";
 
 fn with_env<T>(
-    call: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> Result<T, String>,
+    call: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>, &JClass<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let context = ndk_context::android_context();
-    let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }
-        .map_err(|error| format!("Android録音ブリッジを初期化できませんでした: {error}"))?;
-    let mut env = vm
-        .attach_current_thread()
-        .map_err(|error| format!("Android録音ブリッジへ接続できませんでした: {error}"))?;
-    let app = unsafe { JObject::from_raw(context.context().cast()) };
-    call(&mut env, &app)
+    crate::android_context::with_bridge_env(
+        BRIDGE,
+        "Android録音ブリッジへ接続できませんでした",
+        call,
+    )
 }
 
 pub fn capabilities() -> Result<RecordingCapabilities, String> {
@@ -34,10 +28,10 @@ pub fn capabilities() -> Result<RecordingCapabilities, String> {
 }
 
 pub fn status() -> Result<RecordingStatus, String> {
-    let json = with_env(|env, app| {
+    let json = with_env(|env, app, bridge| {
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "getStatus",
                 "(Landroid/content/Context;)Ljava/lang/String;",
                 &[JValue::Object(app)],
@@ -55,13 +49,13 @@ pub fn start(request: &StartRecordingRequest) -> Result<RecordingStatus, String>
     request.validate()?;
     let config = serde_json::to_string(request)
         .map_err(|error| format!("録音設定を準備できませんでした: {error}"))?;
-    let json = with_env(|env, app| {
+    let json = with_env(|env, app, bridge| {
         let config = env
             .new_string(config)
             .map_err(|error| format!("録音設定をAndroidへ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "start",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[JValue::Object(app), JValue::Object(&JObject::from(config))],
@@ -75,11 +69,48 @@ pub fn start(request: &StartRecordingRequest) -> Result<RecordingStatus, String>
     serde_json::from_str(&json).map_err(|error| format!("Android録音状態の応答が不正です: {error}"))
 }
 
-pub fn stop(cancel: bool) -> Result<RecordingStatus, String> {
-    let json = with_env(|env, app| {
+pub fn start_monitor(request: &StartRecordingRequest) -> Result<RecordingStatus, String> {
+    request.validate()?;
+    let config = serde_json::to_string(request)
+        .map_err(|error| format!("入力確認設定を準備できませんでした: {error}"))?;
+    let json = with_env(|env, app, bridge| {
+        let config = env
+            .new_string(config)
+            .map_err(|error| format!("入力確認設定をAndroidへ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
+                "startMonitor",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(app), JValue::Object(&JObject::from(config))],
+            )
+            .and_then(|value| value.l())
+            .map_err(|error| format!("Androidの入力確認を開始できませんでした: {error}"))?;
+        env.get_string(&JString::from(value))
+            .map(String::from)
+            .map_err(|error| format!("Androidの入力確認状態を読み取れませんでした: {error}"))
+    })?;
+    serde_json::from_str(&json).map_err(|error| format!("Androidの入力確認状態が不正です: {error}"))
+}
+
+pub fn stop_monitor() -> Result<(), String> {
+    with_env(|env, app, bridge| {
+        env.call_static_method(
+            bridge,
+            "stopMonitor",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(app)],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Androidの入力確認を停止できませんでした: {error}"))
+    })
+}
+
+pub fn stop(cancel: bool) -> Result<RecordingStatus, String> {
+    let json = with_env(|env, app, bridge| {
+        let value = env
+            .call_static_method(
+                bridge,
                 "stop",
                 "(Landroid/content/Context;Z)Ljava/lang/String;",
                 &[JValue::Object(app), JValue::Bool(cancel.into())],
@@ -94,13 +125,13 @@ pub fn stop(cancel: bool) -> Result<RecordingStatus, String> {
 }
 
 pub fn copy_content_uri(uri: &str) -> Result<std::path::PathBuf, String> {
-    let path = with_env(|env, app| {
+    let path = with_env(|env, app, bridge| {
         let uri = env
             .new_string(uri)
             .map_err(|error| format!("選択した音声URIをAndroidへ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "copyContentUri",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[JValue::Object(app), JValue::Object(&JObject::from(uri))],
@@ -117,10 +148,10 @@ pub fn copy_content_uri(uri: &str) -> Result<std::path::PathBuf, String> {
 }
 
 pub fn completed_recordings() -> Result<Vec<RecordedAudioSummary>, String> {
-    let json = with_env(|env, app| {
+    let json = with_env(|env, app, bridge| {
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "listCompletedRecordings",
                 "(Landroid/content/Context;)Ljava/lang/String;",
                 &[JValue::Object(app)],
@@ -135,14 +166,69 @@ pub fn completed_recordings() -> Result<Vec<RecordedAudioSummary>, String> {
         .map_err(|error| format!("Androidの録音履歴の応答が不正です: {error}"))
 }
 
+pub fn reveal_recording_folder() -> Result<(), String> {
+    with_env(|env, app, bridge| {
+        env.call_static_method(
+            bridge,
+            "openRecordingFolder",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(app)],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Androidの録音保存場所を開けませんでした: {error}"))
+    })
+}
+
+pub fn rename_completed_recording(recording_id: &str, new_file_name: &str) -> Result<(), String> {
+    with_env(|env, app, bridge| {
+        let recording_id = env
+            .new_string(recording_id)
+            .map_err(|error| format!("録音IDをAndroidへ渡せませんでした: {error}"))?;
+        let new_file_name = env
+            .new_string(new_file_name)
+            .map_err(|error| format!("ファイル名をAndroidへ渡せませんでした: {error}"))?;
+        env.call_static_method(
+            bridge,
+            "renameCompletedRecording",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Object(app),
+                JValue::Object(&JObject::from(recording_id)),
+                JValue::Object(&JObject::from(new_file_name)),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Androidの録音ファイル名を変更できませんでした: {error}"))
+    })
+}
+
+pub fn delete_completed_recording(recording_id: &str) -> Result<(), String> {
+    with_env(|env, app, bridge| {
+        let recording_id = env
+            .new_string(recording_id)
+            .map_err(|error| format!("削除する録音IDをAndroidへ渡せませんでした: {error}"))?;
+        env.call_static_method(
+            bridge,
+            "deleteCompletedRecording",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[
+                JValue::Object(app),
+                JValue::Object(&JObject::from(recording_id)),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Androidの録音ファイルを削除できませんでした: {error}"))
+    })
+}
+
 pub fn copy_completed_recording(recording_id: &str) -> Result<std::path::PathBuf, String> {
-    let path = with_env(|env, app| {
+    let path = with_env(|env, app, bridge| {
         let recording_id = env
             .new_string(recording_id)
             .map_err(|error| format!("選択した録音IDをAndroidへ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "copyCompletedRecording",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[
@@ -160,13 +246,13 @@ pub fn copy_completed_recording(recording_id: &str) -> Result<std::path::PathBuf
 }
 
 pub fn recover(session_id: &str) -> Result<std::path::PathBuf, String> {
-    let path = with_env(|env, app| {
+    let path = with_env(|env, app, bridge| {
         let session_id = env
             .new_string(session_id)
             .map_err(|error| format!("復旧する録音IDをAndroidへ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "recover",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[

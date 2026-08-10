@@ -15,12 +15,13 @@
 
   interface Props {
     disabled: boolean;
+    preview?: boolean;
     onChanged: () => Promise<void>;
     onMessage: (message: string) => void;
     onError: (message: string) => void;
   }
 
-  let { disabled, onChanged, onMessage, onError }: Props = $props();
+  let { disabled, preview = false, onChanged, onMessage, onError }: Props = $props();
   let models = $state.raw<LocalSttModelCatalogEntry[]>([]);
   let loading = $state(true);
   let working = $state(false);
@@ -47,7 +48,7 @@
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
     if (error instanceof Error) return error.message;
-    return "ローカルモデルの操作に失敗しました。";
+    return "端末内の文字起こし機能を変更できませんでした。";
   }
 
   async function refresh() {
@@ -61,6 +62,12 @@
   }
 
   $effect(() => {
+    if (preview) {
+      models = [{ modelId: "reazonspeech-k2", displayName: "ReazonSpeech K2 int8-fp32", version: "preview", languageCodes: ["ja"], sizeBytes: 177_209_344, installed: true, downloading: false, runtimeSupported: true }];
+      vadModel = { modelId: "silero-vad", displayName: "Silero VAD", version: "preview", sizeBytes: 2_306_867, installed: true, downloading: false, runtimeSupported: true };
+      loading = false;
+      return;
+    }
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -115,7 +122,7 @@
       await invoke("download_local_stt_model", { modelId: model.modelId });
       await refresh();
       await onChanged();
-      onMessage("ReazonSpeech K2とSilero VADをインストールしました。");
+      onMessage("端末だけで文字起こしできるようになりました。");
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -134,13 +141,13 @@
   }
 
   async function removeModel() {
-    if (!model || working || !window.confirm("ReazonSpeech K2を端末から削除しますか？")) return;
+    if (!model || working || !window.confirm("端末だけで文字起こしする機能を削除しますか？")) return;
     working = true;
     try {
       await invoke("delete_local_stt_model", { modelId: model.modelId });
       await refresh();
       await onChanged();
-      onMessage("ReazonSpeech K2を削除しました。");
+      onMessage("端末だけで文字起こしする機能を削除しました。");
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -156,8 +163,8 @@
       await invoke("download_local_vad_model");
       await refresh();
       onMessage(automatic
-        ? "Silero VADを標準機能として追加しました。"
-        : "Silero VADをインストールしました。次回のローカル文字起こしから無音区間を除外します。");
+        ? "音声のない部分を見つける機能を追加しました。"
+        : "音声のない部分を見つける機能を追加しました。次回の文字起こしから処理時間を短くします。");
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -174,7 +181,7 @@
     presetWorking = true;
     try {
       await invoke("set_vad_preset", { preset: vadPreset });
-      onMessage("VADの検出感度を更新しました。次の録音・文字起こしから反映します。");
+      onMessage("音声の見つけ方を変更しました。次の文字起こしから反映されます。");
     } catch (error) {
       vadPreset = previous;
       onError(errorText(error));
@@ -193,22 +200,22 @@
 
 </script>
 
-<div class="local-model-manager" aria-busy={loading || working}>
+<div class="local-model-manager model-row" aria-busy={loading || working}>
   <div class="local-model-copy">
     <div class="local-model-title">
       <strong>{model?.displayName ?? "ReazonSpeech K2 int8-fp32"}</strong>
       <Badge variant={model?.installed ? "default" : "secondary"}>
-        {model?.installed ? "インストール済み" : "未インストール"}
+        {model?.installed ? "利用可能" : "未追加"}
       </Badge>
     </div>
     <small>
-      日本語専用 · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 音声を外部送信しません
+      日本語向け · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 音声はこの端末だけで処理します
     </small>
     {#if model && !model.runtimeSupported}
-      <small>このOS向けの推論エンジンは準備中です。</small>
+      <small>この端末ではまだ使用できません。</small>
     {/if}
     {#if working && progress}
-      <progress max="100" value={progressPercent} aria-label="モデルのダウンロード進捗"></progress>
+      <progress max="100" value={progressPercent} aria-label="端末内の文字起こし機能を追加しています"></progress>
       <small>{formatFileSize(progress.downloadedBytes)} / {formatFileSize(progress.totalBytes)}</small>
     {/if}
   </div>
@@ -220,38 +227,37 @@
     <Button variant="outline" type="button" onclick={cancelDownload}>キャンセル</Button>
   {:else}
     <Button type="button" onclick={download} disabled={disabled || loading || !model || !model.runtimeSupported}>
-      ダウンロード
+      追加
     </Button>
   {/if}
 </div>
 
-<div class="local-model-manager" aria-busy={loading || vadWorking}>
+<div class="local-model-manager model-row" aria-busy={loading || vadWorking}>
   <div class="local-model-copy">
     <div class="local-model-title">
       <strong>{vadModel?.displayName ?? "Silero VAD"}</strong>
       <Badge variant={vadModel?.installed ? "default" : "secondary"}>
-        {vadModel?.installed ? "有効" : "未インストール"}
+        {vadModel?.installed ? "使用中" : "未追加"}
       </Badge>
     </div>
     <small>
-      音声区間検出 · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"} · 元音声の時刻を保持
+      音声のある部分を自動で見つけます · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"}
     </small>
-    <small>ローカルSTTの無音区間を除外して処理時間を短縮します。録音の自動停止には使用しません。</small>
+    <small>音声のない部分を飛ばして、端末での文字起こしを速くします。録音が自動で止まることはありません。</small>
     {#if vadModel?.installed}
       <Select
         value={vadPreset}
         options={VAD_PRESET_OPTIONS}
         onValueChange={changePreset}
-        searchable
         disabled={disabled || vadWorking || presetWorking}
-        ariaLabel="VADの検出感度"
+        ariaLabel="音声の見つけ方"
       />
     {/if}
     {#if vadModel && !vadModel.runtimeSupported}
-      <small>このOS向けのVAD推論エンジンは準備中です。</small>
+      <small>この端末ではまだ使用できません。</small>
     {/if}
     {#if vadWorking && vadProgress}
-      <progress max="100" value={vadProgressPercent} aria-label="VADモデルのダウンロード進捗"></progress>
+      <progress max="100" value={vadProgressPercent} aria-label="音声のない部分を見つける機能を追加しています"></progress>
       <small>{formatFileSize(vadProgress.downloadedBytes)} / {formatFileSize(vadProgress.totalBytes)}</small>
     {/if}
   </div>
@@ -259,7 +265,7 @@
     <Button variant="outline" type="button" onclick={cancelVadDownload}>キャンセル</Button>
   {:else if !vadModel?.installed}
     <Button type="button" onclick={() => downloadVad()} disabled={disabled || loading || !vadModel || !vadModel.runtimeSupported}>
-      ダウンロード
+      追加
     </Button>
   {/if}
 </div>

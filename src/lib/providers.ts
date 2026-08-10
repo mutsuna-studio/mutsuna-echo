@@ -92,7 +92,7 @@ export function getTranscriptionProvider(
 export function transcriptionProviderOptions(
   providers: readonly TranscriptionProviderDefinition[]
 ) {
-  return providers.map((provider) => ({
+  return providers.filter((provider) => provider.ready).map((provider) => ({
     value: provider.id,
     label: provider.modelLabel,
     description: `${provider.label} · ${provider.kind === "local" ? "端末内で処理" : "クラウドで処理"}`

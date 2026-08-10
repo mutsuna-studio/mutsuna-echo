@@ -52,6 +52,7 @@ export type TranscriptionRunSummary = {
   model: string;
   language: string;
   edited: boolean;
+  costUsd: string | null;
 };
 
 export type TranscriptionRunDetail = {
@@ -61,6 +62,7 @@ export type TranscriptionRunDetail = {
   updatedAt: string;
   revision: number;
   edited: boolean;
+  costUsd: string | null;
   transcript: EditableTranscript;
 };
 
@@ -102,6 +104,7 @@ export type AudioSeekRequest = {
   requestId: number;
   positionMs: number;
   autoplay?: boolean;
+  pause?: boolean;
 };
 
 export type TranscriptSegmentTextChange = {
@@ -129,4 +132,10 @@ export type TranscriptionUsage = {
   tier: string | null;
   resetsAtUnix: number | null;
   warning: string | null;
+};
+
+export type SonioxUsage = {
+  monthlyCostUsd: string;
+  periodStart: string;
+  fetchedAt: string;
 };

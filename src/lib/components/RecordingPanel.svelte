@@ -54,6 +54,9 @@
   let discardDialogOpen = $state(false);
   let pendingDiscard = $state<RecoverableRecording | null>(null);
   let statusEventsAvailable = $state(false);
+  let monitoring = $state(false);
+  let monitorSuspended = $state(false);
+  let monitorRevision = 0;
   let vadPreset = $state<VadPreset>("standard");
   let vadPresetBusy = $state(false);
 
@@ -63,6 +66,9 @@
   const canStart = $derived(
     Boolean(capabilities?.supported) && (microphone || systemAudio) && !disabled && !actionBusy && !active
   );
+  const metering = $derived(active || monitoring);
+  const microphoneMeterPercent = $derived(toMeterPercent(status?.microphoneLevel ?? 0, metering && microphone));
+  const systemMeterPercent = $derived(toMeterPercent(status?.systemLevel ?? 0, metering && systemAudio));
   const voiceActivityLabel = $derived(
     status?.voiceActivity === "speechDetected"
       ? "Speech detected"
@@ -117,6 +123,13 @@
     }
   }
 
+  function toMeterPercent(amplitude: number, enabled: boolean): number {
+    if (!enabled || !Number.isFinite(amplitude) || amplitude <= 0.001) return 0;
+    // PCM peakをdBFSへ変換し、小さな声も視認できる範囲へ正規化する。
+    const decibels = 20 * Math.log10(Math.min(1, amplitude));
+    return Math.round(Math.max(0, Math.min(1, (decibels + 60) / 60)) * 100);
+  }
+
   async function refreshStatus() {
     const nextStatus = await invoke<RecordingStatus>("get_recording_status");
     await acceptStatus(nextStatus);
@@ -126,6 +139,15 @@
     status = nextStatus;
     await deliverCompletedRecording(nextStatus);
     if (nextStatus.phase === "failed" && nextStatus.error) onError(nextStatus.error);
+  }
+
+  function currentRequest() {
+    return {
+      microphone,
+      systemAudio,
+      microphoneDeviceId: microphoneDeviceId || null,
+      systemDeviceId: systemDeviceId || null
+    };
   }
 
   $effect(() => {
@@ -173,30 +195,69 @@
     };
   });
 
+  $effect(() => {
+    const ready = !loading && Boolean(capabilities?.supported) && !active && !monitorSuspended && (microphone || systemAudio);
+    const request = currentRequest();
+    const revision = ++monitorRevision;
+    if (!ready) {
+      monitoring = false;
+      void invoke("stop_recording_monitor").catch(() => {});
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await invoke("stop_recording_monitor");
+          if (revision !== monitorRevision) return;
+          const nextStatus = await invoke<RecordingStatus>("start_recording_monitor", { request });
+          if (revision !== monitorRevision) {
+            await invoke("stop_recording_monitor");
+            return;
+          }
+          monitoring = true;
+          await acceptStatus(nextStatus);
+        } catch (error) {
+          if (revision === monitorRevision) {
+            monitoring = false;
+            status = status ? { ...status, warning: errorText(error) } : status;
+          }
+        }
+      })();
+    }, 180);
+
+    return () => {
+      window.clearTimeout(timer);
+      if (revision === monitorRevision) monitorRevision += 1;
+      monitoring = false;
+      void invoke("stop_recording_monitor").catch(() => {});
+    };
+  });
+
   // Androidまたはイベント購読失敗時だけ、録音中に限定して状態を確認する。
   $effect(() => {
-    if (!active || (capabilities?.platform !== "android" && statusEventsAvailable)) return;
+    if ((!active && !monitoring) || (capabilities?.platform !== "android" && statusEventsAvailable)) return;
     const timer = window.setInterval(() => {
       void refreshStatus().catch((error) => onError(errorText(error)));
-    }, 500);
+    }, 120);
     return () => window.clearInterval(timer);
   });
 
   async function start() {
     actionBusy = true;
+    monitorSuspended = true;
+    monitorRevision += 1;
+    monitoring = false;
     onMessage("");
     onError("");
     try {
+      await invoke("stop_recording_monitor");
       status = await invoke<RecordingStatus>("start_recording", {
-        request: {
-          microphone,
-          systemAudio,
-          microphoneDeviceId: microphoneDeviceId || null,
-          systemDeviceId: systemDeviceId || null
-        }
+        request: currentRequest()
       });
       deliveredOutput = "";
     } catch (error) {
+      monitorSuspended = false;
       onError(errorText(error));
     } finally {
       actionBusy = false;
@@ -314,9 +375,17 @@
         <span>マイク</span>
       </label>
       {#if capabilities.microphoneDevices.length > 0}
-        <Select bind:value={microphoneDeviceId} options={microphoneOptions} searchable disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
+        <Select bind:value={microphoneDeviceId} options={microphoneOptions} disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
       {/if}
-      <div class="meter" aria-label="マイク入力レベル"><span style:width={`${(status?.microphoneLevel ?? 0) * 100}%`}></span></div>
+      <div
+        class:live={metering && microphone}
+        class="meter"
+        role="meter"
+        aria-label="マイク入力レベル"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={microphoneMeterPercent}
+      ><span style:width={`${microphoneMeterPercent}%`}></span></div>
     </div>
 
     <div class="source">
@@ -325,9 +394,20 @@
         <span>システム音声</span>
       </label>
       {#if capabilities.systemDevices.length > 0}
-        <Select bind:value={systemDeviceId} options={systemOptions} searchable disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
+        <Select bind:value={systemDeviceId} options={systemOptions} disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
       {/if}
-      <div class="meter" aria-label="システム音声レベル"><span style:width={`${(status?.systemLevel ?? 0) * 100}%`}></span></div>
+      <div
+        class:live={metering && systemAudio}
+        class="meter"
+        role="meter"
+        aria-label="システム音声レベル"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={systemMeterPercent}
+      ><span style:width={`${systemMeterPercent}%`}></span></div>
+      {#if capabilities.platform === "android" && systemAudio && !active}
+        <small class="monitor-note">システム音声は録音開始後に確認できます</small>
+      {/if}
     </div>
   </div>
 
@@ -337,7 +417,6 @@
       value={vadPreset}
       options={VAD_PRESET_OPTIONS}
       onValueChange={changeVadPreset}
-      searchable
       disabled={active || disabled || vadPresetBusy}
       ariaLabel="録音中の音声検出感度"
     />
@@ -409,7 +488,9 @@
   .source { display: grid; gap: 10px; padding: 15px; border: 1px solid #dce3de; border-radius: 12px; background: #f8faf8; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
   .meter { height: 5px; overflow: hidden; border-radius: 99px; background: #dfe6e1; }
-  .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 100ms linear; }
+  .meter.live { background: color-mix(in srgb, #2c8058 13%, #dfe6e1); }
+  .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 90ms linear; }
+  .monitor-note { color: #68746c; font-size: 0.7rem; }
   .recorder { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: #f3f6f4; }
   .vad-setting { display: grid; grid-template-columns: auto minmax(180px, 280px); align-items: center; justify-content: end; gap: 10px; margin-top: 12px; color: #68746c; font-size: 0.82rem; }
   .recorder strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }

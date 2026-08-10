@@ -184,6 +184,63 @@ pub(crate) fn mark_updated(app: &AppHandle, meeting_id: &str) -> Result<(), Stri
     write_json_atomic(&path, &document)
 }
 
+pub(crate) fn rename_audio_metadata(
+    app: &AppHandle,
+    meeting_id: &str,
+    file_name: &str,
+) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meeting名の更新処理を開始できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let mut document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    document.title = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(file_name)
+        .to_string();
+    document.audio.file_name = file_name.to_string();
+    document.updated_at = chrono::Utc::now().to_rfc3339();
+    write_json_atomic(&path, &document)
+}
+
+pub(crate) fn detach_audio(app: &AppHandle, meeting_id: &str) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの音声情報を削除できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    remove_local_state_in(&local_meetings_directory(app)?, meeting_id)
+}
+
+pub(crate) fn delete_meeting(app: &AppHandle, meeting_id: &str) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの削除処理を開始できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    delete_meeting_in(
+        &meetings_directory(app)?,
+        &local_meetings_directory(app)?,
+        meeting_id,
+    )
+}
+
+fn delete_meeting_in(root: &Path, local_root: &Path, meeting_id: &str) -> Result<(), String> {
+    validate_meeting_id(meeting_id)?;
+    let directory = meeting_directory_in(root, meeting_id)?;
+    if directory.exists() {
+        let metadata = fs::symlink_metadata(&directory)
+            .map_err(|error| format!("Meetingの保存情報を確認できませんでした: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Meetingの保存先を安全に削除できませんでした。".into());
+        }
+        fs::remove_dir_all(&directory)
+            .map_err(|error| format!("Meetingの関連データを削除できませんでした: {error}"))?;
+    }
+    remove_local_state_in(local_root, meeting_id)
+}
+
 pub(crate) fn meetings_directory(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -196,6 +253,24 @@ fn local_meetings_directory(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map(|path| path.join("local").join("meetings"))
         .map_err(|error| format!("Meetingのローカル保存先を取得できませんでした: {error}"))
+}
+
+fn remove_local_state_in(local_root: &Path, meeting_id: &str) -> Result<(), String> {
+    for path in [
+        local_root.join(format!("{meeting_id}.json")),
+        local_root.join(format!("{meeting_id}.json.backup")),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Meetingの音声リンクを削除できませんでした: {error}"
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_meeting_id(meeting_id: &str) -> Result<(), String> {
@@ -487,8 +562,8 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::{
-        list_stored_meetings_in, meeting_directory_in, read_json, resolve_or_create_in,
-        validate_meeting_id, LocalMeetingState,
+        delete_meeting_in, list_stored_meetings_in, meeting_directory_in, read_json,
+        remove_local_state_in, resolve_or_create_in, validate_meeting_id, LocalMeetingState,
     };
 
     #[test]
@@ -532,6 +607,36 @@ mod tests {
             local_state.audio_path,
             std::fs::canonicalize(&renamed).expect("canonical renamed path")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn audio_link_can_be_removed_without_deleting_transcripts() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-meeting-delete-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let audio_root = root.join("audio");
+        let meetings = root.join("meetings");
+        let local = root.join("local").join("meetings");
+        std::fs::create_dir_all(&audio_root).expect("create fixture");
+        let audio = audio_root.join("meeting.m4a");
+        std::fs::write(&audio, b"audio bytes").expect("write audio fixture");
+        let meeting_id =
+            resolve_or_create_in(&meetings, &local, &audio).expect("create meeting fixture");
+        let transcripts = meetings.join(&meeting_id).join("transcripts");
+        std::fs::create_dir_all(&transcripts).expect("create transcript directory");
+        std::fs::write(transcripts.join("index.json"), b"{}").expect("write transcript fixture");
+
+        remove_local_state_in(&local, &meeting_id).expect("detach audio");
+
+        assert!(!local.join(format!("{meeting_id}.json")).exists());
+        assert!(transcripts.join("index.json").exists());
+        assert!(meetings.join(&meeting_id).join("meeting.json").exists());
+
+        delete_meeting_in(&meetings, &local, &meeting_id).expect("delete complete meeting");
+        assert!(!meetings.join(&meeting_id).exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

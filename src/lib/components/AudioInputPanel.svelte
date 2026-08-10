@@ -1,7 +1,9 @@
 <script lang="ts">
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import FileUp from "@lucide/svelte/icons/file-up";
+  import Mic from "@lucide/svelte/icons/mic";
   import { Button } from "@mutsuna/ui/button";
   import { Select } from "@mutsuna/ui/select";
-  import { Tabs, TabsContent, TabsList, TabsTrigger } from "@mutsuna/ui/tabs";
   import RecordingPanel from "./RecordingPanel.svelte";
   import { formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import {
@@ -29,6 +31,7 @@
     onProviderChange: (provider: TranscriptionProviderId) => void;
     onRecordedAudio: (audio: SelectedAudioFile) => void;
     onRecordingBusyChange: (busy: boolean) => void;
+    onRecordingModeChange: (active: boolean) => void;
     onMessage: (message: string) => void;
     onError: (message: string) => void;
   }
@@ -50,11 +53,13 @@
     onProviderChange,
     onRecordedAudio,
     onRecordingBusyChange,
+    onRecordingModeChange,
     onMessage,
     onError
   }: Props = $props();
 
-  let inputMode = $state<"file" | "record">("file");
+  let inputMode = $state<"choose" | "record">("choose");
+  let audioBeforeRecording = $state<string | null>(null);
   const providerDefinition = $derived(getTranscriptionProvider(providers, provider));
   const usableProviders = $derived(providers.filter((availableProvider) => availableProvider.ready));
   const providerOptions = $derived(usableProviders.map((availableProvider) => ({
@@ -96,45 +101,65 @@
   function selectProvider(value: string) {
     if (isTranscriptionProviderId(value)) onProviderChange(value);
   }
+
+  function openRecorder() {
+    audioBeforeRecording = selectedAudio?.meetingId ?? null;
+    inputMode = "record";
+    onRecordingModeChange(true);
+  }
+
+  function closeRecorder() {
+    if (recordingBusy) return;
+    inputMode = "choose";
+    onRecordingModeChange(false);
+  }
+
+  $effect(() => {
+    const meetingId = selectedAudio?.meetingId ?? null;
+    if (inputMode === "record" && meetingId && meetingId !== audioBeforeRecording) {
+      inputMode = "choose";
+      onRecordingModeChange(false);
+    }
+  });
+
 </script>
 
 <section class="creation-panel" aria-busy={selecting || transcribing}>
-  <div class="section-heading">
-    <div>
-      <h2>音声を用意</h2>
-      <p class="section-description">ファイルを読み込むか、この端末で録音します。</p>
-    </div>
-  </div>
-
-  <Tabs bind:value={inputMode}>
-    <TabsList class="input-tabs" aria-label="音声の入力方法">
-      <TabsTrigger value="file" disabled={recordingBusy}>ファイルを選択</TabsTrigger>
-      <TabsTrigger value="record" disabled={recordingBusy}>このアプリで録音</TabsTrigger>
-    </TabsList>
-
-  <TabsContent value="file">
-    <Button class={selectedAudio ? "file-picker file-picker-selected" : "file-picker"} variant="outline" size="lg" type="button" onclick={onSelect} disabled={busy}>
-      <span class="file-icon" aria-hidden="true">♪</span>
-      <span class="file-copy">
-        <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを選択"}</strong>
-        <small>
-          {selectedAudio
-            ? `${formatTimestamp(selectedAudio.durationMs)} · ${formatFileSize(selectedAudio.sizeBytes)} · クリックして変更`
-            : "MP3・M4A・WAV・FLAC"}
-        </small>
-      </span>
-    </Button>
-  </TabsContent>
-  <TabsContent value="record">
-    <RecordingPanel
-      disabled={recordingDisabled}
-      onAudioReady={onRecordedAudio}
-      onBusyChange={onRecordingBusyChange}
-      {onMessage}
-      {onError}
-    />
-  </TabsContent>
-  </Tabs>
+  <section class="audio-source" aria-label="音声の入力方法">
+    {#if inputMode === "record"}
+      <div class="source-panel-heading">
+        <Button size="sm" variant="ghost" type="button" icon={ArrowLeft} onclick={closeRecorder} disabled={recordingBusy}>戻る</Button>
+      </div>
+      <RecordingPanel
+        disabled={recordingDisabled}
+        onAudioReady={onRecordedAudio}
+        onBusyChange={onRecordingBusyChange}
+        {onMessage}
+        {onError}
+      />
+    {:else}
+      <div class="source-actions">
+        <Button class="source-action source-action-primary" size="lg" type="button" onclick={openRecorder} disabled={busy || recordingDisabled}>
+          <span class="source-action-icon"><Mic aria-hidden="true" /></span>
+          <span class="source-action-copy">
+            <strong>録音を開始</strong>
+            <small>マイクとシステム音声を録音</small>
+          </span>
+        </Button>
+        <Button class={selectedAudio ? "source-action selected-audio" : "source-action"} variant="outline" size="lg" type="button" onclick={onSelect} disabled={busy}>
+          <span class="source-action-icon"><FileUp aria-hidden="true" /></span>
+          <span class="source-action-copy">
+            <strong>{selecting ? "ファイルを確認中…" : selectedAudio?.name ?? "音声ファイルを読み込む"}</strong>
+            <small>
+              {selectedAudio
+                ? `${formatTimestamp(selectedAudio.durationMs)} · ${formatFileSize(selectedAudio.sizeBytes)}`
+                : "MP3・M4A・WAV・FLAC"}
+            </small>
+          </span>
+        </Button>
+      </div>
+    {/if}
+  </section>
 
   <div class="transcription-settings">
     <div class="transcription-settings-heading">
@@ -146,7 +171,6 @@
         value={provider}
         options={providerOptions}
         onValueChange={selectProvider}
-        searchable
         class="w-full max-w-[420px]"
         disabled={busy || usableProviders.length === 0}
         ariaLabel="文字起こしモデル"
@@ -174,12 +198,26 @@
 
 <style>
   .creation-panel { padding: 0 0 36px; }
-  .section-description { margin: 7px 0 0; color: var(--muted-foreground); font-size: 0.82rem; }
+  .source-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  :global(.source-action) { min-height: 96px; justify-content: flex-start; gap: 14px; padding: 17px 18px; text-align: left; white-space: normal; }
+  :global(.source-action-primary) { box-shadow: 0 8px 22px color-mix(in oklch, var(--primary) 22%, transparent); }
+  .source-action-icon { display: grid; width: 40px; height: 40px; flex: none; place-items: center; border-radius: 11px; background: color-mix(in oklch, currentColor 13%, transparent); }
+  .source-action-icon :global(svg) { width: 21px; height: 21px; }
+  .source-action-copy { display: grid; min-width: 0; gap: 4px; }
+  .source-action-copy strong { overflow: hidden; font-size: 0.91rem; text-overflow: ellipsis; white-space: nowrap; }
+  .source-action-copy small { opacity: 0.72; font-size: 0.72rem; font-weight: 500; }
+  :global(.source-action.selected-audio) { border-color: color-mix(in oklch, var(--primary) 35%, var(--border)); background: color-mix(in oklch, var(--primary) 4%, var(--background)); }
+  .source-panel-heading { display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin-bottom: 14px; }
   .transcription-settings-heading p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
   .provider-picker { display: grid; gap: 10px; }
   .provider-unavailable { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted-foreground); font-size: 0.78rem; }
   .provider-unavailable p { margin: 0; }
   .selected-cost { margin: 12px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
   .selected-cost strong { color: var(--foreground); }
+
+  @media (max-width: 600px) {
+    .source-actions { grid-template-columns: 1fr; }
+    :global(.source-action) { min-height: 82px; }
+  }
 
 </style>

@@ -9,7 +9,8 @@ if (!target) {
 }
 const mountTarget = target;
 
-const isMeetingOverlay = getCurrentWebviewWindow().label === "meeting-overlay";
+const browserPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).has("preview");
+const isMeetingOverlay = !browserPreview && getCurrentWebviewWindow().label === "meeting-overlay";
 const isWindowsOverlay = isMeetingOverlay && navigator.userAgent.includes("Windows");
 document.body.classList.toggle("overlay-window", isMeetingOverlay);
 document.documentElement.classList.toggle("transparent-overlay", isWindowsOverlay);

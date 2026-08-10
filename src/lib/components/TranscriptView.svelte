@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Pause from "@lucide/svelte/icons/pause";
   import Play from "@lucide/svelte/icons/play";
   import Search from "@lucide/svelte/icons/search";
   import Undo2 from "@lucide/svelte/icons/undo-2";
@@ -21,10 +22,13 @@
     transcript: EditableTranscript;
     transcriptionId: string | null;
     currentPositionMs: number;
+    playing: boolean;
+    playbackAvailable: boolean;
     followRequestId: number;
     scrollContainer: HTMLElement | null;
     onSeek: (positionMs: number) => void;
     onPlay: (positionMs: number) => void;
+    onPause: () => void;
     editable: boolean;
     onEditSegment: (segmentId: string, text: string) => void;
     onEditSpeakerLabel: (speaker: string, label: string) => void;
@@ -38,10 +42,13 @@
     transcript,
     transcriptionId,
     currentPositionMs,
+    playing,
+    playbackAvailable,
     followRequestId,
     scrollContainer,
     onSeek,
     onPlay,
+    onPause,
     editable,
     onEditSegment,
     onEditSpeakerLabel,
@@ -51,7 +58,7 @@
     onBlur
   }: Props = $props();
 
-  const SEGMENT_PAGE_SIZE = 300;
+  const SEGMENT_PAGE_SIZE = 100;
   let visibleCount = $state(SEGMENT_PAGE_SIZE);
   let transcriptElement = $state<HTMLElement | null>(null);
   let replaceOpen = $state(false);
@@ -59,11 +66,20 @@
   let replacementText = $state("");
   let currentMatchIndex = $state(0);
   let replacing = $state(false);
+  let pinnedPlaybackSegmentId = $state<string | null>(null);
   const composingSegments = new Set<string>();
   const composingSpeakers = new Set<string>();
+  const pendingEditorResizes = new Set<HTMLTextAreaElement>();
+  let editorResizeFrame = 0;
   const visibleSegments = $derived(transcript.segments.slice(0, visibleCount));
   const remainingSegments = $derived(Math.max(0, transcript.segments.length - visibleSegments.length));
-  const activeIndex = $derived(segmentIndexAt(transcript, currentPositionMs));
+  const playbackIndex = $derived(playbackAvailable ? segmentIndexAt(transcript, currentPositionMs) : -1);
+  const pinnedPlaybackIndex = $derived(
+    pinnedPlaybackSegmentId
+      ? transcript.segments.findIndex((segment) => segment.segmentId === pinnedPlaybackSegmentId)
+      : -1
+  );
+  const activeIndex = $derived(pinnedPlaybackIndex >= 0 ? pinnedPlaybackIndex : playbackIndex);
   const searchMatches = $derived.by(() => findSearchMatches(transcript, searchText));
   const currentMatch = $derived(searchMatches[currentMatchIndex] ?? null);
 
@@ -74,13 +90,31 @@
     searchText = "";
     replacementText = "";
     currentMatchIndex = 0;
+    pinnedPlaybackSegmentId = null;
   });
 
   $effect(() => {
-    transcript;
-    void tick().then(() => {
-      transcriptElement?.querySelectorAll<HTMLTextAreaElement>("textarea").forEach(resizeTextArea);
+    if (!pinnedPlaybackSegmentId) return;
+    const segment = transcript.segments.find((candidate) => candidate.segmentId === pinnedPlaybackSegmentId);
+    if (!segment || currentPositionMs >= segment.startMs) pinnedPlaybackSegmentId = null;
+  });
+
+  $effect(() => {
+    const root = transcriptElement;
+    if (!root) return;
+
+    let observedWidth = root.clientWidth;
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width ?? root.clientWidth;
+      if (width === observedWidth) return;
+      observedWidth = width;
+      scheduleEditorResize(root.querySelectorAll<HTMLTextAreaElement>("textarea.segment-text"));
     });
+    resizeObserver.observe(root);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
   });
 
   $effect(() => {
@@ -92,12 +126,16 @@
   $effect(() => {
     const index = activeIndex;
     followRequestId;
+    // Clicking a segment seeks to its three-second preroll. Keep the clicked
+    // segment selected without moving the list underneath the pointer.
+    if (untrack(() => pinnedPlaybackSegmentId) !== null) return;
     const container = scrollContainer;
     const root = transcriptElement;
     if (index < 0 || !container || !root) return;
     let cancelled = false;
     let frame = 0;
-    if (index >= visibleCount) {
+    const currentVisibleCount = untrack(() => visibleCount);
+    if (index >= currentVisibleCount) {
       visibleCount = Math.ceil((index + 1) / SEGMENT_PAGE_SIZE) * SEGMENT_PAGE_SIZE;
     }
     void tick().then(() => {
@@ -125,16 +163,47 @@
     container.scrollTop = Math.round(Math.min(Math.max(0, centeredTop), maximum));
   }
 
-  function resizeTextArea(element: HTMLTextAreaElement) {
-    element.style.height = "0";
-    element.style.height = `${element.scrollHeight}px`;
+  function scheduleEditorResize(elements: Iterable<HTMLTextAreaElement>) {
+    for (const element of elements) pendingEditorResizes.add(element);
+    if (editorResizeFrame) return;
+    editorResizeFrame = requestAnimationFrame(() => {
+      editorResizeFrame = 0;
+      const elements = Array.from(pendingEditorResizes).filter((element) => element.isConnected);
+      pendingEditorResizes.clear();
+      resizeTextAreas(elements);
+    });
+  }
+
+  function resizeTextAreas(elements: HTMLTextAreaElement[]) {
+    for (const element of elements) element.style.height = "auto";
+    const heights = elements.map((element) => element.scrollHeight);
+    elements.forEach((element, index) => {
+      element.style.height = `${heights[index]}px`;
+    });
+  }
+
+  function autoResizeTextArea(element: HTMLTextAreaElement, _text: string) {
+    scheduleEditorResize([element]);
+    return {
+      update() {
+        scheduleEditorResize([element]);
+      },
+      destroy() {
+        pendingEditorResizes.delete(element);
+      }
+    };
   }
 
   function editSegment(event: Event, segmentId: string) {
     const element = event.currentTarget as HTMLTextAreaElement;
-    resizeTextArea(element);
+    scheduleEditorResize([element]);
     if (composingSegments.has(segmentId)) return;
     onEditSegment(segmentId, element.value);
+  }
+
+  function playSegment(segment: EditableTranscript["segments"][number]) {
+    pinnedPlaybackSegmentId = segment.segmentId;
+    onPlay(segment.startMs);
   }
 
   function finishComposition(event: CompositionEvent, segmentId: string) {
@@ -144,9 +213,6 @@
 
   function showMoreSegments() {
     visibleCount += SEGMENT_PAGE_SIZE;
-    void tick().then(() => {
-      transcriptElement?.querySelectorAll<HTMLTextAreaElement>("textarea").forEach(resizeTextArea);
-    });
   }
 
   function editSpeaker(event: Event, speaker: string) {
@@ -343,16 +409,30 @@
           aria-current={index === activeIndex ? "true" : undefined}
         >
           <span class="segment-meta">
-            <button
-              class="timestamp"
-              type="button"
-              title={`${formatTimestamp(segment.startMs)} – ${formatTimestamp(segment.endMs)}へ移動`}
-              aria-label={`${formatTimestamp(segment.startMs)}へ移動`}
-              onclick={() => onSeek(segment.startMs)}
-            >{formatTimestamp(segment.startMs)}</button>
+            <span class="segment-timing">
+              {#if playbackAvailable}
+                <button
+                  class="timestamp"
+                  type="button"
+                  title={`${formatTimestamp(segment.startMs)} – ${formatTimestamp(segment.endMs)}へ移動`}
+                  aria-label={`${formatTimestamp(segment.startMs)}へ移動`}
+                  onclick={() => onSeek(segment.startMs)}
+                >{formatTimestamp(segment.startMs)}</button>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  type="button"
+                  icon={playing && index === activeIndex ? Pause : Play}
+                  aria-label={playing && index === activeIndex ? "一時停止" : `${formatTimestamp(segment.startMs)}の3秒前から再生`}
+                  title={playing && index === activeIndex ? "一時停止" : "3秒前から再生"}
+                  onclick={() => playing && index === activeIndex ? onPause() : playSegment(segment)}
+                />
+              {:else}
+                <span class="timestamp">{formatTimestamp(segment.startMs)}</span>
+              {/if}
+            </span>
             <span class="segment-heading">
               <strong title={segment.speaker}>{speakerLabel(segment.speaker)}</strong>
-              <Button size="xs" variant="ghost" type="button" icon={Play} aria-label={`${formatTimestamp(segment.startMs)}の3秒前から再生`} title="3秒前から再生" onclick={() => onPlay(segment.startMs)}>再生</Button>
             </span>
           </span>
           {#if editable}
@@ -361,6 +441,7 @@
               value={segment.text}
               data-segment-id={segment.segmentId}
               rows="1"
+              use:autoResizeTextArea={segment.text}
               aria-label={`${formatTimestamp(segment.startMs)}、${segment.speaker}の文字起こしを編集`}
               oncompositionstart={() => composingSegments.add(segment.segmentId)}
               oncompositionend={(event) => finishComposition(event, segment.segmentId)}
@@ -409,18 +490,19 @@
   .speaker-label-list input { min-width: 0; width: 100%; padding: 5px 7px; border: 0; border-radius: 5px; color: var(--foreground); background: color-mix(in oklch, var(--muted) 40%, transparent); font: inherit; font-size: 0.76rem; }
   .speaker-label-list input:focus { outline: 2px solid color-mix(in oklch, var(--primary) 25%, transparent); background: var(--background); }
   .segments { display: grid; }
-  .segment { display: grid; width: 100%; grid-template-columns: 84px minmax(0, 1fr); gap: 18px; padding: 17px 10px; border: 0; border-bottom: 1px solid var(--border); color: inherit; background: transparent; font: inherit; text-align: left; transition: background-color 120ms ease, box-shadow 120ms ease; }
+  .segment { display: grid; width: 100%; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; padding: 10px 8px; border: 0; border-bottom: 1px solid var(--border); color: inherit; background: transparent; font: inherit; text-align: left; transition: background-color 120ms ease, box-shadow 120ms ease; }
   .segment:hover { background: color-mix(in oklch, var(--primary) 4%, transparent); }
   .segment.active { background: color-mix(in oklch, var(--primary) 8%, transparent); box-shadow: inset 3px 0 var(--primary); }
   .segment.edited:not(.active) { box-shadow: inset 2px 0 color-mix(in oklch, var(--primary) 45%, transparent); }
   .segment-meta { display: contents; }
-  .timestamp { align-self: start; justify-self: start; grid-column: 1; grid-row: 1 / span 2; padding: 2px 3px; border: 0; border-radius: 4px; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-size: 0.76rem; font-variant-numeric: tabular-nums; }
+  .segment-timing { display: flex; align-self: start; grid-column: 1; grid-row: 1 / span 2; align-items: center; gap: 2px; }
+  .timestamp { padding: 2px 1px; border: 0; border-radius: 4px; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-size: 0.76rem; font-variant-numeric: tabular-nums; }
   .timestamp:hover { background: color-mix(in oklch, var(--primary) 10%, transparent); }
   .timestamp:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .segment-heading { display: flex; min-width: 0; grid-column: 2; align-items: center; justify-content: space-between; gap: 10px; }
-  .segment-heading strong { overflow: hidden; color: var(--foreground); font-size: 0.82rem; text-overflow: ellipsis; white-space: nowrap; }
-  .segment-text { grid-column: 2; margin-top: 7px; font-size: 0.9rem; line-height: 1.75; white-space: pre-wrap; }
-  .editor { width: 100%; min-height: 1.75em; resize: none; overflow: hidden; padding: 3px 5px; border: 1px solid transparent; border-radius: 6px; color: var(--foreground); background: transparent; font: inherit; font-size: 0.9rem; line-height: 1.75; }
+  .segment-heading strong { overflow: hidden; color: var(--foreground); font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
+  .segment-text { min-width: 0; grid-column: 2; margin-top: 2px; overflow-wrap: anywhere; font-size: 0.88rem; line-height: 1.55; white-space: pre-wrap; }
+  .editor { box-sizing: border-box; display: block; width: 100%; min-height: calc(1.55em + 4px); resize: none; overflow: hidden; padding: 1px 4px; border: 1px solid transparent; border-radius: 6px; color: var(--foreground); background: transparent; font: inherit; font-size: 0.88rem; line-height: 1.55; }
   .editor:hover { border-color: color-mix(in oklch, var(--border) 75%, transparent); background: color-mix(in oklch, var(--background) 70%, transparent); }
   .editor:focus { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); outline: 2px solid color-mix(in oklch, var(--primary) 18%, transparent); background: var(--background); }
   .transcript-more {
@@ -434,6 +516,6 @@
     .replace-panel { grid-template-columns: minmax(0, 1fr); }
     .replace-fields { grid-template-columns: minmax(0, 1fr); }
     .replace-actions { flex-wrap: wrap; }
-    .segment { grid-template-columns: 64px minmax(0, 1fr); gap: 10px; }
+    .segment { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 9px 4px; }
   }
 </style>

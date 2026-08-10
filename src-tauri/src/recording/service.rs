@@ -10,7 +10,7 @@ use std::{
 use tauri::AppHandle;
 
 use super::{
-    desktop::run_recording,
+    desktop::{run_input_monitor, run_recording},
     session::RecordingPaths,
     set_status,
     types::{RecordingPhase, RecordingStatus, StartRecordingRequest},
@@ -22,10 +22,16 @@ struct ActiveRecording {
     worker: JoinHandle<()>,
 }
 
+struct ActiveMonitor {
+    stop: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
+}
+
 #[derive(Default)]
 pub struct RecordingService {
     status: Arc<Mutex<RecordingStatus>>,
     active: Mutex<Option<ActiveRecording>>,
+    monitor: Mutex<Option<ActiveMonitor>>,
 }
 
 impl RecordingService {
@@ -42,6 +48,7 @@ impl RecordingService {
         request: StartRecordingRequest,
     ) -> Result<RecordingStatus, String> {
         request.validate()?;
+        self.stop_monitor()?;
         self.reap_finished();
 
         let mut active = self
@@ -106,6 +113,80 @@ impl RecordingService {
                 )
             }
         }
+    }
+
+    pub fn start_monitor(
+        &self,
+        app: AppHandle,
+        request: StartRecordingRequest,
+    ) -> Result<RecordingStatus, String> {
+        request.validate()?;
+        self.stop_monitor()?;
+        self.reap_finished();
+        if self
+            .active
+            .lock()
+            .map_err(|_| "録音状態を確認できませんでした。".to_string())?
+            .is_some()
+        {
+            return Err("録音中は入力確認を開始できません。".into());
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let status = self.status.clone();
+        set_status(&status, |current| {
+            current.microphone = request.microphone;
+            current.system_audio = request.system_audio;
+            current.microphone_level = 0.0;
+            current.system_level = 0.0;
+            current.warning = None;
+        });
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let worker_stop = stop.clone();
+        let worker = thread::Builder::new()
+            .name("mutsuna-input-monitor".into())
+            .spawn(move || run_input_monitor(app, request, status, worker_stop, ready_tx))
+            .map_err(|error| format!("入力確認を開始できませんでした: {error}"))?;
+
+        match ready_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {
+                *self
+                    .monitor
+                    .lock()
+                    .map_err(|_| "入力確認状態を保存できませんでした。".to_string())? =
+                    Some(ActiveMonitor { stop, worker });
+                Ok(self.status())
+            }
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(_) => {
+                stop.store(true, Ordering::Release);
+                let _ = worker.join();
+                Err("音声入力の確認開始がタイムアウトしました。".into())
+            }
+        }
+    }
+
+    pub fn stop_monitor(&self) -> Result<(), String> {
+        let monitor = self
+            .monitor
+            .lock()
+            .map_err(|_| "入力確認を停止できませんでした。".to_string())?
+            .take();
+        if let Some(monitor) = monitor {
+            monitor.stop.store(true, Ordering::Release);
+            monitor
+                .worker
+                .join()
+                .map_err(|_| "入力確認処理が予期せず終了しました。".to_string())?;
+        }
+        set_status(&self.status, |current| {
+            current.microphone_level = 0.0;
+            current.system_level = 0.0;
+        });
+        Ok(())
     }
 
     pub fn request_stop(&self, cancel_recording: bool) -> Result<(), String> {

@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "android", test))]
+mod android_context;
 mod audio_playback;
 mod audio_waveform;
 mod commands;
@@ -15,18 +17,19 @@ pub mod transcription;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_process::init())
-        .register_asynchronous_uri_scheme_protocol(
-            "mutsuna-audio",
-            |context, request, responder| {
-                let app = context.app_handle().clone();
-                let webview_label = context.webview_label().to_string();
-                std::thread::spawn(move || {
-                    responder.respond(audio_playback::response(&app, &webview_label, request));
-                });
-            },
-        )
+    let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.register_asynchronous_uri_scheme_protocol(
+        "mutsuna-audio",
+        |context, request, responder| {
+            let app = context.app_handle().clone();
+            let webview_label = context.webview_label().to_string();
+            std::thread::spawn(move || {
+                responder.respond(audio_playback::response(&app, &webview_label, request));
+            });
+        },
+    );
+    let builder = builder
         .manage(commands::transcribe::AudioSelectionState::default())
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
@@ -62,6 +65,15 @@ pub fn run() {
             pending_action::discard_pending_action,
             commands::transcribe::select_audio_file,
             commands::transcribe::get_transcription_session,
+            audio_playback::get_audio_playback_backend,
+            audio_playback::load_selected_audio_for_playback,
+            audio_playback::play_selected_audio,
+            audio_playback::pause_selected_audio,
+            audio_playback::seek_selected_audio,
+            audio_playback::get_audio_playback_state,
+            audio_playback::set_audio_playback_volume,
+            audio_playback::set_audio_playback_rate,
+            audio_playback::release_audio_playback,
             audio_waveform::get_selected_audio_waveform,
             commands::transcribe::transcribe_selected_audio,
             commands::transcribe::get_selected_transcription_history,
@@ -70,14 +82,18 @@ pub fn run() {
             commands::transcribe::update_transcript_document,
             commands::transcribe::reset_transcript_document,
             summary::get_summary_providers,
+            summary::get_summary_models,
             summary::list_summary_agent_install_status,
             summary::install_summary_agent,
             summary::delete_summary_agent,
             summary::get_selected_summary,
             summary::generate_selected_summary,
             commands::usage::get_transcription_usage,
+            commands::usage::get_soniox_usage,
             commands::recording::get_recording_capabilities,
             commands::recording::get_recording_status,
+            commands::recording::start_recording_monitor,
+            commands::recording::stop_recording_monitor,
             commands::recording::get_recorded_audio,
             commands::recording::start_recording,
             commands::recording::stop_recording,
@@ -87,8 +103,10 @@ pub fn run() {
             commands::recording::list_recent_meetings,
             commands::recording::select_recorded_audio,
             commands::recording::select_meeting_audio,
+            commands::recording::delete_meeting,
             commands::recording::reveal_recorded_audio,
             commands::recording::reveal_meeting_audio,
+            commands::recording::rename_meeting_audio,
             commands::recording::recover_recording,
             commands::recording::discard_recording,
             #[cfg(desktop)]

@@ -93,7 +93,9 @@ struct SegmentBuilder {
     character_count: usize,
 }
 
-const SEGMENT_GAP_MS: u64 = 800;
+// Provider-authored timestamps are precise enough to retain natural pauses,
+// but short hesitations within an unfinished sentence should stay together.
+const SEGMENT_GAP_MS: u64 = 2_000;
 const INFERRED_SEGMENT_GAP_MS: u64 = 2_500;
 const MAX_SEGMENT_DURATION_MS: u64 = 30_000;
 const MAX_SEGMENT_CHARACTERS: usize = 160;
@@ -101,6 +103,51 @@ const MAX_INFERRED_TOKEN_DURATION_MS: u64 = 1_000;
 const MAX_ORPHAN_CHARACTERS: usize = 1;
 const MAX_ORPHAN_DURATION_MS: u64 = 1_500;
 const MAX_ORPHAN_MERGE_GAP_MS: u64 = 3_000;
+const MAX_CONTINUATION_MERGE_GAP_MS: u64 = 3_000;
+
+// Increment when display segmentation changes so unedited stored transcripts
+// are rebuilt from their provider tokens on the next load.
+pub(crate) const DISPLAY_SEGMENTATION_VERSION: u32 = 6;
+
+type AdjacentSegmentMergeRule = fn(&TranscriptSegment, &TranscriptSegment) -> bool;
+
+// Add narrowly scoped, independently tested repair rules here. Each pass may
+// expose a pair that a later pass can safely merge.
+const ADJACENT_SEGMENT_MERGE_RULES: &[AdjacentSegmentMergeRule] = &[
+    should_attach_terminal_punctuation,
+    should_merge_after_japanese_incomplete_ending,
+    should_merge_japanese_continuation,
+];
+
+const JAPANESE_CONTINUATION_PREFIXES: &[&str] = &[
+    "が、",
+    "が，",
+    "を",
+    "に",
+    "へ",
+    "は",
+    "も",
+    "ので",
+    "のに",
+    "って",
+    "と、",
+    "という",
+];
+
+const JAPANESE_INCOMPLETE_ENDINGS: &[&str] = &[
+    "で言うと、",
+    "でいうと、",
+    "と言うと、",
+    "というと、",
+    "については、",
+    "に関しては、",
+    "としては、",
+    "場合は、",
+    "というのは、",
+    "となると、",
+    "であれば、",
+    "なら、",
+];
 
 /// Repairs missing or implausibly long inferred token ends without modifying
 /// provider- or alignment-authored boundaries.
@@ -221,7 +268,98 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         }
     }
     finish_segment(&mut current, &mut segments);
+    refine_segments(segments)
+}
+
+fn refine_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+    for rule in ADJACENT_SEGMENT_MERGE_RULES {
+        segments = merge_adjacent_segments(segments, *rule);
+    }
     merge_orphan_segments(segments)
+}
+
+fn merge_adjacent_segments(
+    mut segments: Vec<TranscriptSegment>,
+    should_merge: AdjacentSegmentMergeRule,
+) -> Vec<TranscriptSegment> {
+    let mut index = 0;
+    while index + 1 < segments.len() {
+        if should_merge(&segments[index], &segments[index + 1]) {
+            let right = segments.remove(index + 1);
+            let left = &mut segments[index];
+            left.end_ms = left.end_ms.max(right.end_ms);
+            left.text.push_str(&right.text);
+        } else {
+            index += 1;
+        }
+    }
+    segments
+}
+
+fn should_attach_terminal_punctuation(
+    previous: &TranscriptSegment,
+    punctuation: &TranscriptSegment,
+) -> bool {
+    same_speaker(previous, punctuation)
+        && is_terminal_punctuation_segment(punctuation)
+        && segment_gap(previous, punctuation) <= MAX_ORPHAN_MERGE_GAP_MS
+}
+
+fn should_merge_japanese_continuation(
+    previous: &TranscriptSegment,
+    continuation: &TranscriptSegment,
+) -> bool {
+    can_merge_continuation(previous, continuation)
+        && starts_with_japanese_continuation(&continuation.text)
+}
+
+fn should_merge_after_japanese_incomplete_ending(
+    previous: &TranscriptSegment,
+    continuation: &TranscriptSegment,
+) -> bool {
+    can_merge_continuation(previous, continuation)
+        && ends_with_japanese_incomplete_ending(&previous.text)
+}
+
+fn can_merge_continuation(previous: &TranscriptSegment, continuation: &TranscriptSegment) -> bool {
+    same_speaker(previous, continuation)
+        && !has_terminal_punctuation(previous)
+        && segment_gap(previous, continuation) <= MAX_CONTINUATION_MERGE_GAP_MS
+        && combined_segment_duration(previous, continuation) <= MAX_SEGMENT_DURATION_MS
+        && combined_character_count(previous, continuation) <= MAX_SEGMENT_CHARACTERS
+}
+
+fn starts_with_japanese_continuation(text: &str) -> bool {
+    let text = text.trim_start();
+    JAPANESE_CONTINUATION_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+fn ends_with_japanese_incomplete_ending(text: &str) -> bool {
+    let text = text.trim_end();
+    JAPANESE_INCOMPLETE_ENDINGS
+        .iter()
+        .any(|ending| text.ends_with(ending))
+}
+
+fn has_terminal_punctuation(segment: &TranscriptSegment) -> bool {
+    segment
+        .text
+        .trim_end()
+        .ends_with(['。', '！', '？', '!', '?'])
+}
+
+fn segment_gap(left: &TranscriptSegment, right: &TranscriptSegment) -> u64 {
+    right.start_ms.saturating_sub(left.end_ms)
+}
+
+fn combined_segment_duration(left: &TranscriptSegment, right: &TranscriptSegment) -> u64 {
+    right.end_ms.saturating_sub(left.start_ms)
+}
+
+fn combined_character_count(left: &TranscriptSegment, right: &TranscriptSegment) -> usize {
+    left.text.chars().count() + right.text.chars().count()
 }
 
 fn merge_orphan_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
@@ -272,6 +410,14 @@ fn is_orphan_segment(segment: &TranscriptSegment) -> bool {
             .text
             .trim_end()
             .ends_with(['。', '！', '？', '!', '?'])
+}
+
+fn is_terminal_punctuation_segment(segment: &TranscriptSegment) -> bool {
+    let text = segment.text.trim();
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|character| matches!(character, '。' | '！' | '？' | '!' | '?'))
 }
 
 fn same_speaker(left: &TranscriptSegment, right: &TranscriptSegment) -> bool {
@@ -331,14 +477,49 @@ mod tests {
     }
 
     #[test]
-    fn segments_split_on_silence_without_speaker_information() {
+    fn segments_keep_short_pauses_without_speaker_information() {
         let tokens = vec![
             token("前半", 0, 300, None),
             token("後半", 1_200, 1_600, None),
         ];
         let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "前半後半");
+    }
+
+    #[test]
+    fn segments_split_on_long_silence_without_speaker_information() {
+        let tokens = vec![
+            token("前半", 0, 300, None),
+            token("後半", 2_300, 2_700, None),
+        ];
+        let segments = segments_from_tokens(&tokens);
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[1].start_ms, 1_200);
+        assert_eq!(segments[1].start_ms, 2_300);
+    }
+
+    #[test]
+    fn unfinished_sentence_stays_together_across_a_natural_pause() {
+        let tokens = vec![
+            token(
+                "なんか会計とか経理とかやってるところの、やっぱ",
+                1_775_190,
+                1_778_970,
+                Some("Speaker 1"),
+            ),
+            token(
+                "かゆいところに手が届くというか、あれですね。",
+                1_780_710,
+                1_783_470,
+                Some("Speaker 1"),
+            ),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].text,
+            "なんか会計とか経理とかやってるところの、やっぱかゆいところに手が届くというか、あれですね。"
+        );
     }
 
     #[test]
@@ -375,6 +556,86 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].text, "本題え");
         assert_eq!(segments[1].text, "回答");
+    }
+
+    #[test]
+    fn terminal_punctuation_token_is_attached_to_the_previous_utterance() {
+        let tokens = vec![
+            token("手続きは不要", 26_610, 35_190, Some("Speaker 1")),
+            token("。", 37_110, 37_170, Some("Speaker 1")),
+            token("分かりました。", 37_410, 37_890, Some("Speaker 1")),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "手続きは不要。");
+        assert_eq!(segments[1].text, "分かりました。");
+    }
+
+    #[test]
+    fn japanese_particle_continuation_is_merged_after_a_pause() {
+        let tokens = vec![
+            token(
+                "元々あれなんですね、ムツナリザーブ",
+                40_770,
+                45_750,
+                Some("Speaker 1"),
+            ),
+            token("が、", 47_790, 47_850, Some("Speaker 1")),
+            token(
+                "ストライプを実装してる、ということなんですね、機能として。",
+                48_990,
+                53_070,
+                Some("Speaker 1"),
+            ),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].text,
+            "元々あれなんですね、ムツナリザーブが、ストライプを実装してる、ということなんですね、機能として。"
+        );
+    }
+
+    #[test]
+    fn japanese_incomplete_ending_is_merged_with_its_answer() {
+        let tokens = vec![
+            token(
+                "これは、うーん、まあ、そうですね、うちで言うと大体月、そうですね、売上で言うと、",
+                106_710,
+                113_670,
+                Some("Speaker 1"),
+            ),
+            token(
+                "大体300万ぐらいですかね、1か月で、この会議室の事業に関して。",
+                116_250,
+                121_170,
+                Some("Speaker 1"),
+            ),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].text,
+            "これは、うーん、まあ、そうですね、うちで言うと大体月、そうですね、売上で言うと、大体300万ぐらいですかね、1か月で、この会議室の事業に関して。"
+        );
+    }
+
+    #[test]
+    fn japanese_continuation_does_not_cross_speakers() {
+        let tokens = vec![
+            token("候補はムツナリザーブ", 0, 1_000, Some("Speaker 1")),
+            token("が、別案もあります。", 2_600, 3_200, Some("Speaker 2")),
+        ];
+        assert_eq!(segments_from_tokens(&tokens).len(), 2);
+    }
+
+    #[test]
+    fn ordinary_sentence_opening_remains_split_after_a_pause() {
+        let tokens = vec![
+            token("ここまでが前の話", 0, 1_000, Some("Speaker 1")),
+            token("次に料金を確認します。", 3_000, 3_600, Some("Speaker 1")),
+        ];
+        assert_eq!(segments_from_tokens(&tokens).len(), 2);
     }
 
     #[test]

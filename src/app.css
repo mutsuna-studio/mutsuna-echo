@@ -16,6 +16,15 @@ body {
 
 #app { min-height: 100vh; }
 
+.app-main-header {
+  box-sizing: border-box;
+  height: calc(3.5rem + env(safe-area-inset-top, 0px));
+  min-height: calc(3.5rem + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+}
+
 body.overlay-window {
   min-width: 0;
   overflow: hidden;
@@ -38,19 +47,22 @@ input {
 }
 
 .app-shell-content {
-  --library-left: 0px;
-  --library-top: 0px;
-  position: relative;
   display: grid;
   width: 100%;
   height: 100%;
   grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
   background: var(--background);
 }
 
-.app-shell-content.with-library { grid-template-columns: 282px minmax(0, 1fr); }
 .app-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.mobile-home-container { display: block; width: 100%; height: 100%; }
+.mobile-home-container.mobile-detail-open { display: none; }
+.meeting-workspace-container { display: none; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.meeting-workspace-container.mobile-detail-open { display: block; }
 
 .page-view {
   width: min(820px, calc(100% - 48px));
@@ -69,6 +81,7 @@ input {
 .settings-section { margin-top: 18px; padding: 22px 24px; border: 1px solid var(--border); border-radius: 12px; }
 .settings-section-heading h2 { margin: 0; font-size: 1rem; }
 .settings-section-heading p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
+.transcription-model-manager { display: grid; overflow: hidden; margin-top: 18px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--muted) 25%, var(--background)); }
 
 .dev-preview-dock { position: fixed; z-index: 50; right: 14px; bottom: 14px; }
 
@@ -144,7 +157,6 @@ h3 {
   box-shadow: none;
 }
 
-.section-heading,
 .action-row,
 .input-row,
 .segment-meta {
@@ -153,7 +165,6 @@ h3 {
   gap: 14px;
 }
 
-.section-heading,
 .action-row { justify-content: space-between; }
 
 .cost-estimate {
@@ -233,60 +244,6 @@ h3 {
   flex: none;
 }
 
-.file-picker {
-  display: flex;
-  width: 100%;
-  min-height: 76px;
-  align-items: center;
-  gap: 16px;
-  margin-top: 26px;
-  padding: 18px 20px;
-  border-style: dashed;
-  border-radius: 12px;
-  text-align: left;
-}
-
-.file-picker-selected {
-  border-style: solid;
-  background: color-mix(in oklch, var(--primary) 4%, var(--background));
-}
-
-.input-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  margin-top: 22px;
-  padding: 4px;
-  border-radius: 12px;
-  background: var(--muted);
-}
-
-.file-icon {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  flex: none;
-  place-items: center;
-  border-radius: 10px;
-  color: var(--primary-foreground);
-  background: var(--primary);
-  font-size: 1.2rem;
-}
-
-.file-copy {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.file-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-copy small { color: var(--muted-foreground); }
-
 .action-row {
   margin-top: 22px;
   padding-top: 20px;
@@ -342,10 +299,11 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 12px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  margin: 0;
+  padding: 15px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
 }
 
 .local-model-copy {
@@ -363,6 +321,8 @@ h3 {
 }
 
 .local-model-copy small { color: var(--muted-foreground); }
+.local-model-copy small { font-size: 0.7rem; line-height: 1.5; }
+.local-model-title strong { font-size: 0.84rem; }
 .local-model-copy progress { width: 100%; accent-color: var(--primary); }
 
 .credential-heading {
@@ -394,10 +354,6 @@ h3 {
 
 .danger {
   margin-top: 18px;
-}
-
-@media (max-width: 1040px) {
-  .app-shell-content.with-library { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 780px) {
@@ -436,6 +392,5 @@ h3 {
   .new-meeting-view .provider-action .action-help { display: none; }
   .model { display: none; }
   .usage-grid,
-  .input-tabs,
   .provider-grid { grid-template-columns: 1fr; }
 }

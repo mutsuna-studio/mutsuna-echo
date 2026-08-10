@@ -42,6 +42,14 @@ pub(crate) struct TranscriptionUsage {
     warning: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SonioxUsage {
+    monthly_cost_usd: String,
+    period_start: String,
+    fetched_at: String,
+}
+
 enum ApiResponse<T> {
     Data(T),
     MissingPermission,
@@ -262,6 +270,24 @@ pub(crate) async fn get_transcription_usage(app: AppHandle) -> Result<Transcript
         tier: Some(subscription.tier),
         resets_at_unix,
         warning,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn get_soniox_usage(app: AppHandle) -> Result<SonioxUsage, String> {
+    let api_key = crate::credentials::load(&app, crate::credentials::CredentialId::Soniox)?;
+    let now = Utc::now();
+    let period_start = now
+        .date_naive()
+        .with_day(1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date| date.and_utc())
+        .ok_or_else(|| "Sonioxの利用期間を計算できませんでした。".to_string())?;
+    let monthly_cost_usd = crate::transcription::soniox::current_month_cost_usd(&api_key).await?;
+    Ok(SonioxUsage {
+        monthly_cost_usd,
+        period_start: period_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        fetched_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })
 }
 

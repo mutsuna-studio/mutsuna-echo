@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -15,6 +16,7 @@ object RecordingBridge {
   @Volatile internal var activity: MainActivity? = null
   private val lock = Any()
   private var status = JSONObject(defaultStatus())
+  @Volatile private var monitorRequested = false
 
   @JvmStatic fun capabilities(@Suppress("UNUSED_PARAMETER") context: Context): String = JSONObject().apply {
     put("platform", "android")
@@ -33,6 +35,7 @@ object RecordingBridge {
   }.toString()
 
   @JvmStatic fun start(@Suppress("UNUSED_PARAMETER") context: Context, config: String): String {
+    EchoInputMonitor.stop()
     synchronized(lock) {
       if (status.optString("phase") in setOf("starting", "recording", "finalizing")) {
         throw IllegalStateException("録音はすでに実行中です。")
@@ -115,6 +118,96 @@ object RecordingBridge {
     return recordings.toString()
   }
 
+  @JvmStatic fun openRecordingFolder(context: Context) {
+    val folderUri = DocumentsContract.buildDocumentUri(
+      "com.android.externalstorage.documents",
+      "primary:Music/Mutsuna Echo"
+    )
+    val browseAudio = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+      addCategory(Intent.CATEGORY_OPENABLE)
+      type = "audio/*"
+      putExtra(DocumentsContract.EXTRA_INITIAL_URI, folderUri)
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(browseAudio)
+  }
+
+  @JvmStatic fun renameCompletedRecording(context: Context, value: String, newFileName: String) {
+    val uri = Uri.parse(value)
+    require(uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY) {
+      "録音履歴のIDが不正です。"
+    }
+    require(Regex("^[^<>:\"/\\|?*\\p{Cntrl}]{1,128}\\.m4a$", RegexOption.IGNORE_CASE).matches(newFileName)) {
+      "ファイル名には使用できない文字が含まれています。"
+    }
+    val projection = arrayOf(MediaStore.Audio.Media.RELATIVE_PATH, MediaStore.Audio.Media.MIME_TYPE)
+    var ownedRecording = false
+    context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        ownedRecording = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH)) == HISTORY_RELATIVE_PATH &&
+          cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)) == "audio/mp4"
+      }
+    }
+    require(ownedRecording) { "Mutsuna Echoの録音ファイルではありません。" }
+    val updated = context.contentResolver.update(
+      uri,
+      ContentValues().apply { put(MediaStore.Audio.Media.DISPLAY_NAME, newFileName) },
+      null,
+      null
+    )
+    check(updated == 1) { "録音ファイル名を変更できませんでした。" }
+  }
+
+  @JvmStatic fun deleteCompletedRecording(context: Context, value: String) {
+    val uri = Uri.parse(value)
+    require(uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY) {
+      "録音履歴のIDが不正です。"
+    }
+    val projection = arrayOf(MediaStore.Audio.Media.RELATIVE_PATH, MediaStore.Audio.Media.MIME_TYPE)
+    var ownedRecording = false
+    context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        ownedRecording = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH)) == HISTORY_RELATIVE_PATH &&
+          cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)) == "audio/mp4"
+      }
+    }
+    require(ownedRecording) { "Mutsuna Echoの録音ファイルではありません。" }
+    check(context.contentResolver.delete(uri, null, null) == 1) {
+      "録音ファイルを削除できませんでした。"
+    }
+    check(context.getSharedPreferences("mutsuna_echo_meetings", Context.MODE_PRIVATE)
+      .edit().remove("recording:$value").commit()) {
+      "録音ファイルのMeeting情報を削除できませんでした。"
+    }
+  }
+
+  @JvmStatic fun startMonitor(context: Context, config: String): String {
+    val parsed = JSONObject(config)
+    monitorRequested = parsed.optBoolean("microphone")
+    synchronized(lock) {
+      if (status.optString("phase") in setOf("starting", "recording", "finalizing")) {
+        return status.toString()
+      }
+      status.put("microphone", parsed.optBoolean("microphone"))
+      status.put("systemAudio", parsed.optBoolean("systemAudio"))
+      status.put("microphoneLevel", 0.0)
+      status.put("systemLevel", 0.0)
+      status.put("warning", if (parsed.optBoolean("systemAudio")) "Androidのシステム音声は録音開始後に確認できます。" else JSONObject.NULL)
+      status.put("error", JSONObject.NULL)
+    }
+    if (parsed.optBoolean("microphone")) {
+      val current = activity ?: throw IllegalStateException("入力を確認するにはMutsuna Echoを前面に表示してください。")
+      current.requestInputMonitor()
+    }
+    return getStatus(context)
+  }
+
+  @JvmStatic fun stopMonitor(@Suppress("UNUSED_PARAMETER") context: Context) {
+    monitorRequested = false
+    EchoInputMonitor.stop()
+    update { put("microphoneLevel", 0.0); put("systemLevel", 0.0) }
+  }
+
   private fun meetingIdForRecording(context: Context, recordingId: String): String {
     val preferences = context.getSharedPreferences("mutsuna_echo_meetings", Context.MODE_PRIVATE)
     val key = "recording:$recordingId"
@@ -158,16 +251,21 @@ object RecordingBridge {
     val safeName = requireNotNull(displayName) { "選択した録音ファイルが見つかりません。" }
       .substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
     require(safeName.lowercase().endsWith(".m4a")) { "録音ファイルの形式が不正です。" }
-    val directory = java.io.File(context.cacheDir, "imports").apply { mkdirs() }
-    var destination = java.io.File(directory, safeName)
-    var suffix = 2
-    val stem = destination.name.removeSuffix(".m4a")
-    while (destination.exists()) destination = java.io.File(directory, "${stem}_${suffix++}.m4a")
-    val temporary = java.io.File(directory, destination.name + ".partial")
+    val recordingKey = requireNotNull(uri.lastPathSegment)
+      .replace(Regex("[^A-Za-z0-9._-]"), "_")
+    require(recordingKey.isNotBlank()) { "録音履歴のIDが不正です。" }
+    val directory = java.io.File(context.cacheDir, "imports/recording-$recordingKey").apply { mkdirs() }
+    val destination = java.io.File(directory, safeName)
+    if (destination.isFile && destination.length() > 0) return destination.absolutePath
+    val temporary = java.io.File(directory, ".${destination.name}.fragmented")
     context.contentResolver.openInputStream(uri)?.use { input ->
       java.io.FileOutputStream(temporary).use { output -> input.copyTo(output); output.fd.sync() }
     } ?: throw IllegalStateException("選択した録音を開けませんでした。")
-    check(temporary.renameTo(destination)) { "選択した録音をアプリ領域へ確定できませんでした。" }
+    try {
+      M4aFinalizer.finalize(temporary, destination)
+    } finally {
+      temporary.delete()
+    }
     return destination.absolutePath
   }
 
@@ -184,9 +282,7 @@ object RecordingBridge {
     var output = java.io.File(outputDirectory, "$base.m4a")
     var suffix = 2
     while (output.exists()) output = java.io.File(outputDirectory, "${base}_${suffix++}.m4a")
-    val temporary = java.io.File(outputDirectory, ".${output.name}.partial")
-    source.inputStream().use { input -> java.io.FileOutputStream(temporary).use { sink -> input.copyTo(sink); sink.fd.sync() } }
-    check(temporary.renameTo(output)) { "復旧した録音を確定できませんでした。" }
+    M4aFinalizer.finalize(source, output)
     val values = ContentValues().apply {
       put(MediaStore.Audio.Media.DISPLAY_NAME, output.name); put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
       put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/Mutsuna Echo"); put(MediaStore.Audio.Media.IS_PENDING, 1)
@@ -204,6 +300,20 @@ object RecordingBridge {
 
   internal fun update(block: JSONObject.() -> Unit) = synchronized(lock) { status.apply(block) }
 
+  internal fun updateMonitorLevel(level: Double) = update {
+    if (optString("phase") == "idle") put("microphoneLevel", level)
+  }
+
+  internal fun failMonitor(message: String) = update {
+    if (optString("phase") == "idle") put("warning", message)
+  }
+
+  internal fun pauseInputMonitor() = EchoInputMonitor.stop()
+
+  internal fun resumeInputMonitor() {
+    if (monitorRequested) EchoInputMonitor.start()
+  }
+
   internal fun failStart(message: String) = update {
     put("phase", "failed")
     put("error", message)
@@ -211,10 +321,6 @@ object RecordingBridge {
   }
 
   internal fun requiresSystemAudio(config: String): Boolean = JSONObject(config).optBoolean("systemAudio")
-
-  internal fun isActive(): Boolean = synchronized(lock) {
-    status.optString("phase") in setOf("starting", "recording", "finalizing")
-  }
 
   private fun defaultStatus() = """{
     "phase":"idle","sessionId":null,"elapsedMs":0,"microphone":false,"systemAudio":false,

@@ -20,6 +20,7 @@ const MAX_AUDIO_FILE_SIZE: u64 = 5_000_000_000;
 #[derive(Default)]
 pub(crate) struct AudioSelectionState {
     selected: Mutex<Option<SelectedAudio>>,
+    meeting_id: Mutex<Option<String>>,
     transcribing: AtomicBool,
     progress: Mutex<Option<TranscriptionProgress>>,
 }
@@ -194,12 +195,45 @@ pub(crate) fn restore_selected_meeting(
 
 pub(crate) fn selected_meeting_id(app: &AppHandle) -> Result<String, String> {
     app.state::<AudioSelectionState>()
+        .meeting_id
+        .lock()
+        .map_err(|_| "選択したMeetingの状態を取得できませんでした。".to_string())?
+        .clone()
+        .ok_or_else(|| "Meetingが選択されていません。".to_string())
+}
+
+pub(crate) fn select_meeting_without_audio(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<(), String> {
+    crate::meeting_store::validate_meeting_id(meeting_id)?;
+    let state = app.state::<AudioSelectionState>();
+    *state
         .selected
         .lock()
-        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
-        .as_ref()
-        .map(|selected| selected.descriptor.meeting_id.clone())
-        .ok_or_else(|| "文字起こし対象のMeetingが選択されていません。".to_string())
+        .map_err(|_| "選択した音声の状態を更新できませんでした。".to_string())? = None;
+    *state
+        .meeting_id
+        .lock()
+        .map_err(|_| "選択したMeetingの状態を更新できませんでした。".to_string())? =
+        Some(meeting_id.to_string());
+    Ok(())
+}
+
+pub(crate) fn clear_selected_meeting(app: &AppHandle, meeting_id: &str) -> Result<(), String> {
+    let state = app.state::<AudioSelectionState>();
+    let mut selected_meeting_id = state
+        .meeting_id
+        .lock()
+        .map_err(|_| "選択したMeetingの状態を更新できませんでした。".to_string())?;
+    if selected_meeting_id.as_deref() == Some(meeting_id) {
+        *state
+            .selected
+            .lock()
+            .map_err(|_| "選択した音声の状態を更新できませんでした。".to_string())? = None;
+        *selected_meeting_id = None;
+    }
+    Ok(())
 }
 
 pub(crate) fn selected_audio_path_for_playback(
@@ -247,6 +281,11 @@ fn set_selected_audio(
 ) -> Result<SelectedAudioFile, String> {
     let descriptor = describe_audio_path(&path, meeting_id)?;
     let state = app.state::<AudioSelectionState>();
+    *state
+        .meeting_id
+        .lock()
+        .map_err(|_| "選択したMeetingの状態を更新できませんでした。".to_string())? =
+        Some(descriptor.meeting_id.clone());
     *state
         .selected
         .lock()
@@ -336,19 +375,27 @@ fn validate_audio_file(path: &Path) -> Result<u64, String> {
 }
 
 fn inspect_audio(path: &Path) -> Result<AudioMetadata, String> {
-    let tagged_file = Probe::open(path)
+    let is_m4a = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("m4a"));
+    let mut duration = match Probe::open(path)
         .and_then(|probe| probe.options(ParseOptions::new().read_tags(false)).read())
-        .map_err(|error| {
-            eprintln!("Could not read audio duration: {error:?}");
-            "音声の再生時間を取得できませんでした。ファイル内容を確認してください。".to_string()
-        })?;
-    let mut duration = tagged_file.properties().duration();
-    if duration.is_zero()
-        && path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("m4a"))
     {
+        Ok(tagged_file) => tagged_file.properties().duration(),
+        Err(error) if is_m4a => {
+            eprintln!("Could not read audio duration: {error:?}");
+            std::time::Duration::ZERO
+        }
+        Err(error) => {
+            eprintln!("Could not read audio duration: {error:?}");
+            return Err(
+                "音声の再生時間を取得できませんでした。ファイル内容を確認してください。"
+                    .to_string(),
+            );
+        }
+    };
+    if duration.is_zero() && is_m4a {
         duration = fragmented_m4a_duration(path).unwrap_or_default();
     }
 
@@ -428,8 +475,12 @@ fn visit_mp4_boxes(data: &[u8], start: usize, end: usize, timing: &mut Fragmente
         match &kind {
             b"moov" | b"trak" | b"mdia" => visit_mp4_boxes(data, payload_start, box_end, timing),
             b"mdhd" => {
-                timing.timescale =
-                    parse_mdhd_timescale(&data[payload_start..box_end]).unwrap_or(timing.timescale)
+                if let Some((timescale, duration)) =
+                    parse_mdhd_timing(&data[payload_start..box_end])
+                {
+                    timing.timescale = timescale;
+                    timing.end_time = timing.end_time.max(duration);
+                }
             }
             b"moof" => visit_moof(data, payload_start, box_end, timing),
             _ => {}
@@ -505,10 +556,10 @@ fn mp4_box(data: &[u8], start: usize, limit: usize) -> Option<([u8; 4], usize, u
     (box_end <= limit).then_some((kind, start + header, box_end))
 }
 
-fn parse_mdhd_timescale(payload: &[u8]) -> Option<u32> {
+fn parse_mdhd_timing(payload: &[u8]) -> Option<(u32, u64)> {
     match *payload.first()? {
-        0 => read_u32(payload, 12),
-        1 => read_u32(payload, 20),
+        0 => Some((read_u32(payload, 12)?, u64::from(read_u32(payload, 16)?))),
+        1 => Some((read_u32(payload, 20)?, read_u64(payload, 24)?)),
         _ => None,
     }
 }
@@ -579,11 +630,21 @@ fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
 
 #[tauri::command]
 pub(crate) async fn select_audio_file(app: AppHandle) -> Result<Option<SelectedAudioFile>, String> {
-    let selected = app
-        .dialog()
+    // Android needs the activity event loop to remain available while the system
+    // picker is open. `blocking_pick_file` keeps the command alive but can block
+    // that loop, so a cancelled picker never resolves the webview invocation.
+    // Use the callback API instead; it reports cancellation as `None`.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.dialog()
         .file()
         .add_filter("Audio", AUDIO_EXTENSIONS)
-        .blocking_pick_file();
+        .pick_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv().ok().flatten())
+        .await
+        .map_err(|error| format!("音声ファイルの選択結果を取得できませんでした: {error}"))?;
 
     let Some(selected) = selected else {
         return Ok(None);
@@ -650,7 +711,7 @@ pub(crate) async fn transcribe_selected_audio(
             TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
         );
     }
-    let transcript = crate::transcription::transcribe(
+    let outcome = crate::transcription::transcribe(
         &app,
         &selected.path,
         request.provider,
@@ -661,7 +722,8 @@ pub(crate) async fn transcribe_selected_audio(
         &app,
         &selected.descriptor.meeting_id,
         &selected.path,
-        &transcript,
+        &outcome.transcript,
+        outcome.cost_usd,
     ) {
         Ok(run) => (
             Some(run),
@@ -670,7 +732,7 @@ pub(crate) async fn transcribe_selected_audio(
         Err(error) => (None, Some(error)),
     };
     Ok(TranscriptionResult {
-        transcript,
+        transcript: outcome.transcript,
         run,
         persistence_warning,
     })
@@ -681,13 +743,15 @@ pub(crate) fn get_selected_transcription_history(
     app: AppHandle,
     state: State<'_, AudioSelectionState>,
 ) -> Result<crate::transcript_store::TranscriptionHistory, String> {
-    let selected = state
+    let meeting_id = selected_meeting_id_from_state(&state)?;
+    let audio_path = state
         .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
-        .clone()
-        .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
-    crate::transcript_store::history(&app, &selected.descriptor.meeting_id, &selected.path)
+        .as_ref()
+        .filter(|selected| selected.descriptor.meeting_id == meeting_id)
+        .map(|selected| selected.path.clone());
+    crate::transcript_store::history(&app, &meeting_id, audio_path.as_deref())
 }
 
 #[tauri::command]
@@ -745,19 +809,18 @@ fn selected_meeting_id_from_state(
     state: &State<'_, AudioSelectionState>,
 ) -> Result<String, String> {
     state
-        .selected
+        .meeting_id
         .lock()
-        .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
-        .as_ref()
-        .map(|selected| selected.descriptor.meeting_id.clone())
-        .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())
+        .map_err(|_| "選択したMeetingの状態を取得できませんでした。".to_string())?
+        .clone()
+        .ok_or_else(|| "先にMeetingを選択してください。".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Write, path::Path};
 
-    use super::{inspect_audio, validate_audio_file, TranscriptionRequest};
+    use super::{inspect_audio, parse_mdhd_timing, validate_audio_file, TranscriptionRequest};
 
     fn write_one_second_wav(path: &Path) {
         const SAMPLE_RATE: u32 = 8_000;
@@ -816,6 +879,15 @@ mod tests {
         let _ = std::fs::remove_file(path);
 
         assert_eq!(audio.duration_ms, 1_000);
+    }
+
+    #[test]
+    fn reads_duration_from_version_zero_mdhd() {
+        let mut payload = vec![0_u8; 20];
+        payload[12..16].copy_from_slice(&48_000_u32.to_be_bytes());
+        payload[16..20].copy_from_slice(&2_116_608_u32.to_be_bytes());
+
+        assert_eq!(parse_mdhd_timing(&payload), Some((48_000, 2_116_608)));
     }
 
     #[test]

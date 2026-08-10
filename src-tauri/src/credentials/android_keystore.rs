@@ -1,35 +1,25 @@
-use jni::{
-    objects::{JObject, JString, JValue},
-    JavaVM,
-};
+use jni::objects::{JClass, JObject, JString, JValue};
 use secrecy::{ExposeSecret, SecretString};
 use tauri::AppHandle;
 use zeroize::Zeroize;
 
 use super::CredentialId;
 
-const BRIDGE: &str = "jp/mutsuna/echo/SecureCredentialBridge";
+const BRIDGE: &str = "jp.mutsuna.echo.SecureCredentialBridge";
 
 fn with_env<T>(
-    call: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> Result<T, String>,
+    call: impl FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>, &JClass<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let context = ndk_context::android_context();
-    let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }
-        .map_err(|error| format!("Android Keystoreを初期化できませんでした: {error}"))?;
-    let mut env = vm
-        .attach_current_thread()
-        .map_err(|error| format!("Android Keystoreへ接続できませんでした: {error}"))?;
-    let app = unsafe { JObject::from_raw(context.context().cast()) };
-    call(&mut env, &app)
+    crate::android_context::with_bridge_env(BRIDGE, "Android Keystoreへ接続できませんでした", call)
 }
 
 fn call_bool(method: &str, credential: CredentialId) -> Result<bool, String> {
-    with_env(|env, app| {
+    with_env(|env, app, bridge| {
         let credential = env
             .new_string(credential.id())
             .map_err(|error| format!("認証情報IDを安全な領域へ渡せませんでした: {error}"))?;
         env.call_static_method(
-            BRIDGE,
+            bridge,
             method,
             "(Landroid/content/Context;Ljava/lang/String;)Z",
             &[
@@ -47,7 +37,7 @@ pub(crate) fn save(
     credential: CredentialId,
     api_key: &SecretString,
 ) -> Result<(), String> {
-    with_env(|env, app| {
+    with_env(|env, app, bridge| {
         let credential = env
             .new_string(credential.id())
             .map_err(|error| format!("認証情報IDを安全な領域へ渡せませんでした: {error}"))?;
@@ -55,7 +45,7 @@ pub(crate) fn save(
             .new_string(api_key.expose_secret())
             .map_err(|error| format!("APIキーを安全な領域へ渡せませんでした: {error}"))?;
         env.call_static_method(
-            BRIDGE,
+            bridge,
             "save",
             "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
             &[
@@ -74,13 +64,13 @@ pub(crate) fn has(_app: &AppHandle, credential: CredentialId) -> Result<bool, St
 }
 
 pub(crate) fn load(_app: &AppHandle, credential: CredentialId) -> Result<SecretString, String> {
-    with_env(|env, app| {
+    with_env(|env, app, bridge| {
         let credential_id = env
             .new_string(credential.id())
             .map_err(|error| format!("認証情報IDを安全な領域へ渡せませんでした: {error}"))?;
         let value = env
             .call_static_method(
-                BRIDGE,
+                bridge,
                 "load",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[
@@ -109,12 +99,12 @@ pub(crate) fn load(_app: &AppHandle, credential: CredentialId) -> Result<SecretS
 }
 
 pub(crate) fn delete(_app: &AppHandle, credential: CredentialId) -> Result<(), String> {
-    with_env(|env, app| {
+    with_env(|env, app, bridge| {
         let credential = env
             .new_string(credential.id())
             .map_err(|error| format!("認証情報IDを安全な領域へ渡せませんでした: {error}"))?;
         env.call_static_method(
-            BRIDGE,
+            bridge,
             "delete",
             "(Landroid/content/Context;Ljava/lang/String;)V",
             &[

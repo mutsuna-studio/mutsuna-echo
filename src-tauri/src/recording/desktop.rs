@@ -71,6 +71,91 @@ pub(super) fn run_recording(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(super) fn run_input_monitor(
+    app: AppHandle,
+    request: StartRecordingRequest,
+    status: Arc<Mutex<RecordingStatus>>,
+    stop: Arc<AtomicBool>,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) {
+    use flexaudio::{open, OutputFormat, SourceKind, Stream, StreamConfig};
+
+    let output = OutputFormat {
+        sample_rate: SAMPLE_RATE,
+        channels: CHANNELS,
+    };
+    let make_stream = |kind, device_id| -> Result<Stream, String> {
+        let mut stream = open(StreamConfig {
+            kind,
+            device_id,
+            output,
+            ring_capacity_chunks: 16,
+            ..StreamConfig::default()
+        })
+        .map_err(|error| capture_start_error(kind, &error.to_string()))?;
+        stream
+            .start()
+            .map_err(|error| capture_start_error(kind, &error.to_string()))?;
+        Ok(stream)
+    };
+
+    let result = (|| -> Result<(), String> {
+        let mut microphone = request
+            .microphone
+            .then(|| make_stream(SourceKind::Mic, request.microphone_device_id.clone()))
+            .transpose()?;
+        let mut system = request
+            .system_audio
+            .then(|| make_stream(SourceKind::SystemLoopback, request.system_device_id.clone()))
+            .transpose()?;
+        let _ = ready.send(Ok(()));
+        let mut last_status = Instant::now() - STATUS_INTERVAL;
+        let mut microphone_level = 0.0;
+        let mut system_level = 0.0;
+        while !stop.load(Ordering::Acquire) {
+            if let Some(stream) = microphone.as_mut() {
+                while let Some(chunk) = stream.poll_chunk() {
+                    microphone_level = chunk.peak.clamp(0.0, 1.0);
+                }
+            }
+            if let Some(stream) = system.as_mut() {
+                while let Some(chunk) = stream.poll_chunk() {
+                    system_level = chunk.peak.clamp(0.0, 1.0);
+                }
+            }
+            if last_status.elapsed() >= STATUS_INTERVAL {
+                publish_status(&app, &status, |current| {
+                    current.microphone_level = microphone_level;
+                    current.system_level = system_level;
+                });
+                last_status = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = ready.try_send(Err(error.clone()));
+        publish_status(&app, &status, |current| current.warning = Some(error));
+    }
+    publish_status(&app, &status, |current| {
+        current.microphone_level = 0.0;
+        current.system_level = 0.0;
+    });
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(super) fn run_input_monitor(
+    _app: AppHandle,
+    _request: StartRecordingRequest,
+    _status: Arc<Mutex<RecordingStatus>>,
+    _stop: Arc<AtomicBool>,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) {
+    let _ = ready.send(Err("このOSでは録音前の入力確認を利用できません。".into()));
+}
+
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn run_recording(
     app: AppHandle,

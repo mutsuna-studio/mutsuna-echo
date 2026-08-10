@@ -14,7 +14,6 @@ import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.Instant
@@ -160,7 +159,7 @@ class EchoRecordingService : Service() {
       } else {
         val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")) + ".m4a"
         val cacheOutput = uniqueCacheOutput(name).apply { parentFile?.mkdirs() }
-        copyAtomically(mixedFile, cacheOutput)
+        M4aFinalizer.finalize(mixedFile, cacheOutput)
         publishToMusic(cacheOutput, name)
         session.deleteRecursively()
         RecordingBridge.update {
@@ -178,7 +177,7 @@ class EchoRecordingService : Service() {
         try {
           val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")) + ".m4a"
           val output = uniqueCacheOutput(name).apply { parentFile?.mkdirs() }
-          copyAtomically(mixedFile, output); publishToMusic(output, output.name); session.deleteRecursively()
+          M4aFinalizer.finalize(mixedFile, output); publishToMusic(output, output.name); session.deleteRecursively()
           RecordingBridge.update {
             put("phase", "completed"); put("elapsedMs", SystemClock.elapsedRealtime() - startedAt)
             put("outputPath", output.absolutePath); put("stopReason", "captureError")
@@ -245,12 +244,6 @@ class EchoRecordingService : Service() {
       throw IllegalStateException("録音の復旧情報を保存できません。")
     }
     backup.delete()
-  }
-
-  private fun copyAtomically(source: File, destination: File) {
-    val temporary = File(destination.parentFile, destination.name + ".tmp")
-    FileInputStream(source).use { input -> FileOutputStream(temporary).use { output -> input.copyTo(output); output.fd.sync() } }
-    if (!temporary.renameTo(destination)) throw IllegalStateException("録音ファイルを確定できません。")
   }
 
   private fun uniqueCacheOutput(preferredName: String): File {

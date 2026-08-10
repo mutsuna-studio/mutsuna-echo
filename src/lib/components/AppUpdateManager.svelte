@@ -77,7 +77,7 @@
     } else if (event.event === "Progress") {
       downloadedBytes += event.data.chunkLength;
     } else {
-      status = "更新をインストールしています…";
+      status = "更新を適用しています…";
     }
   }
 

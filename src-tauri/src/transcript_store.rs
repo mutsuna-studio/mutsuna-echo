@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
-use crate::transcription::{normalize_transcript_for_display, Transcript, TranscriptionProvider};
+use crate::transcription::{
+    normalize_transcript_for_display, Transcript, TranscriptionProvider,
+    DISPLAY_SEGMENTATION_VERSION,
+};
 
 const SCHEMA_VERSION: u8 = 4;
 const COMPATIBLE_SCHEMA_VERSIONS: [u8; 3] = [2, 3, SCHEMA_VERSION];
@@ -45,6 +48,8 @@ pub(crate) struct TranscriptionRunSummary {
     pub(crate) model: String,
     pub(crate) language: String,
     pub(crate) edited: bool,
+    #[serde(default)]
+    pub(crate) cost_usd: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -98,6 +103,8 @@ struct StoredTranscriptionRun {
     language: String,
     #[serde(default)]
     settings: TranscriptionSettingsSnapshot,
+    #[serde(default)]
+    cost_usd: Option<String>,
     source: Transcript,
     document: TranscriptDocument,
 }
@@ -122,6 +129,7 @@ pub(crate) struct TranscriptionRunDetail {
     pub(crate) updated_at: String,
     pub(crate) revision: u64,
     pub(crate) edited: bool,
+    pub(crate) cost_usd: Option<String>,
     pub(crate) transcript: EditableTranscript,
 }
 
@@ -291,10 +299,11 @@ pub(crate) fn load(
 pub(crate) fn history(
     app: &AppHandle,
     meeting_id: &str,
-    audio_path: &Path,
+    audio_path: Option<&Path>,
 ) -> Result<TranscriptionHistory, String> {
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
-    if !directory.join("index.json").exists() {
+    if !directory.join("index.json").exists() && audio_path.is_some() {
+        let audio_path = audio_path.expect("audio path was checked immediately above");
         migrate_global_legacy_transcripts(app, meeting_id, audio_path)?;
     }
     let _guard = store_guard()?;
@@ -310,6 +319,7 @@ pub(crate) fn create_run(
     meeting_id: &str,
     audio_path: &Path,
     transcript: &Transcript,
+    cost_usd: Option<String>,
 ) -> Result<TranscriptionRunDetail, String> {
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     if !directory.join("index.json").exists() {
@@ -330,6 +340,7 @@ pub(crate) fn create_run(
         model: transcript.model.clone(),
         language: transcript.language.clone(),
         settings: settings_snapshot(app, transcript),
+        cost_usd,
         source: transcript.clone(),
         document: document_from_transcript(transcript, now),
     };
@@ -640,6 +651,7 @@ fn ensure_history_in(
             model: stored.transcript.model.clone(),
             language: stored.transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
+            cost_usd: None,
             document: document_from_transcript(&stored.transcript, stored.saved_at),
             source: stored.transcript,
         };
@@ -657,7 +669,7 @@ fn document_from_transcript(transcript: &Transcript, updated_at: String) -> Tran
         revision: 0,
         updated_at,
         edited: false,
-        segmentation_version: 1,
+        segmentation_version: DISPLAY_SEGMENTATION_VERSION,
         speaker_labels: BTreeMap::new(),
         segments: transcript
             .segments
@@ -706,6 +718,7 @@ fn run_summary(run: &StoredTranscriptionRun) -> TranscriptionRunSummary {
         model: run.model.clone(),
         language: run.language.clone(),
         edited: run.document.edited,
+        cost_usd: run.cost_usd.clone(),
     }
 }
 
@@ -725,6 +738,7 @@ fn run_detail(run: &StoredTranscriptionRun) -> TranscriptionRunDetail {
         updated_at: run.document.updated_at.clone(),
         revision: run.document.revision,
         edited: run.document.edited,
+        cost_usd: run.cost_usd.clone(),
         transcript: EditableTranscript {
             provider: run.provider.clone(),
             model: run.model.clone(),
@@ -779,7 +793,7 @@ fn read_run(
     transcription_id: &str,
 ) -> Result<StoredTranscriptionRun, String> {
     let path = run_path(directory, transcription_id)?;
-    let run: StoredTranscriptionRun = read_bounded_json(&path)?;
+    let mut run: StoredTranscriptionRun = read_bounded_json(&path)?;
     if run.schema_version != RUN_SCHEMA_VERSION
         || run.meeting_id != meeting_id
         || run.transcription_id != transcription_id
@@ -807,6 +821,18 @@ fn read_run(
             || label.len() > MAX_SPEAKER_LABEL_BYTES
     }) {
         return Err("保存済みの話者ラベルが不正です。".into());
+    }
+    if run.document.segmentation_version < DISPLAY_SEGMENTATION_VERSION
+        && !run.document.edited
+        && run.document.speaker_labels.is_empty()
+    {
+        let mut transcript = run.source.clone();
+        normalize_transcript_for_display(&mut transcript);
+        let revision = run.document.revision;
+        let updated_at = run.document.updated_at.clone();
+        run.document = document_from_transcript(&transcript, updated_at);
+        run.document.revision = revision;
+        write_run(directory, &run)?;
     }
     Ok(run)
 }
@@ -1234,6 +1260,7 @@ mod tests {
             model: transcript.model.clone(),
             language: transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
+            cost_usd: None,
             document: document_from_transcript(&transcript, "2026-08-09T00:00:00Z".into()),
             source: transcript,
         };
@@ -1302,6 +1329,7 @@ mod tests {
             model: transcript.model.clone(),
             language: transcript.language.clone(),
             settings: TranscriptionSettingsSnapshot::default(),
+            cost_usd: None,
             document: document_from_transcript(&transcript, "2026-08-09T00:00:00Z".into()),
             source: transcript,
         };

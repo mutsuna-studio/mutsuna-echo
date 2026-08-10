@@ -12,6 +12,14 @@
 #   public *;
 #}
 
+# Rust resolves these Android bridges by their exact JNI class and method names.
+# R8 cannot see those string-based calls and would otherwise remove or rename
+# the methods in release builds, causing startup and recording JNI failures.
+-keep class jp.mutsuna.echo.SecureCredentialBridge { *; }
+-keep class jp.mutsuna.echo.RecordingBridge { *; }
+-keep class jp.mutsuna.echo.AudioPlaybackBridge { *; }
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable

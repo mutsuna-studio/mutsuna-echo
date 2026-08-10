@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
@@ -8,6 +9,7 @@ use tauri::AppHandle;
 use crate::transcription::elevenlabs::client::{api_error_kind, ApiErrorKind, ElevenLabsClient};
 
 const ELEVENLABS_MODELS_URL: &str = "https://api.elevenlabs.io/v1/models";
+const API_KEY_VALIDATION_TIMEOUT: Duration = Duration::from_secs(25);
 
 async fn validate_api_key(api_key: &SecretString) -> Result<bool, String> {
     let response = ElevenLabsClient::new(api_key, Duration::from_secs(20))?
@@ -69,8 +71,22 @@ pub(crate) async fn save_provider_api_key(
     if api_key.expose_secret().is_empty() {
         return Err("APIキーを入力してください。".into());
     }
-    let fully_accessible = validate_provider_api_key(credential, &api_key).await?;
+    eprintln!("[api-key] validation started provider={provider_id}");
+    let validation = std::panic::AssertUnwindSafe(validate_provider_api_key(credential, &api_key))
+        .catch_unwind();
+    let fully_accessible = tokio::time::timeout(API_KEY_VALIDATION_TIMEOUT, validation)
+        .await
+        .map_err(|_| {
+            "APIキーの確認に時間がかかっています。通信状態を確認して、もう一度お試しください。"
+                .to_string()
+        })?
+        .map_err(|_| {
+            "APIキーの確認処理を完了できませんでした。アプリを再起動して、もう一度お試しください。"
+                .to_string()
+        })??;
+    eprintln!("[api-key] validation completed provider={provider_id}");
     crate::credentials::save(&app, credential, &api_key)?;
+    eprintln!("[api-key] credential saved provider={provider_id}");
     Ok(fully_accessible)
 }
 
