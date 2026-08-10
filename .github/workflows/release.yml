@@ -13,8 +13,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-release:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Verify tag and application versions
+        run: node scripts/verify-release-version.mjs "${{ github.ref_name }}"
+
   publish:
     name: Build ${{ matrix.name }}
+    needs: validate-release
     permissions:
       contents: write
     environment:
@@ -214,7 +232,8 @@ jobs:
           wait "$app_pid" 2>/dev/null || true
 
   build-android:
-    name: Build signed Android AAB
+    name: Build and publish signed Android AAB
+    needs: validate-release
     runs-on: ubuntu-latest
     environment:
       name: release-android
@@ -308,3 +327,26 @@ jobs:
           name: android-aarch64-aab
           path: ${{ steps.verify-android.outputs.aab_path }}
           if-no-files-found: error
+
+      - name: Validate Google Play credentials
+        shell: bash
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Missing release-android secret: GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"
+            exit 1
+          fi
+          node -e "JSON.parse(process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON)"
+
+      - name: Publish to Google Play production
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: jp.mutsuna.echo
+          releaseFiles: ${{ steps.verify-android.outputs.aab_path }}
+          track: production
+          status: completed
+          changesNotSentForReview: false
+          releaseName: ${{ github.ref_name }}
+          whatsNewDirectory: distribution/whatsnew

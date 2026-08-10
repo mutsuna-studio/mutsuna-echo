@@ -81,7 +81,7 @@ cargo clippy --all-targets -- -D warnings
 
 `v0.1.0`のようなバージョンタグをpushすると、GitHub ActionsがWindowsとApple Silicon版macOSのデスクトップ版をビルドし、下書きのGitHub Releaseを作成します。Intel Macは配布対象外です。Windowsの配布物はNSISセットアップ（`.exe`）だけです。Releaseを公開すると、アプリは署名済みの`latest.json`を使って更新を検出します。
 
-同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存します。Google Playへの自動アップロードは行わず、初回はPlay Consoleから手動で登録します。
+同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存したうえで、Google Playのproductionトラックへ`completed`として送信します。Play ConsoleのManaged publishingを無効にしておけば、Googleの審査承認後に自動公開されます。タグ、`package.json`、`Cargo.toml`、`tauri.conf.json`のバージョンが一致しない場合は、ビルド前に停止します。
 
 デスクトップビルドでは、Tauriがバンドル対象を検証する前に`scripts/prepare-desktop-runtime.ps1`が`sherpa-onnx-sys`だけを先行ビルドします。これにより、クリーンなRunnerでもSherpa ONNXとONNX RuntimeのDLL／dylibが確実に生成され、アプリ本体を二重にコンパイルせずに配布物へ含められます。
 
@@ -91,7 +91,7 @@ cargo clippy --all-targets -- -D warnings
 | --- | --- |
 | `release-windows` | `TAURI_SIGNING_PRIVATE_KEY`、必要な場合は`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
 | `release-macos` | Tauri署名鍵一式。Developer IDへ移行する場合はApple署名・Notarization用Secret一式も追加 |
-| `release-android` | AndroidアップロードKeystore用Secret一式 |
+| `release-android` | AndroidアップロードKeystore用Secret一式、`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` |
 
 初回リリース前に、該当Environmentへ次のSecretを登録してください。Repository Secretへまとめて登録しないでください。
 
@@ -103,6 +103,17 @@ cargo clippy --all-targets -- -D warnings
 - `ANDROID_KEYSTORE_PASSWORD`: Keystoreのパスワード
 - `ANDROID_KEY_ALIAS`: アップロードキーのalias
 - `ANDROID_KEY_PASSWORD`: アップロードキーのパスワード
+- `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`: Google Play Developer APIへの公開権限を持つサービスアカウント鍵JSONの内容全体
+
+Google Playへの自動公開には、Google CloudでGoogle Play Developer APIを有効化してサービスアカウントを作成し、Play Consoleの「ユーザーと権限」で`jp.mutsuna.echo`をproductionへ公開できる権限を付与します。JSON鍵の内容全体をGitHub Environment `release-android`の`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`へ登録してください。完全自動公開にする場合は、Play ConsoleのManaged publishingを無効にします。
+
+リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.2`は`1002`になります。
+
+```powershell
+node scripts/verify-release-version.mjs v0.1.2
+git tag v0.1.2
+git push origin v0.1.2
+```
 
 ### macOS署名モード
 
