@@ -1533,7 +1533,7 @@
   <AdminShellFrame
     {pageTitle}
     contentClass={section === "settings" ? "settings-shell-content p-0 overflow-hidden border-0 rounded-none" : "p-0 overflow-hidden"}
-    headerClass={section === "settings" ? "settings-shell-header bg-background" : "app-main-header bg-background"}
+    headerClass={section === "settings" ? "settings-shell-header app-main-header bg-background" : "app-main-header bg-background"}
   >
     {#snippet sidebar()}
       <AppSidebar
