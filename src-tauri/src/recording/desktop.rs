@@ -41,6 +41,25 @@ const MAC_FRAGMENT_SECONDS: f64 = 10.0;
 const WINDOWS_FRAGMENT_SECONDS: f64 = 2.0;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+fn accumulate_meter_samples(level: &mut f32, samples: &[f32]) {
+    let peak = samples.iter().copied().fold(0.0f32, |peak, sample| {
+        if sample.is_finite() {
+            peak.max(sample.abs())
+        } else {
+            peak
+        }
+    });
+    if peak > *level {
+        *level = peak.min(1.0);
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn take_meter_levels(microphone: &mut f32, system: &mut f32) -> (f32, f32) {
+    (std::mem::take(microphone), std::mem::take(system))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Debug, PartialEq, Eq)]
 enum CaptureEventEffect {
     None,
@@ -116,18 +135,20 @@ pub(super) fn run_input_monitor(
         while !stop.load(Ordering::Acquire) {
             if let Some(stream) = microphone.as_mut() {
                 while let Some(chunk) = stream.poll_chunk() {
-                    microphone_level = chunk.peak.clamp(0.0, 1.0);
+                    accumulate_meter_samples(&mut microphone_level, &chunk.data);
                 }
             }
             if let Some(stream) = system.as_mut() {
                 while let Some(chunk) = stream.poll_chunk() {
-                    system_level = chunk.peak.clamp(0.0, 1.0);
+                    accumulate_meter_samples(&mut system_level, &chunk.data);
                 }
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
+                let (published_microphone_level, published_system_level) =
+                    take_meter_levels(&mut microphone_level, &mut system_level);
                 publish_status(&app, &status, |current| {
-                    current.microphone_level = microphone_level;
-                    current.system_level = system_level;
+                    current.microphone_level = published_microphone_level;
+                    current.system_level = published_system_level;
                 });
                 last_status = Instant::now();
             }
@@ -246,6 +267,7 @@ fn run_desktop_recording(
         None
     };
     let mut mixed_writer = M4aWriter::create(&paths.mixed, FINAL_BITRATE, fragment_seconds)?;
+    let mut final_enhancer = crate::audio_enhancement::StreamingAudioEnhancer::sonora(SAMPLE_RATE)?;
 
     let started_at = Utc::now();
     let started = Instant::now();
@@ -305,7 +327,7 @@ fn run_desktop_recording(
                 if let Some(writer) = microphone_writer.as_mut() {
                     writer.write(&chunk.data)?;
                 }
-                microphone_level = chunk.peak.clamp(0.0, 1.0);
+                accumulate_meter_samples(&mut microphone_level, &chunk.data);
                 mic_queue.push_back((chunk.pts_ns, chunk.data));
             }
         }
@@ -319,13 +341,14 @@ fn run_desktop_recording(
                 if let Some(writer) = system_writer.as_mut() {
                     writer.write(&chunk.data)?;
                 }
-                system_level = chunk.peak.clamp(0.0, 1.0);
+                accumulate_meter_samples(&mut system_level, &chunk.data);
                 sys_queue.push_back((chunk.pts_ns, chunk.data));
             }
         }
 
         drain_mix(
             &mut mixed_writer,
+            &mut final_enhancer,
             &mut mic_queue,
             &mut sys_queue,
             &mut mix_buffer,
@@ -343,10 +366,12 @@ fn run_desktop_recording(
             },
         )?;
         if last_status.elapsed() >= STATUS_INTERVAL {
+            let (published_microphone_level, published_system_level) =
+                take_meter_levels(&mut microphone_level, &mut system_level);
             publish_status(app, status, |current| {
                 current.elapsed_ms = elapsed_ms;
-                current.microphone_level = microphone_level;
-                current.system_level = system_level;
+                current.microphone_level = published_microphone_level;
+                current.system_level = published_system_level;
                 current.voice_activity = voice_activity;
             });
             last_status = Instant::now();
@@ -369,6 +394,7 @@ fn run_desktop_recording(
     }
     drain_mix(
         &mut mixed_writer,
+        &mut final_enhancer,
         &mut mic_queue,
         &mut sys_queue,
         &mut mix_buffer,
@@ -381,6 +407,14 @@ fn run_desktop_recording(
             }
         },
     )?;
+    let enhanced_tail = final_enhancer.finish()?;
+    if !enhanced_tail.is_empty() {
+        waveform.accept(&enhanced_tail);
+        if let Some(detector) = live_vad.as_mut() {
+            let _ = detector.accept_waveform(&enhanced_tail);
+        }
+        mixed_writer.write(&enhanced_tail)?;
+    }
 
     if cancel.load(Ordering::Acquire) {
         drop(microphone_writer);
@@ -535,7 +569,25 @@ fn capture_start_error(kind: flexaudio::SourceKind, detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    use super::{capture_event_effect, CaptureEventEffect};
+    use super::{
+        accumulate_meter_samples, capture_event_effect, take_meter_levels, CaptureEventEffect,
+    };
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn meter_uses_the_loudest_chunk_in_each_status_interval() {
+        let mut microphone = 0.0;
+        let mut system = 0.0;
+        accumulate_meter_samples(&mut system, &[0.1, -0.42, 0.2]);
+        accumulate_meter_samples(&mut system, &[0.0, 0.0]);
+        accumulate_meter_samples(&mut microphone, &[0.18, -0.12]);
+
+        assert_eq!(
+            take_meter_levels(&mut microphone, &mut system),
+            (0.18, 0.42)
+        );
+        assert_eq!((microphone, system), (0.0, 0.0));
+    }
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     #[test]

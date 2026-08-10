@@ -59,13 +59,10 @@
 <div class="summary-defaults" aria-busy={loadingProviderIds.length > 0}>
   {#if availableProviders.length > 0 && defaultProvider}
     <section class="defaults-block" aria-labelledby="summary-global-defaults">
-      <div class="block-heading">
-        <h3 id="summary-global-defaults">最初に使うAI</h3>
-        <p>会議を開いたときに、はじめから選ばれているAIを設定します。あとから会議ごとに変更できます。</p>
-      </div>
-      <div class="defaults-grid">
-        <label>
-          <span>AIサービス</span>
+      <h3 id="summary-global-defaults" class="sr-only">最初に使うAI</h3>
+      <label class="setting-row">
+        <span class="setting-copy"><strong>AIサービス</strong><small>会議ノートの作成に使うサービス</small></span>
+        <span class="setting-control">
           <Select type="single" value={defaultProviderId} onValueChange={onDefaultProviderChange} {disabled}>
             <SelectTrigger aria-label="最初に使うAIサービス" class="settings-select">
               <span class="select-value" title={defaultProvider.label}>{defaultProvider.label}</span>
@@ -76,9 +73,11 @@
               {/each}
             </SelectContent>
           </Select>
-        </label>
-        <label>
-          <span>使うAI</span>
+        </span>
+      </label>
+      <label class="setting-row">
+        <span class="setting-copy"><strong>モデル</strong><small>新しい会議で最初に選ばれるモデル</small></span>
+        <span class="setting-control">
           <Select type="single" value={defaultModel?.id ?? ""} onValueChange={onDefaultModelChange} disabled={disabled || isLoading(defaultProvider.id) || defaultProvider.models.length === 0}>
             <SelectTrigger aria-label="最初に使うAIモデル" class="settings-select">
               <span class="select-value" title={defaultModel?.label}>{isLoading(defaultProvider.id) ? "使えるAIを確認中…" : (defaultModel?.label ?? "AIを選択")}</span>
@@ -89,8 +88,8 @@
               {/each}
             </SelectContent>
           </Select>
-        </label>
-      </div>
+        </span>
+      </label>
     </section>
 
   {:else}
@@ -99,20 +98,22 @@
 </div>
 
 <style>
-  .summary-defaults { display: grid; gap: 20px; margin: 20px 0; }
-  .defaults-block { display: grid; gap: 13px; }
-  .block-heading { display: grid; gap: 4px; }
-  .block-heading h3 { margin: 0; font-size: 0.84rem; }
-  .block-heading p, .empty { margin: 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.55; }
-  .defaults-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  label { display: grid; min-width: 0; gap: 6px; color: var(--muted-foreground); font-size: 0.72rem; font-weight: 650; }
-  label :global([data-slot="select-trigger"]) { width: 100%; }
+  .summary-defaults, .defaults-block { display: grid; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .setting-row { display: flex; min-width: 0; min-height: 64px; align-items: center; justify-content: space-between; gap: 24px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .setting-row:last-child { border-bottom: 0; }
+  .setting-copy { display: grid; min-width: 0; gap: 3px; }
+  .setting-copy strong { color: var(--foreground); font-size: 0.8rem; font-weight: 650; }
+  .setting-copy small, .empty { color: var(--muted-foreground); font-size: 0.7rem; font-weight: 400; line-height: 1.45; }
+  .setting-control { width: min(310px, 46%); min-width: 180px; }
+  .setting-control :global([data-slot="select-trigger"]) { width: 100%; }
   :global(.settings-select) { width: 100%; min-width: 0; max-width: 100%; }
   .select-value { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .empty { padding: 14px 0 2px; }
+  .empty { margin: 0; padding: 14px; }
 
   @media (max-width: 600px) {
-    .defaults-grid { grid-template-columns: minmax(0, 1fr); }
+    .setting-row { align-items: stretch; flex-direction: column; gap: 9px; padding: 13px 14px; }
+    .setting-control { width: 100%; min-width: 0; }
     :global(.settings-select) { min-height: 44px; }
   }
 </style>

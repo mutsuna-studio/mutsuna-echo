@@ -39,6 +39,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     .load(Ordering::Acquire) =>
             {
                 api.prevent_close();
+                if matches!(
+                    app.state::<RecordingService>().status().phase,
+                    RecordingPhase::Starting
+                        | RecordingPhase::Recording
+                        | RecordingPhase::Finalizing
+                ) {
+                    crate::meeting_detection::request_recording_overlay(app);
+                }
                 destroy_main_window(app);
             }
             RunEvent::ExitRequested { api, .. }

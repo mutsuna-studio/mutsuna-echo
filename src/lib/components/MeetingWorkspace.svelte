@@ -26,7 +26,7 @@
   } from "@mutsuna/ui/dropdown-menu";
   import { InputGroup, InputGroupAddon, InputGroupInput } from "@mutsuna/ui/input-group";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
-  import { formatActualCost, formatFileSize, formatTimestamp } from "../format";
+  import { formatActualCost, formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import {
     isTranscriptionProviderId,
     transcriptionProviderOptions,
@@ -42,12 +42,16 @@
     TranscriptionRunDetail,
     TranscriptionRunSummary,
     TranscriptSegmentTextChange,
-    TranscriptSaveState
+    TranscriptSaveState,
+    ContextSaveState
   } from "../types/transcript";
   import type { SummaryProviderDefinition, SummaryStatus } from "../types/summary";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
   import TranscriptView from "./TranscriptView.svelte";
+  import TranscriptionContextEditor from "./TranscriptionContextEditor.svelte";
+
+  type MeetingContextDraft = { background: string; termsText: string; useGlobal: boolean };
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
@@ -63,17 +67,28 @@
     summaryModelId: string;
     summaryModelsLoading: boolean;
     summaryGenerating: boolean;
+    transcriptFormatting: boolean;
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
     transcribing: boolean;
     progress: TranscriptionProgress | null;
     canTranscribe: boolean;
+    contextEnabled: boolean;
+    contextSurchargeActive: boolean;
+    contextTermCount: number;
+    contextDraft: MeetingContextDraft | null;
+    contextSaveState: ContextSaveState;
+    contextLoading: boolean;
     onTranscribe: () => void;
+    onContextBackgroundChange: (background: string) => void;
+    onContextTermsChange: (termsText: string) => void;
+    onContextUseGlobalChange: (useGlobal: boolean) => void;
     onProviderChange: (provider: TranscriptionProviderId) => void;
     onRunChange: (transcriptionId: string) => void;
     onEditSegment: (segmentId: string, text: string) => void;
     onEditSpeakerLabel: (speaker: string, label: string) => void;
     onReplaceSegments: (changes: TranscriptSegmentTextChange[]) => Promise<boolean>;
+    onFormatTranscript: () => Promise<void>;
     canUndoReplacement: boolean;
     onUndoReplacement: () => Promise<void>;
     onFlushEdits: () => Promise<void>;
@@ -102,17 +117,28 @@
     summaryModelId,
     summaryModelsLoading,
     summaryGenerating,
+    transcriptFormatting,
     providers,
     provider,
     transcribing,
     progress,
     canTranscribe,
+    contextEnabled,
+    contextSurchargeActive,
+    contextTermCount,
+    contextDraft,
+    contextSaveState,
+    contextLoading,
     onTranscribe,
+    onContextBackgroundChange,
+    onContextTermsChange,
+    onContextUseGlobalChange,
     onProviderChange,
     onRunChange,
     onEditSegment,
     onEditSpeakerLabel,
     onReplaceSegments,
+    onFormatTranscript,
     canUndoReplacement,
     onUndoReplacement,
     onFlushEdits,
@@ -140,6 +166,7 @@
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
   const selectedProviderOption = $derived(providerOptions.find((option) => option.value === provider));
+  const selectedProvider = $derived(providers.find((candidate) => candidate.id === provider) ?? null);
   const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
   const saveStatus = $derived.by(() => {
     if (!selectedRun) return "";
@@ -165,6 +192,19 @@
     if (progress?.stage === "detectingSpeech") return "発話を検出中…";
     if (progress?.stage === "transcribing" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     return "文字起こし中…";
+  });
+  const contextStatus = $derived.by(() => {
+    if (!contextEnabled) return "コンテキスト: オフ";
+    if (!selectedProvider?.capabilities.contextText && !selectedProvider?.capabilities.contextTerms) return "このモデルはコンテキスト非対応";
+    if (!selectedProvider.capabilities.contextText && contextTermCount === 0) return "このモデルへ送信できる重要用語はありません";
+    if (contextSurchargeActive) {
+      const estimated = selectedAudio && selectedProvider?.pricingUsdPerHour != null
+        ? formatEstimatedCost(selectedAudio.durationMs / 3_600_000 * selectedProvider.pricingUsdPerHour * 1.2)
+        : null;
+      return `重要用語 ${contextTermCount}件を使用・料金 +20%${estimated ? `・推定 ${estimated}` : ""}`;
+    }
+    if (contextTermCount > 0 || contextDraft?.background.trim()) return "コンテキストを使用";
+    return "コンテキストは空です";
   });
 
   $effect(() => {
@@ -300,6 +340,7 @@
           modelId={summaryModelId}
           modelsLoading={summaryModelsLoading}
           generating={summaryGenerating}
+          blocked={transcriptFormatting}
           playbackAvailable={Boolean(selectedAudio)}
           onProviderChange={onSummaryProviderChange}
           onModelChange={onSummaryModelChange}
@@ -316,7 +357,7 @@
                   <DropdownMenu>
                     <DropdownMenuTrigger>
                       {#snippet child({ props })}
-                        <Button {...props} size="xs" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`}>
+                        <Button {...props} size="xs" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`} disabled={transcriptFormatting}>
                           履歴 {runs.length}
                         </Button>
                       {/snippet}
@@ -353,7 +394,7 @@
                 type="single"
                 value={provider}
                 onValueChange={selectProvider}
-                disabled={transcribing || providerOptions.length === 0}
+                disabled={transcribing || transcriptFormatting || providerOptions.length === 0}
               >
                 <SelectTrigger aria-label="文字起こしモデル" class="transcription-model-select">
                   <span>{selectedProviderOption?.label ?? "モデルを選択"}</span>
@@ -369,6 +410,7 @@
               </span>
             </div>
           </section>
+          <p class:surcharge={contextSurchargeActive} class="context-status">{contextStatus}</p>
           <TranscriptView
             {transcript}
             transcriptionId={selectedTranscriptionId}
@@ -381,9 +423,11 @@
             onPlay={playFromTranscript}
             onPause={pauseFromTranscript}
             editable={Boolean(selectedRun)}
+            formatting={transcriptFormatting}
             {onEditSegment}
             {onEditSpeakerLabel}
             {onReplaceSegments}
+            onFormat={onFormatTranscript}
             {canUndoReplacement}
             {onUndoReplacement}
             onBlur={onFlushEdits}
@@ -414,6 +458,7 @@
                 <span class="transcription-action" data-transcription-action>
                   <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
                 </span>
+                <small class:surcharge={contextSurchargeActive} class="context-start-status">{contextStatus}</small>
               </div>
             {/if}
           </div>
@@ -429,6 +474,29 @@
           {/if}
           <div><dt>Meeting ID</dt><dd class="meeting-id">{meeting.meetingId}</dd></div>
         </dl>
+        {#if contextDraft}
+          <div class="meeting-context-wrap">
+            <TranscriptionContextEditor
+              title="この会議のコンテキスト"
+              description="この会議だけで使う背景情報と重要用語を設定します。"
+              {contextEnabled}
+              background={contextDraft.background}
+              termsText={contextDraft.termsText}
+              useGlobal={contextDraft.useGlobal}
+              provider={selectedProvider}
+              saveState={contextSaveState}
+              loading={contextLoading}
+              disabled={transcribing}
+              onBackgroundChange={onContextBackgroundChange}
+              onTermsChange={onContextTermsChange}
+              onUseGlobalChange={onContextUseGlobalChange}
+            />
+          </div>
+        {:else if contextLoading}
+          <p class="meeting-info-loading" role="status">文字起こしコンテキストを読み込んでいます…</p>
+        {:else if contextSaveState === "error"}
+          <p class="meeting-info-loading context-error" role="alert">文字起こしコンテキストを読み込めませんでした。会議を開き直してください。</p>
+        {/if}
         <section class="danger-zone" aria-labelledby="meeting-delete-heading">
           <div>
             <strong id="meeting-delete-heading">会議を削除</strong>
@@ -483,6 +551,8 @@
   .transcription-heading span.error { color: var(--destructive); }
   .transcription-heading span.pending { color: var(--foreground); }
   .transcription-controls { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .context-status { margin: -10px 0 18px; color: var(--muted-foreground); font-size: 0.72rem; }
+  .context-status.surcharge { color: var(--foreground); font-weight: 650; }
   .transcription-toolbar :global([data-slot="select-trigger"]) { width: 240px; }
   :global(.transcription-history-menu) { width: min(320px, calc(100vw - 32px)); }
   :global(.transcription-history-item) { justify-content: space-between; gap: 12px; padding: 8px 9px; }
@@ -514,18 +584,22 @@
   .empty-transcript p, .workspace-empty p { max-width: 420px; margin: 0 0 18px; color: var(--muted-foreground); font-size: 0.82rem; line-height: 1.6; }
   .transcription-start-controls { display: grid; width: min(100%, 360px); gap: 10px; text-align: left; }
   .transcription-start-controls label { color: var(--muted-foreground); font-size: 0.72rem; font-weight: 650; }
+  .context-start-status { color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.5; text-align: center; }
+  .context-start-status.surcharge { color: var(--foreground); font-weight: 650; }
   .transcription-start-controls :global([data-slot="select-trigger"]) { width: 100%; }
   .transcription-start-controls .transcription-action, .transcription-start-controls :global(button[data-slot="button"]) { width: 100%; }
   .workspace-empty { position: relative; grid-row: 1 / -1; min-height: 100%; padding: 40px; }
 
   .meeting-info { display: grid; max-width: 720px; margin: 24px 0 0; }
   .meeting-info-loading { margin: 28px 0; color: var(--muted-foreground); font-size: 0.82rem; }
+  .meeting-info-loading.context-error { color: var(--destructive); }
   .meeting-info div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--border); }
   .meeting-info dt { color: var(--muted-foreground); font-size: 0.79rem; }
   .meeting-info dd { margin: 0; font-size: 0.84rem; }
   .file-name-display { max-width: 100%; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: text; }
   .file-name-display:hover { text-decoration: underline; text-decoration-color: color-mix(in oklch, var(--foreground) 30%, transparent); text-underline-offset: 3px; }
   .meeting-id { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 0.75rem !important; }
+  .meeting-context-wrap { margin-top: 24px; }
   .danger-zone { display: flex; max-width: 720px; align-items: center; justify-content: space-between; gap: 20px; margin-top: 32px; padding: 18px; border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border)); border-radius: 12px; }
   .danger-zone > div { display: grid; min-width: 0; gap: 4px; }
   .danger-zone strong { font-size: 0.84rem; }

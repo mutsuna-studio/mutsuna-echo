@@ -1,5 +1,6 @@
 #[cfg(any(target_os = "android", test))]
 mod android_context;
+mod audio_enhancement;
 mod audio_playback;
 mod audio_waveform;
 mod commands;
@@ -59,6 +60,10 @@ pub fn run() {
             transcription::vad_models::delete_local_vad_model,
             transcription::vad_settings::get_vad_preset,
             transcription::vad_settings::set_vad_preset,
+            transcription::context::get_global_transcription_context,
+            transcription::context::set_global_transcription_context,
+            transcription::context::get_meeting_transcription_context,
+            transcription::context::set_meeting_transcription_context,
             pending_action::get_pending_action,
             pending_action::receive_pending_action,
             pending_action::acknowledge_pending_action,
@@ -88,6 +93,7 @@ pub fn run() {
             summary::delete_summary_agent,
             summary::get_selected_summary,
             summary::generate_selected_summary,
+            summary::format_selected_transcript,
             commands::usage::get_transcription_usage,
             commands::usage::get_soniox_usage,
             commands::recording::get_recording_capabilities,

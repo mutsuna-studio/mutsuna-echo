@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { Badge } from "@mutsuna/ui/badge";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import { Button } from "@mutsuna/ui/button";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
   import type { SummaryAgentInstallStatus, SummaryModelDefinition, SummaryProviderDefinition } from "../types/summary";
@@ -136,9 +136,7 @@
       <div class="agent-copy">
         <div class="agent-title">
           <strong>{agent.label}</strong>
-          <Badge variant={agent.installed ? "default" : "secondary"}>
-            {agent.installed ? "利用可能" : "未追加"}
-          </Badge>
+          <span class:ready={agent.installed} class="agent-status">{#if agent.installed}<CircleCheck aria-hidden="true" />{/if}{agent.installed ? "利用可能" : "未追加"}</span>
         </div>
         <small>{agent.installed ? "会議ノートの作成に使えます" : "追加すると会議ノートの作成に使えます"}{agent.external ? "・このアプリの外で管理されています" : ""}</small>
       </div>
@@ -173,16 +171,19 @@
 </div>
 
 <style>
-  .summary-agent-manager { display: grid; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--muted) 25%, var(--background)); }
-  .agent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 16px; border-bottom: 1px solid var(--border); }
+  .summary-agent-manager { display: grid; overflow: hidden; }
+  .agent-row { display: flex; min-height: 64px; align-items: center; justify-content: space-between; gap: 24px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
   .agent-copy { display: grid; min-width: 0; gap: 5px; }
   .agent-title { display: flex; align-items: center; gap: 9px; }
-  .agent-title strong { font-size: 0.84rem; }
+  .agent-title strong { font-size: 0.8rem; }
+  .agent-status { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 0.66rem; font-weight: 600; }
+  .agent-status.ready { color: var(--primary); }
+  .agent-status :global(svg) { width: 13px; height: 13px; }
   small, .note { color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.5; }
   .agent-actions { display: grid; min-width: 0; flex: none; grid-template-columns: minmax(0, 230px) auto; align-items: center; gap: 8px; }
   :global(.agent-model-select) { width: 230px; min-width: 0; max-width: min(230px, 42vw); }
   .select-value { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .note { margin: 0; padding: 11px 16px; }
+  .note { margin: 0; padding: 10px 14px; background: color-mix(in oklch, var(--muted) 45%, var(--background)); }
   @media (max-width: 680px) {
     .agent-row { align-items: stretch; flex-direction: column; }
     .agent-actions { width: 100%; }

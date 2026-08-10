@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    segments_from_tokens, TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment,
-    TranscriptToken, TranscriptionOutcome,
+    context::TranscriptionContext, segments_from_tokens, TokenSpeakerSource, TokenTimeSource,
+    Transcript, TranscriptSegment, TranscriptToken, TranscriptionOutcome,
 };
 
 pub(crate) const MODEL_ID: &str = "stt-async-v5";
@@ -88,6 +88,20 @@ struct CreateTranscription<'a> {
     enable_speaker_diarization: bool,
     enable_language_identification: bool,
     client_reference_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<SonioxContext<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SonioxContext<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    terms: &'a [String],
+}
+
+fn slice_is_empty<T>(values: &[T]) -> bool {
+    values.is_empty()
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +291,7 @@ async fn transcribe_inner(
     client: &SonioxClient,
     file_id: &str,
     client_reference_id: &str,
+    context: Option<&TranscriptionContext>,
 ) -> Result<(String, Transcript), (Option<String>, String)> {
     let request = CreateTranscription {
         model: MODEL_ID,
@@ -285,6 +300,10 @@ async fn transcribe_inner(
         enable_speaker_diarization: true,
         enable_language_identification: true,
         client_reference_id,
+        context: context.map(|context| SonioxContext {
+            text: (!context.background.is_empty()).then_some(context.background.as_str()),
+            terms: &context.terms,
+        }),
     };
     let response = client
         .post("/transcriptions")
@@ -460,6 +479,7 @@ async fn fetch_usage_cost(
 pub(crate) async fn transcribe(
     path: &Path,
     api_key: &SecretString,
+    context: Option<&TranscriptionContext>,
 ) -> Result<TranscriptionOutcome, String> {
     let client = SonioxClient::new(api_key)?;
     let client_reference_id = uuid::Uuid::now_v7().to_string();
@@ -475,7 +495,7 @@ pub(crate) async fn transcribe(
         .await
         .map_err(|error| format!("Sonioxへ音声をアップロードできませんでした: {error}"))?;
     let uploaded: UploadedFile = parse_response(response, "音声のアップロード").await?;
-    let result = transcribe_inner(&client, &uploaded.id, &client_reference_id).await;
+    let result = transcribe_inner(&client, &uploaded.id, &client_reference_id, context).await;
     let cost_usd = if result.is_ok() {
         match fetch_usage_cost(&client, &client_reference_id, started_at).await {
             Ok(cost) => cost,
@@ -502,7 +522,9 @@ pub(crate) async fn transcribe(
 
 #[cfg(test)]
 mod tests {
-    use super::{error_message, normalize, usage_cost, SonioxTranscript};
+    use super::{
+        error_message, normalize, usage_cost, CreateTranscription, SonioxContext, SonioxTranscript,
+    };
     use reqwest::StatusCode;
     use serde_json::json;
 
@@ -543,5 +565,25 @@ mod tests {
         );
         assert!(message.contains("APIキーが無効"));
         assert!(message.contains("request-1"));
+    }
+
+    #[test]
+    fn serializes_background_and_terms_as_soniox_context() {
+        let terms = vec!["Mutsuna Echo".to_string(), "Scribe v2".to_string()];
+        let request = CreateTranscription {
+            model: "stt-async-v5",
+            file_id: "file-1",
+            language_hints: ["ja"],
+            enable_speaker_diarization: true,
+            enable_language_identification: true,
+            client_reference_id: "reference-1",
+            context: Some(SonioxContext {
+                text: Some("製品会議"),
+                terms: &terms,
+            }),
+        };
+        let value = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(value["context"]["text"], "製品会議");
+        assert_eq!(value["context"]["terms"], serde_json::json!(terms));
     }
 }

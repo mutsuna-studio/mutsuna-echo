@@ -285,7 +285,11 @@ fn list_recent_meetings_sync(app: &AppHandle) -> Result<Vec<RecentMeetingSummary
             .and_then(|_| crate::meeting_store::local_audio_path(app, &stored.meeting_id).ok());
         let transcript_providers = transcript_index
             .providers_for_meeting(&stored.meeting_id, legacy_audio_path.as_deref());
-        if recording.is_none() && transcript_providers.is_empty() {
+        // Imported audio is not part of the recorder history and may not have a
+        // transcript yet. Keep it in the meeting list whenever its linked local
+        // audio is still available so selecting a file can immediately populate
+        // the workspace header and meeting information.
+        if recording.is_none() && transcript_providers.is_empty() && !stored.audio_available {
             continue;
         }
         let occurred_at_unix_ms = recording

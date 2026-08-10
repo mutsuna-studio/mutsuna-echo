@@ -388,6 +388,20 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn request_recording_overlay<R: Runtime>(app: &AppHandle<R>) {
+    let overlay_app = app.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("mutsuna-recording-overlay".into())
+        .spawn(move || {
+            if let Err(error) = show_overlay(&overlay_app) {
+                eprintln!("Could not show recording overlay: {error}");
+            }
+        })
+    {
+        eprintln!("Could not start recording overlay: {error}");
+    }
+}
+
 fn destroy_overlay<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
         if let Err(error) = window.destroy() {

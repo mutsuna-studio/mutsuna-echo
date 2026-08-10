@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Badge } from "@mutsuna/ui/badge";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import {
     AlertDialog,
     AlertDialogAction,
@@ -40,13 +40,12 @@
   <div class="cloud-model-copy">
     <div class="cloud-model-title">
       <strong>{provider.modelLabel}</strong>
-      <Badge variant="secondary">{provider.label}</Badge>
       {#if loading}
-        <Badge variant="secondary">確認中</Badge>
+        <span class="cloud-status">{provider.label} · 確認中</span>
       {:else if hasApiKey}
-        <Badge>利用可能</Badge>
+        <span class="cloud-status ready"><CircleCheck aria-hidden="true" />{provider.label} · 利用可能</span>
       {:else}
-        <Badge variant="secondary">未設定</Badge>
+        <span class="cloud-status">{provider.label} · 未設定</span>
       {/if}
     </div>
     <small>音声を{provider.label}へ送って文字にします。利用するには、サービスから発行される専用キー（APIキー）が必要です。</small>
@@ -97,10 +96,13 @@
 </AlertDialog>
 
 <style>
-  .cloud-model-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 16px; border-bottom: 1px solid var(--border); }
+  .cloud-model-row { display: flex; min-height: 64px; align-items: center; justify-content: space-between; gap: 24px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
   .cloud-model-copy { display: grid; min-width: 0; gap: 5px; }
   .cloud-model-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .cloud-model-title strong { font-size: 0.84rem; }
+  .cloud-model-title strong { font-size: 0.8rem; }
+  .cloud-status { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 0.66rem; font-weight: 600; }
+  .cloud-status.ready { color: var(--primary); }
+  .cloud-status :global(svg) { width: 13px; height: 13px; }
   small { color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.5; }
   .cloud-model-actions { display: flex; min-width: 0; flex: none; align-items: center; gap: 8px; }
   form { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }

@@ -112,6 +112,16 @@ export type TranscriptSegmentTextChange = {
   text: string;
 };
 
+export type TranscriptFormattingResult = {
+  transcriptionId: string;
+  sourceRevision: number;
+  method: "mechanical" | "mechanicalAndLlm";
+  provider: string | null;
+  model: string | null;
+  changes: TranscriptSegmentTextChange[];
+  warning: string | null;
+};
+
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
   transcribing: boolean;
@@ -139,3 +149,18 @@ export type SonioxUsage = {
   periodStart: string;
   fetchedAt: string;
 };
+
+export type TranscriptionContext = {
+  background: string;
+  terms: string[];
+};
+
+export type GlobalTranscriptionContextSettings = TranscriptionContext & {
+  contextEnabled: boolean;
+};
+
+export type MeetingTranscriptionContext = TranscriptionContext & {
+  useGlobal: boolean;
+};
+
+export type ContextSaveState = "saved" | "unsaved" | "saving" | "error";

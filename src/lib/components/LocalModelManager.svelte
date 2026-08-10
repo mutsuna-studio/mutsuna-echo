@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { Badge } from "@mutsuna/ui/badge";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import { Button } from "@mutsuna/ui/button";
   import { Select } from "@mutsuna/ui/select";
   import { formatFileSize } from "../format";
@@ -204,9 +204,7 @@
   <div class="local-model-copy">
     <div class="local-model-title">
       <strong>{model?.displayName ?? "ReazonSpeech K2 int8-fp32"}</strong>
-      <Badge variant={model?.installed ? "default" : "secondary"}>
-        {model?.installed ? "利用可能" : "未追加"}
-      </Badge>
+      <span class:ready={model?.installed} class="model-status">{#if model?.installed}<CircleCheck aria-hidden="true" />{/if}{model?.installed ? "利用可能" : "未追加"}</span>
     </div>
     <small>
       日本語向け · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 音声はこの端末だけで処理します
@@ -236,9 +234,7 @@
   <div class="local-model-copy">
     <div class="local-model-title">
       <strong>{vadModel?.displayName ?? "Silero VAD"}</strong>
-      <Badge variant={vadModel?.installed ? "default" : "secondary"}>
-        {vadModel?.installed ? "使用中" : "未追加"}
-      </Badge>
+      <span class:ready={vadModel?.installed} class="model-status">{#if vadModel?.installed}<CircleCheck aria-hidden="true" />{/if}{vadModel?.installed ? "使用中" : "未追加"}</span>
     </div>
     <small>
       音声のある部分を自動で見つけます · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"}

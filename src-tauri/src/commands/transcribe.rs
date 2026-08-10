@@ -711,11 +711,17 @@ pub(crate) async fn transcribe_selected_audio(
             TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
         );
     }
+    let context = crate::transcription::context::effective_context(
+        &app,
+        &selected.descriptor.meeting_id,
+        request.provider,
+    )?;
     let outcome = crate::transcription::transcribe(
         &app,
         &selected.path,
         request.provider,
         request.model_id.as_deref(),
+        context.as_ref(),
     )
     .await?;
     let (run, persistence_warning) = match crate::transcript_store::create_run(

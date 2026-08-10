@@ -1,4 +1,5 @@
 pub(crate) mod audio_decode;
+pub(crate) mod context;
 pub mod diarization;
 pub(crate) mod elevenlabs;
 #[cfg(desktop)]
@@ -35,6 +36,7 @@ pub(crate) async fn transcribe(
     audio_path: &Path,
     provider: TranscriptionProvider,
     model_id: Option<&str>,
+    context: Option<&context::TranscriptionContext>,
 ) -> Result<TranscriptionOutcome, String> {
     match provider {
         TranscriptionProvider::ElevenLabs => {
@@ -42,7 +44,7 @@ pub(crate) async fn transcribe(
                 return Err("選択したElevenLabsモデルには対応していません。".into());
             }
             let api_key = crate::credentials::load_api_key(app)?;
-            let transcript = elevenlabs::transcribe(audio_path, &api_key).await?;
+            let transcript = elevenlabs::transcribe(audio_path, &api_key, context).await?;
             Ok(TranscriptionOutcome {
                 transcript,
                 cost_usd: None,
@@ -53,7 +55,7 @@ pub(crate) async fn transcribe(
                 return Err("選択したSonioxモデルには対応していません。".into());
             }
             let api_key = crate::credentials::load(app, crate::credentials::CredentialId::Soniox)?;
-            soniox::transcribe(audio_path, &api_key).await
+            soniox::transcribe(audio_path, &api_key, context).await
         }
         TranscriptionProvider::Local => {
             let installed = local_models::list_installed(app)?;

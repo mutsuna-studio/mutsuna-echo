@@ -15,6 +15,8 @@ export type TranscriptionCapabilities = {
   speakerLabels: boolean;
   confidenceScores: boolean;
   externalDiarization: boolean;
+  contextText: boolean;
+  contextTerms: boolean;
 };
 
 export type TranscriptionProviderDefinition = {

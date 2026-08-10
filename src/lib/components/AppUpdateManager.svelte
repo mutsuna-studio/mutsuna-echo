@@ -4,9 +4,7 @@
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import { Alert, AlertDescription } from "@mutsuna/ui/alert";
-  import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
-  import { Card } from "@mutsuna/ui/card";
   import { getVersion } from "@tauri-apps/api/app";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
@@ -116,16 +114,32 @@
   });
 </script>
 
-<Card class="update-card" aria-busy={checking || installing}>
-  <div class="update-heading">
-    <div class="update-icon" aria-hidden="true"><ShieldCheck /></div>
-    <div>
-      <div class="update-title">
-        <h3>アプリの更新</h3>
-        <Badge variant="secondary">v{currentVersion}</Badge>
+<div class="update-card" aria-busy={checking || installing}>
+  <div class="update-main">
+    <div class="update-heading">
+      <div class="update-icon" aria-hidden="true"><ShieldCheck /></div>
+      <div>
+        <div class="update-title">
+          <h3>アプリの更新</h3>
+          <span>バージョン {currentVersion}</span>
+        </div>
+        <p>{desktopSupported ? status : "モバイル版の更新はアプリストアから行います。"}</p>
       </div>
-      <p>{desktopSupported ? status : "モバイル版の更新はアプリストアから行います。"}</p>
     </div>
+    {#if desktopSupported}
+      <div class="update-actions">
+        {#if availableUpdate}
+          <Button type="button" icon={Download} onclick={installUpdate} disabled={disabled || installing} loading={installing}>
+            v{availableUpdate.version}へ更新
+          </Button>
+        {:else if !checking && !error}
+          <span class="up-to-date"><CircleCheck aria-hidden="true" /> 最新です</span>
+        {/if}
+        <Button variant="outline" type="button" icon={RefreshCw} onclick={checkForUpdates} disabled={disabled || checking || installing} loading={checking}>
+          更新を確認
+        </Button>
+      </div>
+    {/if}
   </div>
 
   {#if installing}
@@ -146,30 +160,15 @@
     <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>
   {/if}
 
-  {#if desktopSupported}
-    <div class="update-actions">
-      {#if availableUpdate}
-        <Button type="button" icon={Download} onclick={installUpdate} disabled={disabled || installing} loading={installing}>
-          v{availableUpdate.version}へ更新
-        </Button>
-      {:else if !checking && !error}
-        <span class="up-to-date"><CircleCheck aria-hidden="true" /> 最新です</span>
-      {/if}
-      <Button variant="outline" type="button" icon={RefreshCw} onclick={checkForUpdates} disabled={disabled || checking || installing} loading={checking}>
-        更新を確認
-      </Button>
-    </div>
-  {/if}
-</Card>
+</div>
 
 <style>
-  :global(.update-card) {
+  .update-card {
     display: grid;
-    gap: 18px;
-    margin-top: 12px;
-    padding: 18px;
+    gap: 12px;
   }
 
+  .update-main,
   .update-heading,
   .update-title,
   .update-actions,
@@ -178,24 +177,26 @@
     align-items: center;
   }
 
-  .update-heading { gap: 13px; }
+  .update-main { min-height: 68px; justify-content: space-between; gap: 24px; padding: 10px 14px; }
+  .update-heading { min-width: 0; gap: 12px; }
   .update-heading > div:last-child { min-width: 0; }
   .update-title { flex-wrap: wrap; gap: 8px; }
-  .update-title h3 { margin: 0; font-size: 0.94rem; }
-  .update-heading p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 0.8rem; }
+  .update-title h3 { margin: 0; font-size: 0.8rem; }
+  .update-title span, .update-heading p { color: var(--muted-foreground); font-size: 0.7rem; }
+  .update-heading p { margin: 3px 0 0; }
 
   .update-icon {
     display: grid;
-    width: 38px;
-    height: 38px;
+    width: 32px;
+    height: 32px;
     flex: none;
     place-items: center;
-    border-radius: 10px;
+    border-radius: 7px;
     color: var(--primary);
     background: color-mix(in oklch, var(--primary) 10%, var(--background));
   }
 
-  .update-icon :global(svg) { width: 20px; height: 20px; }
+  .update-icon :global(svg) { width: 17px; height: 17px; }
   .update-actions { flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
   .up-to-date { margin-right: auto; gap: 6px; color: var(--primary); font-size: 0.82rem; font-weight: 650; }
   .up-to-date :global(svg) { width: 16px; height: 16px; }
@@ -214,5 +215,10 @@
     background: var(--muted);
     font-size: 0.78rem;
     white-space: pre-wrap;
+  }
+
+  @media (max-width: 680px) {
+    .update-main { align-items: stretch; flex-direction: column; gap: 12px; }
+    .update-actions { justify-content: flex-start; }
   }
 </style>

@@ -9,6 +9,7 @@ Svelte 5 + TypeScript + Tauri 2 + Rustで作る、マルチOS対応の録音・�
 - ElevenLabs Scribe v2による日本語文字起こし
 - クラウド／ローカル共通の文字起こしProvider基盤
 - Silero VADによる音声区間検出
+- Sonora（WebRTC Audio ProcessingのPure Rust移植）によるNoise Suppression + AGC2
   - Windows／macOSでは初回起動時に約2.3 MBのモデルを任意モデル領域へ標準導入
   - 録音中は`Listening`／`Speech detected`だけを表示し、リアルタイムSTTは実行しない
   - 標準／小声優先／ノイズ抑制優先の検出プリセット
@@ -61,6 +62,8 @@ manifestと実ファイルが揃い、ID・保存パス・サイズなどの検�
 
 Silero VADは独立したダウンロードモデルとして標準導入します。有効時はローカルSTTの前処理で音声区間だけを抽出し、最大30秒単位で推論します。無音区間を物理的に削除した音声は作らず、各区間の元音声上のオフセットをトークン時刻へ戻すため、Transcriptのタイムスタンプは録音全体の時間軸を維持します。録音中も同じ設定で発話状態だけを表示しますが、録音の自動停止やリアルタイム文字起こしには使用しません。
 
+録音中は復旧用のマイク／システム音声トラックを未加工のまま保持し、最終ミックスPCMだけをSonoraのNoise SuppressionとAGC2（Adaptive Digital Gain）へ10 ms単位で入力してからM4Aへエンコードします。したがって、完成したM4A、その後のSilero VAD、ReazonSpeech K2には同じ強調済み音声が渡り、二重に強調処理はしません。Sonoraへの依存はRust側の`AudioEnhancer`トレイトに閉じ込めているため、必要になれば公式WebRTC APMバックエンドへ交換できます。話者分離で未加工音声が必要な場合は復旧用トラックを参照できます。
+
 ## 録音について
 
 正常終了した録音は `Music/Mutsuna Echo` にM4Aとして保存されます。録音中は2秒ごと（macOSは最初の1秒、その後約10秒）に内部フラグメントを確定し、正常終了後に1本のファイルとして扱います。録音と文字起こしは分離されているため、APIキーなしでも録音できます。
@@ -92,6 +95,7 @@ cargo clippy --all-targets -- -D warnings
 | `release-windows` | `TAURI_SIGNING_PRIVATE_KEY`、必要な場合は`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
 | `release-macos` | Tauri署名鍵一式。Developer IDへ移行する場合はApple署名・Notarization用Secret一式も追加 |
 | `release-android` | AndroidアップロードKeystore用Secret一式、`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` |
+| `release-production` | GitHub Releaseを下書きから公開へ切り替える承認ゲート。Required reviewersを設定 |
 
 初回リリース前に、該当Environmentへ次のSecretを登録してください。Repository Secretへまとめて登録しないでください。
 
@@ -109,12 +113,12 @@ Google Playへの自動公開には、Google CloudでGoogle Play Developer API�
 
 GitHub Environment `release-android`のVariable `ANDROID_RELEASE_TRACK`には、製品版アクセスの承認前は`alpha`、承認後は`production`を設定します。失敗したAndroid公開だけを再実行する場合は、`v0.1.2-android-retry.1`のような再公開専用タグを作成します。この形式ではデスクトップJobをスキップし、元の`v0.1.2`をリリース名としてAndroid Jobだけを実行します。
 
-リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.2`は`1002`になります。
+リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。タグのpushでWindows/macOS成果物をGitHub Releaseの下書きへ追加し、Androidを指定トラックへ配信します。すべて成功後、`release-production`の承認によって下書きが公開されます。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.3`は`1003`になります。
 
 ```powershell
-node scripts/verify-release-version.mjs v0.1.2
-git tag v0.1.2
-git push origin v0.1.2
+node scripts/verify-release-version.mjs v0.1.3
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 ### macOS署名モード

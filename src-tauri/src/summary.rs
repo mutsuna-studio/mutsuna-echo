@@ -169,6 +169,39 @@ pub(crate) struct GenerateSummaryRequest {
     model_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FormatTranscriptRequest {
+    meeting_id: String,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptFormattingChange {
+    segment_id: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TranscriptFormattingContent {
+    changes: Vec<TranscriptFormattingChange>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptFormattingResult {
+    transcription_id: String,
+    source_revision: u64,
+    method: &'static str,
+    provider: Option<String>,
+    model: Option<String>,
+    changes: Vec<TranscriptFormattingChange>,
+    warning: Option<String>,
+}
+
 pub(crate) async fn providers(app: AppHandle) -> Vec<SummaryProviderDefinition> {
     tauri::async_runtime::spawn_blocking(move || {
         ACP_AGENTS
@@ -270,6 +303,14 @@ pub(crate) async fn generate_selected_summary(
     generate(app, request).await
 }
 
+#[tauri::command]
+pub(crate) async fn format_selected_transcript(
+    app: AppHandle,
+    request: FormatTranscriptRequest,
+) -> Result<TranscriptFormattingResult, String> {
+    format_transcript(app, request).await
+}
+
 pub(crate) fn status(app: &AppHandle, meeting_id: &str) -> Result<SummaryStatus, String> {
     crate::meeting_store::validate_meeting_id(meeting_id)?;
     let snapshot = crate::transcript_store::selected_summary_snapshot(app, meeting_id)?;
@@ -329,6 +370,119 @@ pub(crate) async fn generate(
     }
     write_summary(&app, &generated)?;
     status(&app, &request.meeting_id)
+}
+
+async fn format_transcript(
+    app: AppHandle,
+    request: FormatTranscriptRequest,
+) -> Result<TranscriptFormattingResult, String> {
+    crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
+    let original = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
+        .ok_or_else(|| "先に文字起こしを作成してください。".to_string())?;
+
+    let mut formatted = original.clone();
+    for segment in &mut formatted.segments {
+        segment.text = mechanically_format_transcript_text(&segment.text);
+    }
+
+    let mut method = "mechanical";
+    let mut provider = None;
+    let mut model = None;
+    let mut warning = None;
+
+    if let (Some(provider_id), Some(model_id)) =
+        (request.provider_id.as_deref(), request.model_id.as_deref())
+    {
+        match generate_transcript_formatting_with_acp(&app, &formatted, provider_id, model_id).await
+        {
+            Ok((llm_changes, resolved_model)) => {
+                apply_formatting_changes(&mut formatted, &llm_changes)?;
+                for segment in &mut formatted.segments {
+                    segment.text = mechanically_format_transcript_text(&segment.text);
+                }
+                method = "mechanicalAndLlm";
+                provider = Some(provider_id.to_string());
+                model = Some(resolved_model);
+            }
+            Err(error) => {
+                warning = Some(format!(
+                    "LLMによる校正を適用できなかったため、機械的な整形のみを適用しました: {error}"
+                ));
+            }
+        }
+    }
+
+    let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
+        .ok_or_else(|| "整形中に文字起こしが削除されました。".to_string())?;
+    if current.transcription_id != original.transcription_id
+        || current.revision != original.revision
+    {
+        return Err(
+            "整形中に文字起こしが変更されました。内容を確認して、もう一度整形してください。".into(),
+        );
+    }
+
+    let changes = original
+        .segments
+        .iter()
+        .zip(&formatted.segments)
+        .filter(|(before, after)| before.text != after.text)
+        .map(|(_, after)| TranscriptFormattingChange {
+            segment_id: after.segment_id.clone(),
+            text: after.text.clone(),
+        })
+        .collect();
+
+    Ok(TranscriptFormattingResult {
+        transcription_id: original.transcription_id,
+        source_revision: original.revision,
+        method,
+        provider,
+        model,
+        changes,
+        warning,
+    })
+}
+
+async fn generate_transcript_formatting_with_acp(
+    app: &AppHandle,
+    snapshot: &SummaryTranscriptSnapshot,
+    provider_id: &str,
+    model_id: &str,
+) -> Result<(Vec<TranscriptFormattingChange>, String), String> {
+    let agent = ACP_AGENTS
+        .iter()
+        .find(|agent| agent.id == provider_id)
+        .copied()
+        .ok_or_else(|| "選択した要約プロバイダーには対応していません。".to_string())?;
+    validate_model_id(model_id)?;
+    let executable =
+        resolve_agent_executable(app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
+    let snapshot = snapshot.clone();
+    let model_id = model_id.to_string();
+    let node_bin = managed_node_bin_directory(app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let prompt = build_transcript_formatting_prompt(&snapshot)?;
+        if prompt.len() > MAX_PROMPT_BYTES {
+            return Err("文字起こしが大きすぎるため整形できません。".into());
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "mutsuna-echo-format-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir(&work_dir)
+            .map_err(|error| format!("整形用の一時領域を作成できませんでした: {error}"))?;
+        let result = run_acp_agent(agent, executable, node_bin, &work_dir, &model_id, &prompt)
+            .and_then(|(output, model)| {
+                parse_transcript_formatting_content(&output, &snapshot)
+                    .map(|changes| (changes, model))
+            });
+        let _ = fs::remove_dir_all(&work_dir);
+        result
+    })
+    .await
+    .map_err(|_| "ACPエージェントの整形処理を完了できませんでした。".to_string())?
 }
 
 fn discover_models_with_acp(
@@ -813,6 +967,149 @@ fn build_prompt(snapshot: &SummaryTranscriptSnapshot) -> Result<String, String> 
     Ok(format!(
         "あなたは会議記録の編集者です。次の修正版文字起こしだけを根拠に、日本語の会議ノートを作成してください。外部情報、ファイル、Web、ツールを使わず、推測で事実を補わないでください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"overview\":\"簡潔な概要\",\"decisions\":[{{\"text\":\"決定事項\",\"sourceSegmentIds\":[\"segment id\"]}}],\"actionItems\":[{{\"assignee\":nullまたは文字列,\"text\":\"作業\",\"due\":nullまたは文字列,\"sourceSegmentIds\":[\"segment id\"]}}]}} とします。決定事項とアクション項目には根拠となる実在のsourceSegmentIdsを付け、該当項目がなければ空配列にしてください。\n\n文字起こしJSON:\n{transcript}"
     ))
+}
+
+fn mechanically_format_transcript_text(text: &str) -> String {
+    const FILLERS: [&str; 6] = ["えーと", "えっと", "ええと", "あのー", "あのう", "そのー"];
+    const BOUNDARIES: [char; 7] = ['。', '！', '？', '!', '?', '、', ','];
+    const COMMAS: [char; 3] = ['、', '，', ','];
+    const SENTENCE_ENDS: [char; 5] = ['。', '！', '？', '!', '?'];
+
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut changed = false;
+    while index < text.len() {
+        let at_boundary = output
+            .chars()
+            .rev()
+            .find(|character| !character.is_whitespace())
+            .is_none_or(|character| BOUNDARIES.contains(&character));
+        let filler = at_boundary
+            .then(|| {
+                FILLERS
+                    .iter()
+                    .find(|filler| text[index..].starts_with(**filler))
+            })
+            .flatten();
+        if let Some(filler) = filler {
+            while output.ends_with(char::is_whitespace) {
+                output.pop();
+            }
+            index += filler.len();
+            changed = true;
+            while let Some(character) = text[index..].chars().next() {
+                if character.is_whitespace() || COMMAS.contains(&character) {
+                    index += character.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if let Some(next) = text[index..].chars().next() {
+                if SENTENCE_ENDS.contains(&next) {
+                    if output
+                        .chars()
+                        .last()
+                        .is_some_and(|last| COMMAS.contains(&last))
+                    {
+                        output.pop();
+                    } else if output.is_empty() {
+                        index += next.len_utf8();
+                    }
+                }
+            }
+            continue;
+        }
+
+        let character = text[index..]
+            .chars()
+            .next()
+            .expect("index remains on a character boundary");
+        output.push(character);
+        index += character.len_utf8();
+    }
+
+    if changed {
+        output.trim().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn build_transcript_formatting_prompt(
+    snapshot: &SummaryTranscriptSnapshot,
+) -> Result<String, String> {
+    let transcript = serde_json::to_string(snapshot)
+        .map_err(|error| format!("文字起こしを整形用に変換できませんでした: {error}"))?;
+    Ok(format!(
+        "あなたは会議文字起こしの校正者です。次の文字起こしだけを根拠に、明白な誤字脱字、音声認識の明白な誤り、句読点だけを保守的に修正してください。言い換え、要約、情報の追加、話者の意図の変更、固有名詞の推測修正は禁止します。変更が必要な発話だけを返してください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"changes\":[{{\"segmentId\":\"実在するsegment id\",\"text\":\"修正後の発話全文\"}}]}} とし、変更がなければchangesを空配列にしてください。segmentIdの重複や存在しないIDを含めないでください。\n\n文字起こしJSON:\n{transcript}"
+    ))
+}
+
+fn parse_transcript_formatting_content(
+    output: &str,
+    snapshot: &SummaryTranscriptSnapshot,
+) -> Result<Vec<TranscriptFormattingChange>, String> {
+    let trimmed = output.trim();
+    let without_prefix = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let json = without_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_prefix)
+        .trim();
+    let content: TranscriptFormattingContent = serde_json::from_str(json).map_err(|error| {
+        format!("ACPエージェントの整形結果をJSONとして解析できませんでした: {error}")
+    })?;
+    validate_formatting_changes(&content.changes, snapshot)?;
+    Ok(content.changes)
+}
+
+fn validate_formatting_changes(
+    changes: &[TranscriptFormattingChange],
+    snapshot: &SummaryTranscriptSnapshot,
+) -> Result<(), String> {
+    if changes.len() > snapshot.segments.len() {
+        return Err("整形結果の変更件数が不正です。".into());
+    }
+    let known_ids: HashSet<&str> = snapshot
+        .segments
+        .iter()
+        .map(|segment| segment.segment_id.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut total_bytes = 0usize;
+    for change in changes {
+        if !known_ids.contains(change.segment_id.as_str()) {
+            return Err("整形結果に存在しない文字起こし区間が含まれています。".into());
+        }
+        if !seen.insert(change.segment_id.as_str()) {
+            return Err("整形結果に同じ文字起こし区間が重複しています。".into());
+        }
+        total_bytes = total_bytes.saturating_add(change.text.len());
+        if change.text.len() > MAX_SUMMARY_BYTES as usize
+            || total_bytes > MAX_SUMMARY_BYTES as usize
+        {
+            return Err("整形結果が大きすぎます。".into());
+        }
+    }
+    Ok(())
+}
+
+fn apply_formatting_changes(
+    snapshot: &mut SummaryTranscriptSnapshot,
+    changes: &[TranscriptFormattingChange],
+) -> Result<(), String> {
+    validate_formatting_changes(changes, snapshot)?;
+    for change in changes {
+        let segment = snapshot
+            .segments
+            .iter_mut()
+            .find(|segment| segment.segment_id == change.segment_id)
+            .ok_or_else(|| "整形対象の文字起こし区間が見つかりません。".to_string())?;
+        segment.text = change.text.clone();
+    }
+    Ok(())
 }
 
 fn parse_generated_content(
@@ -1487,6 +1784,71 @@ mod tests {
         assert!(prompt.contains("修正版です"));
         assert!(prompt.contains("岡本"));
         assert!(prompt.contains("segment-1"));
+    }
+
+    #[test]
+    fn mechanically_removes_fillers_and_adjacent_delimiters() {
+        assert_eq!(
+            mechanically_format_transcript_text(" えーと、今日は会議です。"),
+            "今日は会議です。"
+        );
+        assert_eq!(
+            mechanically_format_transcript_text("はい、 えっと、次へ進みます。"),
+            "はい、次へ進みます。"
+        );
+        assert_eq!(
+            mechanically_format_transcript_text("確認します。 ええと 次の項目です。"),
+            "確認します。次の項目です。"
+        );
+    }
+
+    #[test]
+    fn mechanical_formatting_preserves_meaningful_and_embedded_words() {
+        for text in [
+            "あの人に確認します。",
+            "その方法で進めます。",
+            "これはえっと違います。",
+            "English text",
+        ] {
+            assert_eq!(mechanically_format_transcript_text(text), text);
+        }
+    }
+
+    #[test]
+    fn mechanically_handles_repeated_and_filler_only_segments() {
+        assert_eq!(
+            mechanically_format_transcript_text("えーと、あのー、そのー。"),
+            ""
+        );
+        assert_eq!(mechanically_format_transcript_text(""), "");
+    }
+
+    #[test]
+    fn parses_valid_transcript_formatting_changes() {
+        let changes = parse_transcript_formatting_content(
+            r#"{"changes":[{"segmentId":"segment-1","text":"修正後です"}]}"#,
+            &snapshot(),
+        )
+        .expect("formatting changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].text, "修正後です");
+    }
+
+    #[test]
+    fn rejects_unknown_or_duplicate_formatting_segments() {
+        let unknown = r#"{"changes":[{"segmentId":"unknown","text":"修正"}]}"#;
+        assert!(parse_transcript_formatting_content(unknown, &snapshot()).is_err());
+
+        let duplicate = r#"{"changes":[{"segmentId":"segment-1","text":"修正1"},{"segmentId":"segment-1","text":"修正2"}]}"#;
+        assert!(parse_transcript_formatting_content(duplicate, &snapshot()).is_err());
+    }
+
+    #[test]
+    fn formatting_prompt_forbids_invented_content() {
+        let prompt = build_transcript_formatting_prompt(&snapshot()).expect("formatting prompt");
+        assert!(prompt.contains("情報の追加"));
+        assert!(prompt.contains("固有名詞の推測修正"));
+        assert!(prompt.contains("修正版です"));
     }
 
     #[test]

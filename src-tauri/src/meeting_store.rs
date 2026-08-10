@@ -24,6 +24,8 @@ struct MeetingDocument {
     updated_at: String,
     title: String,
     audio: MeetingAudio,
+    #[serde(default)]
+    transcription_context: crate::transcription::context::MeetingTranscriptionContext,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -184,6 +186,37 @@ pub(crate) fn mark_updated(app: &AppHandle, meeting_id: &str) -> Result<(), Stri
     write_json_atomic(&path, &document)
 }
 
+pub(crate) fn transcription_context(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<crate::transcription::context::MeetingTranscriptionContext, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの文字起こしコンテキストを読み込めませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    Ok(document.transcription_context)
+}
+
+pub(crate) fn set_transcription_context(
+    app: &AppHandle,
+    meeting_id: &str,
+    context: crate::transcription::context::MeetingTranscriptionContext,
+) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの文字起こしコンテキストを保存できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let mut document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    document.transcription_context = context;
+    document.updated_at = chrono::Utc::now().to_rfc3339();
+    write_json_atomic(&path, &document)
+}
+
 pub(crate) fn rename_audio_metadata(
     app: &AppHandle,
     meeting_id: &str,
@@ -315,6 +348,7 @@ fn create_document(
             file_name,
             size_bytes: metadata.len(),
         },
+        transcription_context: Default::default(),
     };
     write_json_atomic(&directory.join(MEETING_FILE), &document)?;
     touch_local_state(local_root, meeting_id, audio_path, metadata)
@@ -564,7 +598,29 @@ mod tests {
     use super::{
         delete_meeting_in, list_stored_meetings_in, meeting_directory_in, read_json,
         remove_local_state_in, resolve_or_create_in, validate_meeting_id, LocalMeetingState,
+        MeetingDocument,
     };
+
+    #[test]
+    fn old_meeting_documents_default_to_empty_transcription_context() {
+        let meeting_id = uuid::Uuid::now_v7().to_string();
+        let document: MeetingDocument = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "id": meeting_id,
+            "createdAt": "2026-08-10T00:00:00Z",
+            "updatedAt": "2026-08-10T00:00:00Z",
+            "title": "Meeting",
+            "audio": {
+                "contentSha256": "hash",
+                "fileName": "meeting.m4a",
+                "sizeBytes": 100
+            }
+        }))
+        .expect("deserialize legacy meeting");
+        assert!(document.transcription_context.background.is_empty());
+        assert!(document.transcription_context.terms.is_empty());
+        assert!(document.transcription_context.use_global);
+    }
 
     #[test]
     fn uuid_v7_is_required_for_meeting_paths() {

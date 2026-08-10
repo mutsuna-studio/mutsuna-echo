@@ -3,6 +3,10 @@
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Settings from "@lucide/svelte/icons/settings";
   import AudioLines from "@lucide/svelte/icons/audio-lines";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
+  import Info from "@lucide/svelte/icons/info";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
   import { Badge } from "@mutsuna/ui/badge";
   import { Button } from "@mutsuna/ui/button";
   import * as Sidebar from "@mutsuna/ui/sidebar";
@@ -10,15 +14,19 @@
   import type { RecentMeetingSummary } from "../types/recording";
 
   type AppSection = "meetings" | "recording" | "settings";
+  type SettingsPane = "general" | "transcription" | "summary" | "usage";
   type MeetingGroup = { label: string; meetings: RecentMeetingSummary[] };
 
   type Props = {
     section: AppSection;
     meetings: readonly RecentMeetingSummary[];
     selectedMeetingId: string | null;
+    settingsPane: SettingsPane;
+    settingsPreview?: boolean;
     loading: boolean;
     busy: boolean;
     onNavigate: (section: AppSection) => void;
+    onSelectSettingsPane: (pane: SettingsPane) => void;
     onSelectMeeting: (meeting: RecentMeetingSummary) => void;
     onRefreshMeetings: () => void;
   };
@@ -27,9 +35,12 @@
     section,
     meetings,
     selectedMeetingId,
+    settingsPane,
+    settingsPreview = false,
     loading,
     busy,
     onNavigate,
+    onSelectSettingsPane,
     onSelectMeeting,
     onRefreshMeetings
   }: Props = $props();
@@ -67,6 +78,11 @@
     sidebar.setOpenMobile(false);
   }
 
+  function selectSettingsPane(pane: SettingsPane) {
+    onSelectSettingsPane(pane);
+    sidebar.setOpenMobile(false);
+  }
+
   function time(meeting: RecentMeetingSummary): string {
     return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(meeting.occurredAtUnixMs);
   }
@@ -79,67 +95,118 @@
       <strong>Mutsuna Echo</strong>
     </div>
 
-    <Button class="new-meeting" size="lg" type="button" icon={Mic} onclick={() => navigateTo("recording")}>
-      新しい録音
-    </Button>
+    {#if section === "settings"}
+      {#if !settingsPreview}
+        <button class="settings-back" type="button" onclick={() => navigateTo("meetings")}>
+          <ArrowLeft aria-hidden="true" /><span>会議へ戻る</span>
+        </button>
+      {/if}
 
-    <section class="recent-meetings" aria-labelledby="recent-meetings-heading">
-      <header>
-        <div>
-          <strong id="recent-meetings-heading">最近の会議</strong>
-          <span>{meetings.length}件</span>
+      <section class="settings-menu" aria-labelledby="settings-menu-heading">
+        <h2 id="settings-menu-heading">設定</h2>
+        <nav aria-label="設定カテゴリ">
+          {#if !settingsPreview}
+            <button class:active={settingsPane === "general"} type="button" aria-current={settingsPane === "general" ? "page" : undefined} onclick={() => selectSettingsPane("general")}>
+              <Info aria-hidden="true" />
+              <span><strong>一般</strong></span>
+            </button>
+            <button class:active={settingsPane === "transcription"} type="button" aria-current={settingsPane === "transcription" ? "page" : undefined} onclick={() => selectSettingsPane("transcription")}>
+              <AudioLines aria-hidden="true" />
+              <span><strong>文字起こし</strong></span>
+            </button>
+          {/if}
+          <button class:active={settingsPane === "summary"} type="button" aria-current={settingsPane === "summary" ? "page" : undefined} onclick={() => selectSettingsPane("summary")}>
+            <Sparkles aria-hidden="true" />
+            <span><strong>AI会議ノート</strong></span>
+          </button>
+          {#if !settingsPreview}
+            <button class:active={settingsPane === "usage"} type="button" aria-current={settingsPane === "usage" ? "page" : undefined} onclick={() => selectSettingsPane("usage")}>
+              <ChartNoAxesColumn aria-hidden="true" />
+              <span><strong>利用状況</strong></span>
+            </button>
+          {/if}
+        </nav>
+      </section>
+    {:else}
+      <Button class="new-meeting" size="lg" type="button" icon={Mic} onclick={() => navigateTo("recording")}>
+        新しい録音
+      </Button>
+
+      <section class="recent-meetings" aria-labelledby="recent-meetings-heading">
+        <header>
+          <div>
+            <strong id="recent-meetings-heading">最近の会議</strong>
+            <span>{meetings.length}件</span>
+          </div>
+          <Button size="icon-sm" variant="ghost" type="button" icon={RefreshCw} aria-label="会議一覧を更新" title="更新" onclick={onRefreshMeetings} loading={loading} disabled={busy || loading} />
+        </header>
+
+        <div class="meeting-list">
+          {#if loading && meetings.length === 0}
+            <p class="library-message" role="status">会議を読み込んでいます…</p>
+          {:else if meetings.length === 0}
+            <p class="library-message">録音または文字起こし済みの会議はまだありません。</p>
+          {:else}
+            {#each groups as group (group.label)}
+              <section class="meeting-group" aria-labelledby={`meeting-group-${group.label}`}>
+                <h2 id={`meeting-group-${group.label}`}>{group.label}</h2>
+                {#each group.meetings as meeting (meeting.meetingId)}
+                  <button
+                    class:selected={meeting.meetingId === selectedMeetingId}
+                    class="meeting-row"
+                    type="button"
+                    onclick={() => selectMeeting(meeting)}
+                    disabled={busy}
+                    title={meeting.audioAvailable ? meeting.fileName : `${meeting.title}（音声なし）`}
+                  >
+                    <strong>{meeting.title}</strong>
+                    <span>{time(meeting)} · {formatFileSize(meeting.sizeBytes)}</span>
+                    <span class="meeting-badges">
+                      <Badge variant="secondary">{meeting.source === "recording" ? "録音" : "取込"}</Badge>
+                      {#if meeting.transcriptProviders.length > 0}<small>文字起こし済み</small>{/if}
+                      {#if !meeting.audioAvailable}<small class="missing-audio">音声なし</small>{/if}
+                    </span>
+                  </button>
+                {/each}
+              </section>
+            {/each}
+          {/if}
         </div>
-        <Button size="icon-sm" variant="ghost" type="button" icon={RefreshCw} aria-label="会議一覧を更新" title="更新" onclick={onRefreshMeetings} loading={loading} disabled={busy || loading} />
-      </header>
+      </section>
 
-      <div class="meeting-list">
-        {#if loading && meetings.length === 0}
-          <p class="library-message" role="status">会議を読み込んでいます…</p>
-        {:else if meetings.length === 0}
-          <p class="library-message">録音または文字起こし済みの会議はまだありません。</p>
-        {:else}
-          {#each groups as group (group.label)}
-            <section class="meeting-group" aria-labelledby={`meeting-group-${group.label}`}>
-              <h2 id={`meeting-group-${group.label}`}>{group.label}</h2>
-              {#each group.meetings as meeting (meeting.meetingId)}
-                <button
-                  class:selected={meeting.meetingId === selectedMeetingId}
-                  class="meeting-row"
-                  type="button"
-                  onclick={() => selectMeeting(meeting)}
-                  disabled={busy}
-                  title={meeting.audioAvailable ? meeting.fileName : `${meeting.title}（音声なし）`}
-                >
-                  <strong>{meeting.title}</strong>
-                  <span>{time(meeting)} · {formatFileSize(meeting.sizeBytes)}</span>
-                  <span class="meeting-badges">
-                    <Badge variant="secondary">{meeting.source === "recording" ? "録音" : "取込"}</Badge>
-                    {#if meeting.transcriptProviders.length > 0}<small>文字起こし済み</small>{/if}
-                    {#if !meeting.audioAvailable}<small class="missing-audio">音声なし</small>{/if}
-                  </span>
-                </button>
-              {/each}
-            </section>
-          {/each}
-        {/if}
-      </div>
-    </section>
-
-    <footer>
-      <button class:active={section === "settings"} type="button" aria-current={section === "settings" ? "page" : undefined} onclick={() => navigateTo("settings")}>
-        <Settings aria-hidden="true" /><span>設定</span>
-      </button>
-    </footer>
+      <footer>
+        <button type="button" onclick={() => navigateTo("settings")}>
+          <Settings aria-hidden="true" /><span>設定</span>
+        </button>
+      </footer>
+    {/if}
   </div>
 </Sidebar.Root>
 
 <style>
-  .app-sidebar-content { display: flex; height: 100%; min-width: 0; flex-direction: column; gap: 18px; padding: calc(24px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px)); border-right: 1px solid var(--border); background: color-mix(in oklch, var(--primary) 3%, var(--background)); }
+  .app-sidebar-content { display: flex; height: 100%; min-width: 0; flex-direction: column; gap: 16px; padding: calc(20px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); border-right: 1px solid var(--border); background: color-mix(in oklch, var(--muted) 44%, var(--background)); }
   .brand { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 0 8px; }
   .brand strong { overflow: hidden; font-size: 0.98rem; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
   .brand-mark { display: grid; width: 30px; height: 30px; flex: none; place-items: center; color: var(--primary); }
   .brand-mark :global(svg) { width: 28px; height: 28px; stroke-width: 1.8; }
   :global(.new-meeting) { width: 100%; justify-content: center; }
+
+  .settings-back { display: flex; width: 100%; height: 38px; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--muted-foreground); background: transparent; cursor: pointer; font: inherit; font-size: 0.76rem; font-weight: 620; text-align: left; }
+  .settings-back:hover { color: var(--foreground); background: var(--muted); }
+  .settings-back:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .settings-back :global(svg) { width: 16px; height: 16px; stroke-width: 1.8; }
+
+  .settings-menu { min-height: 0; flex: 1; padding-top: 4px; }
+  .settings-menu > h2 { margin: 0 10px 9px; color: var(--muted-foreground); font-size: 0.67rem; font-weight: 750; letter-spacing: 0.08em; }
+  .settings-menu nav { display: grid; gap: 4px; }
+  .settings-menu nav button { display: grid; width: 100%; min-width: 0; min-height: 40px; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 10px; border: 0; border-radius: 7px; color: var(--foreground); background: transparent; cursor: pointer; font: inherit; text-align: left; }
+  .settings-menu nav button:hover { background: var(--muted); }
+  .settings-menu nav button.active { color: color-mix(in oklch, var(--primary) 88%, var(--foreground)); background: color-mix(in oklch, var(--primary) 11%, var(--background)); }
+  .settings-menu nav button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .settings-menu nav button > :global(svg) { width: 17px; height: 17px; justify-self: center; color: var(--muted-foreground); stroke-width: 1.8; }
+  .settings-menu nav button.active > :global(svg) { color: var(--primary); }
+  .settings-menu nav button span { display: grid; min-width: 0; gap: 2px; }
+  .settings-menu nav button strong { overflow: hidden; font-size: 0.8rem; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
 
   .recent-meetings { display: grid; min-height: 0; flex: 1; grid-template-rows: auto minmax(0, 1fr); }
   header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 7px 8px; }
@@ -165,7 +232,6 @@
   footer { padding-top: 8px; border-top: 1px solid var(--border); }
   footer button { display: flex; width: 100%; height: 42px; align-items: center; gap: 11px; padding: 0 12px; border: 0; border-radius: 9px; color: var(--muted-foreground); background: transparent; cursor: pointer; font: inherit; font-size: 0.88rem; font-weight: 650; text-align: left; }
   footer button:hover { color: var(--foreground); background: var(--muted); }
-  footer button.active { color: var(--primary); background: color-mix(in oklch, var(--primary) 9%, var(--background)); }
   footer button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
   footer button :global(svg) { width: 18px; height: 18px; flex: none; stroke-width: 1.8; }
 

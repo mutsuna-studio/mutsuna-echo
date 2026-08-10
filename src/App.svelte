@@ -11,6 +11,7 @@
   } from "@mutsuna/ui/sonner";
   import { AdminShellFrame } from "@mutsuna/ui/admin-shell-frame";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
+  import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import AppSidebar from "./lib/components/AppSidebar.svelte";
@@ -22,6 +23,7 @@
   import SummaryAgentManager from "./lib/components/SummaryAgentManager.svelte";
   import SummaryDefaultsSettings from "./lib/components/SummaryDefaultsSettings.svelte";
   import SonioxUsagePanel from "./lib/components/SonioxUsagePanel.svelte";
+  import TranscriptionContextEditor from "./lib/components/TranscriptionContextEditor.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
     getTranscriptionProvider,
@@ -40,11 +42,15 @@
     TranscriptionResult,
     TranscriptionRunDetail,
     TranscriptionRunSummary,
+    TranscriptFormattingResult,
     TranscriptSegmentTextChange,
     TranscriptSaveState,
     TranscriptionSession,
     TranscriptionUsage,
-    SonioxUsage
+    SonioxUsage,
+    ContextSaveState,
+    GlobalTranscriptionContextSettings,
+    MeetingTranscriptionContext
   } from "./lib/types/transcript";
 
   const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
@@ -56,9 +62,9 @@
   const API_KEY_SAVE_TIMEOUT_MS = 30_000;
   const summarySettingsPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "summary-settings";
   const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
-    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
+    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: false }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
   ];
   const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
     {
@@ -85,10 +91,17 @@
     }
   ];
   type AppSection = "meetings" | "recording" | "settings";
+  type SettingsPane = "general" | "transcription" | "summary" | "usage";
   type TranscriptReplacementUndo = {
     transcriptionId: string;
     changes: TranscriptSegmentTextChange[];
   };
+  type ContextDraft = { background: string; termsText: string };
+  type MeetingContextDraft = ContextDraft & { useGlobal: boolean };
+
+  function termsFromText(value: string): string[] {
+    return [...new Set(value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean))];
+  }
 
   function savedTranscriptionProvider(): TranscriptionProviderId {
     try {
@@ -138,6 +151,7 @@
   let loading = $state(!summarySettingsPreview);
   let toasterPosition = $state<"top-right" | "bottom-center">("top-right");
   let section = $state<AppSection>(summarySettingsPreview ? "settings" : "meetings");
+  let settingsPane = $state<SettingsPane>(summarySettingsPreview ? "summary" : "general");
   let meetings = $state.raw<RecentMeetingSummary[]>([]);
   let meetingsLoading = $state(false);
   let meetingBusy = $state(false);
@@ -154,6 +168,13 @@
   let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
+  let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [] });
+  let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "" });
+  let globalContextSaveState = $state<ContextSaveState>("saved");
+  let globalContextLoading = $state(!summarySettingsPreview);
+  let meetingContextDraft = $state.raw<MeetingContextDraft | null>(null);
+  let meetingContextSaveState = $state<ContextSaveState>("saved");
+  let meetingContextLoading = $state(false);
   let summaryProviders = $state.raw<SummaryProviderDefinition[]>(summarySettingsPreview ? SUMMARY_SETTINGS_PREVIEW_PROVIDERS : []);
   let summaryDefaultProviderId = $state(savedSummaryProviderId);
   let summaryDefaultModelId = $state(savedSummaryModelId);
@@ -163,6 +184,7 @@
   let summaryModelsLoading = $state(false);
   let summaryStatus = $state.raw<SummaryStatus | null>(null);
   let summaryGenerating = $state(false);
+  let transcriptFormatting = $state(false);
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
   let transcript = $state.raw<EditableTranscript | null>(null);
   let transcriptionRuns = $state.raw<TranscriptionRunSummary[]>([]);
@@ -183,6 +205,13 @@
   let OverlayPreviewControls = $state<Component | null>(null);
   let transcriptSaveTimer: number | null = null;
   let transcriptSavePromise: Promise<void> | null = null;
+  let globalContextSaveTimer: number | null = null;
+  let globalContextSavePromise: Promise<boolean> | null = null;
+  let globalContextRevision = 0;
+  let meetingContextSaveTimer: number | null = null;
+  let meetingContextSavePromise: Promise<boolean> | null = null;
+  let meetingContextRevision = 0;
+  let meetingContextRequestId = 0;
   let transcriptReplacementUndo = $state.raw<TranscriptReplacementUndo | null>(null);
   let summaryModelRequestId = 0;
   let lastSummaryMeetingId = "";
@@ -228,10 +257,21 @@
   });
 
   const saving = $derived(savingProviderId !== null);
-  const busy = $derived(loading || saving || deleting || selecting || transcribing || recordingBusy || updating);
+  const busy = $derived(loading || saving || deleting || selecting || transcribing || transcriptFormatting || recordingBusy || updating);
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || updating);
   const currentProvider = $derived(
     getTranscriptionProvider(transcriptionProviders, transcriptionProvider)
+  );
+  const effectiveContextTerms = $derived.by(() => {
+    if (!globalContextSettings.contextEnabled) return [] as string[];
+    const terms = meetingContextDraft?.useGlobal === false
+      ? []
+      : termsFromText(globalContextDraft.termsText);
+    if (meetingContextDraft) terms.push(...termsFromText(meetingContextDraft.termsText));
+    return [...new Set(terms)];
+  });
+  const contextSurchargeActive = $derived(
+    transcriptionProvider === "elevenlabs" && effectiveContextTerms.length > 0
   );
   const hasApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
@@ -252,7 +292,14 @@
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
-  const canTranscribe = $derived(providerConfigured && selectedAudio !== null && !busy);
+  const canTranscribe = $derived(
+    providerConfigured
+      && selectedAudio !== null
+      && !busy
+      && !globalContextLoading
+      && !meetingContextLoading
+      && meetingContextSaveState !== "error"
+  );
   const selectedMeeting = $derived(
     meetings.find((meeting) => meeting.meetingId === selectedMeetingId) ?? null
   );
@@ -431,7 +478,8 @@
     meetingBusy = true;
     try {
       await flushTranscriptEdits();
-      if (transcriptSaveState === "error") return;
+      const contextSaved = await flushMeetingContext();
+      if (transcriptSaveState === "error" || !contextSaved) return;
       selectedAudio = await invoke<SelectedAudioFile | null>("select_meeting_audio", {
         meetingId: meeting.meetingId
       });
@@ -479,7 +527,8 @@
     meetingBusy = true;
     try {
       await flushTranscriptEdits();
-      if (transcriptSaveState === "error") return;
+      const contextSaved = await flushMeetingContext();
+      if (transcriptSaveState === "error" || !contextSaved) return;
       selectedAudio = null;
       await tick();
       await invoke("delete_meeting", { meetingId: meeting.meetingId, mode });
@@ -522,6 +571,12 @@
     }
     pushAppHistoryEntry();
     section = nextSection;
+  }
+
+  async function selectSettingsPane(pane: SettingsPane) {
+    settingsPane = pane;
+    await tick();
+    document.querySelector<HTMLElement>(".settings-detail-scroll")?.scrollTo({ top: 0 });
   }
 
   function startMobileRecording() {
@@ -666,6 +721,146 @@
     button.focus({ preventScroll: true });
   }
 
+  function setGlobalContextFromSettings(settings: GlobalTranscriptionContextSettings) {
+    globalContextSettings = settings;
+    globalContextDraft = { background: settings.background, termsText: settings.terms.join("\n") };
+    globalContextSaveState = "saved";
+  }
+
+  function updateGlobalContext(patch: Partial<ContextDraft> & { contextEnabled?: boolean }) {
+    if (patch.contextEnabled !== undefined) {
+      globalContextSettings = { ...globalContextSettings, contextEnabled: patch.contextEnabled };
+    }
+    globalContextDraft = {
+      background: patch.background ?? globalContextDraft.background,
+      termsText: patch.termsText ?? globalContextDraft.termsText
+    };
+    globalContextRevision += 1;
+    globalContextSaveState = "unsaved";
+    if (globalContextSaveTimer != null) window.clearTimeout(globalContextSaveTimer);
+    globalContextSaveTimer = window.setTimeout(() => void flushGlobalContext(), 600);
+  }
+
+  async function flushGlobalContext(): Promise<boolean> {
+    if (globalContextSaveTimer != null) {
+      window.clearTimeout(globalContextSaveTimer);
+      globalContextSaveTimer = null;
+    }
+    if (globalContextSavePromise) await globalContextSavePromise;
+    if (globalContextSaveState === "saved") return true;
+    if (globalContextSaveState === "error") return false;
+    const revision = globalContextRevision;
+    const request: GlobalTranscriptionContextSettings = {
+      contextEnabled: globalContextSettings.contextEnabled,
+      background: globalContextDraft.background,
+      terms: termsFromText(globalContextDraft.termsText)
+    };
+    globalContextSaveState = "saving";
+    const saving = invoke<GlobalTranscriptionContextSettings>("set_global_transcription_context", { settings: request })
+      .then((saved) => {
+        if (revision === globalContextRevision) setGlobalContextFromSettings(saved);
+        else globalContextSaveState = "unsaved";
+        return true;
+      })
+      .catch((error) => {
+        if (revision === globalContextRevision) globalContextSaveState = "error";
+        showError(errorText(error));
+        return false;
+      });
+    globalContextSavePromise = saving;
+    const succeeded = await saving;
+    globalContextSavePromise = null;
+    return revision !== globalContextRevision ? flushGlobalContext() : succeeded;
+  }
+
+  async function loadMeetingContext(meetingId: string) {
+    const requestId = ++meetingContextRequestId;
+    meetingContextLoading = true;
+    meetingContextSaveState = "saved";
+    try {
+      const context = await invoke<MeetingTranscriptionContext>("get_meeting_transcription_context", { meetingId });
+      if (requestId !== meetingContextRequestId || meetingId !== selectedMeetingId) return;
+      meetingContextDraft = {
+        background: context.background,
+        termsText: context.terms.join("\n"),
+        useGlobal: context.useGlobal
+      };
+    } catch (error) {
+      if (requestId === meetingContextRequestId) {
+        meetingContextDraft = null;
+        meetingContextSaveState = "error";
+        showError(errorText(error));
+      }
+    } finally {
+      if (requestId === meetingContextRequestId) meetingContextLoading = false;
+    }
+  }
+
+  function updateMeetingContext(patch: Partial<MeetingContextDraft>) {
+    if (!meetingContextDraft) return;
+    meetingContextDraft = { ...meetingContextDraft, ...patch };
+    meetingContextRevision += 1;
+    meetingContextSaveState = "unsaved";
+    if (meetingContextSaveTimer != null) window.clearTimeout(meetingContextSaveTimer);
+    meetingContextSaveTimer = window.setTimeout(() => void flushMeetingContext(), 600);
+  }
+
+  async function flushMeetingContext(): Promise<boolean> {
+    if (meetingContextSaveTimer != null) {
+      window.clearTimeout(meetingContextSaveTimer);
+      meetingContextSaveTimer = null;
+    }
+    if (meetingContextSavePromise) await meetingContextSavePromise;
+    if (!selectedMeetingId) return true;
+    if (meetingContextSaveState === "error") return false;
+    if (!meetingContextDraft || meetingContextSaveState === "saved") return true;
+    const meetingId = selectedMeetingId;
+    const revision = meetingContextRevision;
+    const request: MeetingTranscriptionContext = {
+      background: meetingContextDraft.background,
+      terms: termsFromText(meetingContextDraft.termsText),
+      useGlobal: meetingContextDraft.useGlobal
+    };
+    meetingContextSaveState = "saving";
+    const saving = invoke<MeetingTranscriptionContext>("set_meeting_transcription_context", { meetingId, context: request })
+      .then((saved) => {
+        if (revision === meetingContextRevision && meetingId === selectedMeetingId) {
+          meetingContextDraft = {
+            background: saved.background,
+            termsText: saved.terms.join("\n"),
+            useGlobal: saved.useGlobal
+          };
+          meetingContextSaveState = "saved";
+        } else if (meetingId === selectedMeetingId) {
+          meetingContextSaveState = "unsaved";
+        }
+        return true;
+      })
+      .catch((error) => {
+        if (meetingId === selectedMeetingId && revision === meetingContextRevision) meetingContextSaveState = "error";
+        showError(errorText(error));
+        return false;
+      });
+    meetingContextSavePromise = saving;
+    const succeeded = await saving;
+    meetingContextSavePromise = null;
+    return meetingId === selectedMeetingId && revision !== meetingContextRevision
+      ? flushMeetingContext()
+      : succeeded;
+  }
+
+  $effect(() => {
+    const meetingId = selectedMeetingId;
+    if (summarySettingsPreview) return;
+    if (!meetingId) {
+      meetingContextRequestId += 1;
+      meetingContextDraft = null;
+      meetingContextLoading = false;
+      return;
+    }
+    void loadMeetingContext(meetingId);
+  });
+
   $effect(() => {
     if (summarySettingsPreview) return;
     let cancelled = false;
@@ -681,7 +876,7 @@
             if (!cancelled) transcriptionProgress = payload;
           })
         ]);
-        const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings] = await Promise.all([
+        const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<SummaryProviderDefinition[]>("get_summary_providers"),
           invoke<TranscriptionSession>("get_transcription_session"),
@@ -691,10 +886,16 @@
           invoke<RecentMeetingSummary[]>("list_recent_meetings").catch((error) => {
             showError(errorText(error));
             return [];
+          }),
+          invoke<GlobalTranscriptionContextSettings>("get_global_transcription_context").catch((error) => {
+            showError(errorText(error));
+            return { contextEnabled: false, background: "", terms: [] };
           })
         ]);
         if (cancelled) return;
         transcriptionProviders = nextProviders;
+        setGlobalContextFromSettings(nextGlobalContext);
+        globalContextLoading = false;
         summaryProviders = nextSummaryProviders;
         normalizeSummaryProviderSelections();
         void refreshSummaryModels(summaryProviderId);
@@ -717,6 +918,7 @@
       } catch (error) {
         showError(errorText(error));
       } finally {
+        globalContextLoading = false;
         loading = false;
       }
     })();
@@ -762,9 +964,13 @@
   });
 
   $effect(() => {
-    const flushBeforeLeaving = () => void flushTranscriptEdits();
+    const flushBeforeLeaving = () => {
+      void flushTranscriptEdits();
+      void flushGlobalContext();
+      void flushMeetingContext();
+    };
     const flushWhenHidden = () => {
-      if (document.visibilityState === "hidden") void flushTranscriptEdits();
+      if (document.visibilityState === "hidden") flushBeforeLeaving();
     };
     window.addEventListener("beforeunload", flushBeforeLeaving);
     document.addEventListener("visibilitychange", flushWhenHidden);
@@ -828,7 +1034,8 @@
     selecting = true;
     try {
       await flushTranscriptEdits();
-      if (transcriptSaveState === "error") return null;
+      const contextSaved = await flushMeetingContext();
+      if (transcriptSaveState === "error" || !contextSaved) return null;
       const selected = await invoke<SelectedAudioFile | null>("select_audio_file");
       if (selected) {
         selectedAudio = selected;
@@ -848,7 +1055,14 @@
     if (!canTranscribe) return;
 
     await flushTranscriptEdits();
-    if (transcriptSaveState === "error") return;
+    const [globalContextSaved, meetingContextSaved] = await Promise.all([
+      flushGlobalContext(),
+      flushMeetingContext()
+    ]);
+    if (transcriptSaveState === "error" || !globalContextSaved || !meetingContextSaved) {
+      showWarningToast("コンテキストを保存できていません。", "入力内容を確認してから再試行してください。");
+      return;
+    }
     transcribing = true;
     transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
     try {
@@ -910,7 +1124,8 @@
 
   async function handleRecordedAudio(audio: SelectedAudioFile) {
     await flushTranscriptEdits();
-    if (transcriptSaveState === "error") return;
+    const contextSaved = await flushMeetingContext();
+    if (transcriptSaveState === "error" || !contextSaved) return;
     selectedAudio = audio;
     selectedMeetingId = audio.meetingId;
     await restoreTranscriptionHistory();
@@ -987,7 +1202,7 @@
   }
 
   async function generateSummary() {
-    if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating) return;
+    if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating || transcriptFormatting) return;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
@@ -1085,7 +1300,10 @@
     return transcriptSaveState === "error";
   }
 
-  async function replaceTranscriptSegments(changes: TranscriptSegmentTextChange[]): Promise<boolean> {
+  async function replaceTranscriptSegments(
+    changes: TranscriptSegmentTextChange[],
+    successMessage?: string
+  ): Promise<boolean> {
     await flushTranscriptEdits();
     if (transcriptSaveState === "error" || !transcript || !selectedTranscriptionRun) return false;
 
@@ -1109,8 +1327,55 @@
       transcriptReplacementUndo = null;
       return false;
     }
-    showSuccessToast(effectiveChanges.length === 1 ? "文字起こしを置換しました。" : "文字起こしを一括置換しました。");
+    showSuccessToast(successMessage ?? (effectiveChanges.length === 1 ? "文字起こしを置換しました。" : "文字起こしを一括置換しました。"));
     return true;
+  }
+
+  async function formatTranscript(): Promise<void> {
+    const run = selectedTranscriptionRun;
+    if (!selectedMeetingId || !run || transcriptFormatting || summaryGenerating) return;
+    await flushTranscriptEdits();
+    if (transcriptSaveState === "error" || !selectedTranscriptionRun) return;
+
+    const sourceTranscriptionId = selectedTranscriptionRun.transcriptionId;
+    const sourceRevision = selectedTranscriptionRun.revision;
+    const provider = summaryProviders.find((candidate) =>
+      candidate.id === summaryProviderId && candidate.ready
+    );
+    const useLlm = !summaryModelsLoading
+      && Boolean(provider?.models.some((model) => model.id === summaryModelId));
+
+    transcriptFormatting = true;
+    try {
+      const result = await invoke<TranscriptFormattingResult>("format_selected_transcript", {
+        request: {
+          meetingId: selectedMeetingId,
+          providerId: useLlm ? summaryProviderId : null,
+          modelId: useLlm ? summaryModelId : null
+        }
+      });
+      if (selectedTranscriptionRun?.transcriptionId !== sourceTranscriptionId
+        || selectedTranscriptionRun.revision !== sourceRevision
+        || result.transcriptionId !== sourceTranscriptionId
+        || result.sourceRevision !== sourceRevision) {
+        showError("整形中に文字起こしが変更されました。内容を確認して、もう一度整形してください。");
+        return;
+      }
+      if (result.changes.length === 0) {
+        showSuccessToast("整形する箇所はありませんでした。");
+      } else {
+        const method = result.method === "mechanicalAndLlm" ? "機械整形とLLM校正" : "機械整形";
+        await replaceTranscriptSegments(
+          result.changes,
+          `${result.changes.length.toLocaleString("ja-JP")}件の発話を${method}しました。`
+        );
+      }
+      if (result.warning) showWarningToast("LLM校正を省略しました。", result.warning);
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      transcriptFormatting = false;
+    }
   }
 
   async function undoTranscriptReplacement(): Promise<void> {
@@ -1121,7 +1386,7 @@
     transcriptReplacementUndo = null;
     queueTranscriptChanges(undo.changes);
     await flushTranscriptEdits();
-    if (!transcriptSaveFailed()) showSuccessToast("一括置換を元に戻しました。");
+    if (!transcriptSaveFailed()) showSuccessToast("一括編集を元に戻しました。");
   }
 
   function editSpeakerLabel(speaker: string, label: string) {
@@ -1267,17 +1532,20 @@
   <Toaster position={toasterPosition} closeButton />
   <AdminShellFrame
     {pageTitle}
-    contentClass="p-0 overflow-hidden"
-    headerClass="app-main-header bg-background"
+    contentClass={section === "settings" ? "settings-shell-content p-0 overflow-hidden border-0 rounded-none" : "p-0 overflow-hidden"}
+    headerClass={section === "settings" ? "settings-shell-header bg-background" : "app-main-header bg-background"}
   >
     {#snippet sidebar()}
       <AppSidebar
         {section}
         {meetings}
         {selectedMeetingId}
+        {settingsPane}
+        settingsPreview={summarySettingsPreview}
         loading={meetingsLoading}
         busy={meetingBusy || busy}
         onNavigate={navigate}
+        onSelectSettingsPane={selectSettingsPane}
         onSelectMeeting={selectMeeting}
         onRefreshMeetings={refreshMeetings}
       />
@@ -1323,17 +1591,28 @@
           summaryModelId={summaryModelId}
           {summaryModelsLoading}
           summaryGenerating={summaryGenerating}
+          {transcriptFormatting}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
           {transcribing}
           progress={transcriptionProgress}
           {canTranscribe}
+          contextEnabled={globalContextSettings.contextEnabled}
+          contextSurchargeActive={contextSurchargeActive}
+          contextTermCount={effectiveContextTerms.length}
+          contextDraft={meetingContextDraft}
+          contextSaveState={meetingContextSaveState}
+          contextLoading={meetingContextLoading}
           onTranscribe={transcribeAudio}
+          onContextBackgroundChange={(background) => updateMeetingContext({ background })}
+          onContextTermsChange={(termsText) => updateMeetingContext({ termsText })}
+          onContextUseGlobalChange={(useGlobal) => updateMeetingContext({ useGlobal })}
           onProviderChange={changeTranscriptionProvider}
           onRunChange={selectTranscriptionRun}
           onEditSegment={editTranscriptSegment}
           onEditSpeakerLabel={editSpeakerLabel}
           onReplaceSegments={replaceTranscriptSegments}
+          onFormatTranscript={formatTranscript}
           canUndoReplacement={transcriptReplacementUndo?.transcriptionId === selectedTranscriptionId}
           onUndoReplacement={undoTranscriptReplacement}
           onFlushEdits={flushTranscriptEdits}
@@ -1359,78 +1638,128 @@
           onError={showError}
         />
       {:else}
-        <section class="page-view settings-view">
-          <header class="page-header">
-            <span>アプリの更新や、文字起こし・AI会議ノートで使う機能を設定できます。</span>
-          </header>
-          {#if !summarySettingsPreview}
-            <div class="settings-section">
-              <div class="settings-section-heading">
-                <h2>Mutsuna Echo</h2>
-                <p>新しいバージョンがあるか確認し、この画面から更新できます。</p>
-              </div>
-              <AppUpdateManager
-                disabled={busy && !updating}
-                onBeforeInstall={prepareForUpdate}
-                onBusyChange={(value) => updating = value}
-              />
-            </div>
-          {/if}
-          <div class="settings-section">
-            <div class="settings-section-heading">
-              <h2>文字起こし</h2>
-              <p>音声を文字にする方法を選びます。端末だけで処理する方法と、外部サービスを使う方法があります。</p>
-            </div>
-            <div class="transcription-model-manager">
-              <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
-              {#each apiKeyProviders as provider (provider.id)}
-                <ApiKeySettings
-                  {provider}
-                  {loading}
-                  saving={savingProviderId === provider.id}
-                  {deleting}
-                  hasApiKey={provider.configured}
-                  {busy}
-                  onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
-                  onDelete={() => deleteApiKey(provider.id)}
-                />
-              {/each}
+        <section class="settings-view">
+          <div class="settings-detail-scroll">
+            <div class="settings-detail">
+              {#if settingsPane === "general" && !summarySettingsPreview}
+                <header class="settings-detail-heading">
+                  <h1>一般</h1>
+                  <span>Mutsuna Echoのバージョンと更新を管理します。</span>
+                </header>
+                <div class="settings-section native-settings-group">
+                  <AppUpdateManager
+                    disabled={busy && !updating}
+                    onBeforeInstall={prepareForUpdate}
+                    onBusyChange={(value) => updating = value}
+                  />
+                </div>
+              {:else if settingsPane === "transcription" && !summarySettingsPreview}
+                <header class="settings-detail-heading">
+                  <h1>文字起こし</h1>
+                  <span>端末内モデル、クラウドサービス、認識に使う共通情報を設定します。</span>
+                </header>
+                <section class="settings-section">
+                  <div class="settings-section-heading">
+                    <h2>モデルとサービス</h2>
+                  </div>
+                  <div class="transcription-model-manager">
+                    <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshProviders} onMessage={showMessage} onError={showError} />
+                    {#each apiKeyProviders as provider (provider.id)}
+                      <ApiKeySettings
+                        {provider}
+                        {loading}
+                        saving={savingProviderId === provider.id}
+                        {deleting}
+                        hasApiKey={provider.configured}
+                        {busy}
+                        onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
+                        onDelete={() => deleteApiKey(provider.id)}
+                      />
+                    {/each}
+                  </div>
+                </section>
+                <section class="settings-section">
+                  <div class="settings-section-heading">
+                    <h2>共通コンテキスト</h2>
+                  </div>
+                  <div class="context-settings-wrap">
+                    <TranscriptionContextEditor
+                      title="全会議で使う内容"
+                      description="会社名、製品名、よく扱う議題などを登録できます。"
+                      contextEnabled={globalContextSettings.contextEnabled}
+                      showMasterToggle
+                      background={globalContextDraft.background}
+                      termsText={globalContextDraft.termsText}
+                      saveState={globalContextSaveState}
+                      loading={globalContextLoading}
+                      disabled={busy}
+                      onContextEnabledChange={(contextEnabled) => updateGlobalContext({ contextEnabled })}
+                      onBackgroundChange={(background) => updateGlobalContext({ background })}
+                      onTermsChange={(termsText) => updateGlobalContext({ termsText })}
+                    />
+                  </div>
+                </section>
+              {:else if settingsPane === "summary"}
+                <header class="settings-detail-heading">
+                  <h1>AI会議ノート</h1>
+                  <span>会議ノートを作るAIと、最初に選ばれるモデルを設定します。</span>
+                </header>
+                <section class="settings-section">
+                  <div class="settings-section-heading">
+                    <h2>既定のAI</h2>
+                  </div>
+                  <SummaryDefaultsSettings
+                    providers={summaryProviders}
+                    defaultProviderId={summaryDefaultProviderId}
+                    defaultModelId={summaryDefaultModelId}
+                    disabled={busy}
+                    onLoadModels={(providerId) => refreshSummaryModels(providerId)}
+                    onDefaultProviderChange={changeSummaryDefaultProvider}
+                    onDefaultModelChange={changeSummaryDefaultModel}
+                  />
+                </section>
+                <section class="settings-section">
+                  <div class="settings-section-heading">
+                    <h2>利用できるAI</h2>
+                  </div>
+                  <div class="summary-agent-wrap">
+                    <SummaryAgentManager
+                      disabled={busy}
+                      providers={summaryProviders}
+                      providerModelDefaults={summaryProviderModelDefaults}
+                      preview={summarySettingsPreview}
+                      onChanged={refreshSummaryProviders}
+                      onLoadModels={(providerId) => refreshSummaryModels(providerId)}
+                      onProviderDefaultModelChange={changeSummaryProviderDefaultModel}
+                      onMessage={showMessage}
+                      onError={showError}
+                    />
+                  </div>
+                </section>
+              {:else if settingsPane === "usage" && !summarySettingsPreview}
+                <header class="settings-detail-heading">
+                  <h1>利用状況</h1>
+                  <span>接続中の文字起こしサービスの利用量を確認します。</span>
+                </header>
+                <div class="usage-settings-stack">
+                  {#if hasApiKey}
+                    <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
+                  {/if}
+                  {#if hasSonioxApiKey}
+                    <SonioxUsagePanel usage={sonioxUsage} loading={sonioxUsageLoading} error={sonioxUsageError} onRefresh={refreshSonioxUsage} />
+                  {/if}
+                  {#if !hasApiKey && !hasSonioxApiKey}
+                    <section class="settings-empty-state">
+                      <ChartNoAxesColumn aria-hidden="true" />
+                      <h2>表示できる利用状況はありません</h2>
+                      <p>「文字起こし」でElevenLabsまたはSonioxのAPIキーを接続すると、ここで利用量を確認できます。</p>
+                      <button type="button" onclick={() => selectSettingsPane("transcription")}>文字起こし設定を開く</button>
+                    </section>
+                  {/if}
+                </div>
+              {/if}
             </div>
           </div>
-          <div class="settings-section">
-            <div class="settings-section-heading">
-              <h2>AI会議ノート</h2>
-              <p>会議ノートを作るときに使うAIと、最初に選ばれるAIを設定します。</p>
-            </div>
-            <SummaryDefaultsSettings
-              providers={summaryProviders}
-              defaultProviderId={summaryDefaultProviderId}
-              defaultModelId={summaryDefaultModelId}
-              disabled={busy}
-              onLoadModels={(providerId) => refreshSummaryModels(providerId)}
-              onDefaultProviderChange={changeSummaryDefaultProvider}
-              onDefaultModelChange={changeSummaryDefaultModel}
-            />
-            <SummaryAgentManager
-              disabled={busy}
-              providers={summaryProviders}
-              providerModelDefaults={summaryProviderModelDefaults}
-              preview={summarySettingsPreview}
-              onChanged={refreshSummaryProviders}
-              onLoadModels={(providerId) => refreshSummaryModels(providerId)}
-              onProviderDefaultModelChange={changeSummaryProviderDefaultModel}
-              onMessage={showMessage}
-              onError={showError}
-            />
-          </div>
-          {#if !summarySettingsPreview}
-            {#if hasApiKey}
-              <UsagePanel usage={transcriptionUsage} loading={usageLoading} error={usageError} onRefresh={refreshUsage} />
-            {/if}
-            {#if hasSonioxApiKey}
-              <SonioxUsagePanel usage={sonioxUsage} loading={sonioxUsageLoading} error={sonioxUsageError} onRefresh={refreshSonioxUsage} />
-            {/if}
-          {/if}
         </section>
       {/if}
       </div>

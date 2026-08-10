@@ -5,6 +5,7 @@
   import Pause from "@lucide/svelte/icons/pause";
   import Play from "@lucide/svelte/icons/play";
   import Search from "@lucide/svelte/icons/search";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
   import Undo2 from "@lucide/svelte/icons/undo-2";
   import X from "@lucide/svelte/icons/x";
   import { Button } from "@mutsuna/ui/button";
@@ -30,9 +31,11 @@
     onPlay: (positionMs: number) => void;
     onPause: () => void;
     editable: boolean;
+    formatting: boolean;
     onEditSegment: (segmentId: string, text: string) => void;
     onEditSpeakerLabel: (speaker: string, label: string) => void;
     onReplaceSegments: (changes: TranscriptSegmentTextChange[]) => Promise<boolean>;
+    onFormat: () => Promise<void>;
     canUndoReplacement: boolean;
     onUndoReplacement: () => Promise<void>;
     onBlur: () => Promise<void>;
@@ -50,9 +53,11 @@
     onPlay,
     onPause,
     editable,
+    formatting,
     onEditSegment,
     onEditSpeakerLabel,
     onReplaceSegments,
+    onFormat,
     canUndoReplacement,
     onUndoReplacement,
     onBlur
@@ -338,9 +343,10 @@
   {#if transcript.segments.length > 0}
     {#if editable}
       <div class="correction-toolbar">
-        <Button size="sm" variant={replaceOpen ? "secondary" : "ghost"} type="button" icon={Search} aria-expanded={replaceOpen} onclick={toggleReplace}>検索・置換</Button>
+        <Button size="sm" variant="outline" type="button" icon={Sparkles} disabled={formatting} loading={formatting} onclick={() => void onFormat()}>{formatting ? "整形中…" : "整形"}</Button>
+        <Button size="sm" variant={replaceOpen ? "secondary" : "ghost"} type="button" icon={Search} aria-expanded={replaceOpen} disabled={formatting} onclick={toggleReplace}>検索・置換</Button>
         {#if canUndoReplacement}
-          <Button size="sm" variant="ghost" type="button" icon={Undo2} onclick={() => void onUndoReplacement()}>一括置換を元に戻す</Button>
+          <Button size="sm" variant="ghost" type="button" icon={Undo2} disabled={formatting} onclick={() => void onUndoReplacement()}>一括編集を元に戻す</Button>
         {/if}
       </div>
       {#if replaceOpen}
@@ -348,11 +354,11 @@
           <div class="replace-fields">
             <label>
               <span>検索</span>
-              <input class="replace-search" type="search" value={searchText} placeholder="修正したい文字" oninput={updateSearchText} />
+              <input class="replace-search" type="search" value={searchText} placeholder="修正したい文字" disabled={formatting} oninput={updateSearchText} />
             </label>
             <label>
               <span>置換後</span>
-              <input type="text" value={replacementText} placeholder="正しい表記" oninput={updateReplacementText} />
+              <input type="text" value={replacementText} placeholder="正しい表記" disabled={formatting} oninput={updateReplacementText} />
             </label>
           </div>
           <div class="replace-summary" aria-live="polite">
@@ -363,13 +369,13 @@
           </div>
           <div class="replace-actions">
             <span class="match-navigation">
-              <Button size="icon-sm" variant="ghost" type="button" icon={ChevronLeft} aria-label="前の検索結果" title="前の検索結果" disabled={searchMatches.length === 0 || replacing} onclick={() => moveMatch(-1)} />
+              <Button size="icon-sm" variant="ghost" type="button" icon={ChevronLeft} aria-label="前の検索結果" title="前の検索結果" disabled={searchMatches.length === 0 || replacing || formatting} onclick={() => moveMatch(-1)} />
               <span>{searchMatches.length > 0 ? `${currentMatchIndex + 1} / ${searchMatches.length}` : "0 / 0"}</span>
-              <Button size="icon-sm" variant="ghost" type="button" icon={ChevronRight} aria-label="次の検索結果" title="次の検索結果" disabled={searchMatches.length === 0 || replacing} onclick={() => moveMatch(1)} />
+              <Button size="icon-sm" variant="ghost" type="button" icon={ChevronRight} aria-label="次の検索結果" title="次の検索結果" disabled={searchMatches.length === 0 || replacing || formatting} onclick={() => moveMatch(1)} />
             </span>
-            <Button size="sm" variant="outline" type="button" disabled={!currentMatch || replacing} onclick={() => void replaceCurrentMatch()}>1件置換</Button>
-            <Button size="sm" type="button" disabled={searchMatches.length === 0 || replacing} loading={replacing} onclick={() => void replaceAllMatches()}>すべて置換{searchMatches.length > 0 ? `（${searchMatches.length}件）` : ""}</Button>
-            <Button size="icon-sm" variant="ghost" type="button" icon={X} aria-label="検索・置換を閉じる" title="閉じる" onclick={toggleReplace} />
+            <Button size="sm" variant="outline" type="button" disabled={!currentMatch || replacing || formatting} onclick={() => void replaceCurrentMatch()}>1件置換</Button>
+            <Button size="sm" type="button" disabled={searchMatches.length === 0 || replacing || formatting} loading={replacing} onclick={() => void replaceAllMatches()}>すべて置換{searchMatches.length > 0 ? `（${searchMatches.length}件）` : ""}</Button>
+            <Button size="icon-sm" variant="ghost" type="button" icon={X} aria-label="検索・置換を閉じる" title="閉じる" disabled={formatting} onclick={toggleReplace} />
           </div>
         </section>
       {/if}
@@ -389,6 +395,7 @@
                 value={entry.label}
                 placeholder={entry.speaker}
                 aria-label={`${entry.speaker}の表示名`}
+                disabled={formatting}
                 oncompositionstart={() => composingSpeakers.add(entry.speaker)}
                 oncompositionend={(event) => finishSpeakerComposition(event, entry.speaker)}
                 oninput={(event) => editSpeaker(event, entry.speaker)}
@@ -443,6 +450,7 @@
               rows="1"
               use:autoResizeTextArea={segment.text}
               aria-label={`${formatTimestamp(segment.startMs)}、${segment.speaker}の文字起こしを編集`}
+              disabled={formatting}
               oncompositionstart={() => composingSegments.add(segment.segmentId)}
               oncompositionend={(event) => finishComposition(event, segment.segmentId)}
               oninput={(event) => editSegment(event, segment.segmentId)}

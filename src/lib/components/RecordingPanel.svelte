@@ -330,6 +330,8 @@
     try {
       await invoke("discard_recording", { sessionId: recording.sessionId });
       recoverable = recoverable.filter((item) => item.sessionId !== recording.sessionId);
+      discardDialogOpen = false;
+      pendingDiscard = null;
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -472,6 +474,7 @@
       <AlertDialogCancel>キャンセル</AlertDialogCancel>
       <AlertDialogAction
         variant="destructive"
+        disabled={actionBusy}
         onclick={() => pendingDiscard && discard(pendingDiscard)}
       >削除</AlertDialogAction>
     </AlertDialogFooter>

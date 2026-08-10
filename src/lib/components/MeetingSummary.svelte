@@ -16,6 +16,7 @@
     modelId: string;
     modelsLoading: boolean;
     generating: boolean;
+    blocked: boolean;
     playbackAvailable: boolean;
     onProviderChange: (value: string) => void;
     onModelChange: (value: string) => void;
@@ -31,6 +32,7 @@
     modelId,
     modelsLoading,
     generating,
+    blocked,
     playbackAvailable,
     onProviderChange,
     onModelChange,
@@ -41,7 +43,7 @@
   const provider = $derived(providers.find((candidate) => candidate.id === providerId) ?? providers[0]);
   const providerOptions = $derived(providers.map((candidate) => ({ value: candidate.id, label: candidate.label, disabled: !candidate.ready })));
   const modelOptions = $derived(provider?.models.map((model) => ({ value: model.id, label: model.label })) ?? []);
-  const canGenerate = $derived(Boolean(transcript && provider?.ready && !modelsLoading && !generating && modelOptions.some((model) => model.value === modelId)));
+  const canGenerate = $derived(Boolean(transcript && provider?.ready && !modelsLoading && !generating && !blocked && modelOptions.some((model) => model.value === modelId)));
   const summary = $derived(status?.summary ?? null);
   const selectedModelLabel = $derived(modelsLoading ? "モデルを取得中…" : (modelOptions.find((option) => option.value === modelId)?.label ?? "モデルを選択"));
 
@@ -53,7 +55,7 @@
 </script>
 
 {#snippet providerSelect(id: string)}
-  <Select type="single" value={providerId} onValueChange={onProviderChange} disabled={generating || providers.length === 0}>
+  <Select type="single" value={providerId} onValueChange={onProviderChange} disabled={generating || blocked || providers.length === 0}>
     <SelectTrigger {id} aria-label="要約プロバイダー" class="summary-select">
       <span class="select-value" title={provider?.label}>{provider?.label ?? "サービスを選択"}</span>
     </SelectTrigger>
@@ -66,7 +68,7 @@
 {/snippet}
 
 {#snippet modelSelect(id: string)}
-  <Select type="single" value={modelId} onValueChange={onModelChange} disabled={generating || modelsLoading || !provider || modelOptions.length === 0}>
+  <Select type="single" value={modelId} onValueChange={onModelChange} disabled={generating || blocked || modelsLoading || !provider || modelOptions.length === 0}>
     <SelectTrigger {id} aria-label="要約モデル" class="summary-select">
       <span class="select-value" title={selectedModelLabel}>{selectedModelLabel}</span>
     </SelectTrigger>

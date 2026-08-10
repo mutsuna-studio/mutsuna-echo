@@ -90,6 +90,7 @@ class EchoRecordingService : Service() {
     var micWriter: AacFragmentWriter? = null
     var systemWriter: AacFragmentWriter? = null
     var mixedWriter: AacFragmentWriter? = null
+    var finalEnhancer: SonoraAudioEnhancer.Session? = null
     val startedAt = SystemClock.elapsedRealtime()
     try {
       if (microphoneEnabled) {
@@ -101,6 +102,7 @@ class EchoRecordingService : Service() {
         systemWriter = AacFragmentWriter(systemFile, 96_000)
       }
       mixedWriter = AacFragmentWriter(mixedFile, 64_000)
+      finalEnhancer = SonoraAudioEnhancer.Session(48_000)
       writeManifest(manifest, sessionId, startedAt, micFile, systemFile, mixedFile, microphoneEnabled, systemEnabled)
       RecordingBridge.update {
         put("phase", "recording"); put("sessionId", sessionId)
@@ -136,7 +138,8 @@ class EchoRecordingService : Service() {
           val limited = if (abs(sum) <= 0.95f) sum else kotlin.math.sign(sum) * (0.95f + 0.05f * kotlin.math.tanh(((abs(sum) - 0.95f) / 0.05f).toDouble()).toFloat())
           (limited * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
         }
-        mixedWriter.write(mixed)
+        val enhanced = finalEnhancer.process(mixed)
+        if (enhanced.isNotEmpty()) mixedWriter.write(enhanced)
         RecordingBridge.update {
           put("elapsedMs", elapsed)
           put("microphoneLevel", if (micRead > 0) peak(micBuffer, micRead) else 0.0)
@@ -152,6 +155,8 @@ class EchoRecordingService : Service() {
       mic?.stop(); system?.stop()
       micWriter?.close(); micWriter = null
       systemWriter?.close(); systemWriter = null
+      val enhancedTail = finalEnhancer.finish(); finalEnhancer = null
+      if (enhancedTail.isNotEmpty()) mixedWriter.write(enhancedTail)
       mixedWriter.close(); mixedWriter = null
       if (cancel.get()) {
         session.deleteRecursively()
@@ -170,6 +175,11 @@ class EchoRecordingService : Service() {
         }
       }
     } catch (error: Throwable) {
+      try {
+        val enhancedTail = finalEnhancer?.finish() ?: ShortArray(0)
+        finalEnhancer = null
+        if (enhancedTail.isNotEmpty()) mixedWriter?.write(enhancedTail)
+      } catch (_: Throwable) {}
       try { micWriter?.close() } catch (_: Throwable) {}
       try { systemWriter?.close() } catch (_: Throwable) {}
       try { mixedWriter?.close() } catch (_: Throwable) {}
@@ -191,6 +201,7 @@ class EchoRecordingService : Service() {
         put("stopReason", "captureError")
       }
     } finally {
+      try { finalEnhancer?.close() } catch (_: Throwable) {}
       try { mic?.release() } catch (_: Throwable) {}
       try { system?.release() } catch (_: Throwable) {}
       projection?.stop(); projection = null

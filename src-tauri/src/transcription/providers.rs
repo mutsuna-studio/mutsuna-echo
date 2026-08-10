@@ -41,6 +41,8 @@ struct TranscriptionCapabilities {
     speaker_labels: bool,
     confidence_scores: bool,
     external_diarization: bool,
+    context_text: bool,
+    context_terms: bool,
 }
 
 const ELEVENLABS_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
@@ -48,6 +50,8 @@ const ELEVENLABS_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabili
     speaker_labels: true,
     confidence_scores: false,
     external_diarization: true,
+    context_text: false,
+    context_terms: true,
 };
 
 const SONIOX_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
@@ -55,6 +59,8 @@ const SONIOX_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities
     speaker_labels: true,
     confidence_scores: true,
     external_diarization: true,
+    context_text: true,
+    context_terms: true,
 };
 
 const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
@@ -62,6 +68,8 @@ const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabi
     speaker_labels: false,
     confidence_scores: false,
     external_diarization: true,
+    context_text: false,
+    context_terms: false,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -324,6 +332,8 @@ mod tests {
         );
         assert!(!provider.capabilities.speaker_labels);
         assert!(provider.capabilities.external_diarization);
+        assert!(!provider.capabilities.context_text);
+        assert!(!provider.capabilities.context_terms);
     }
 
     #[test]
@@ -337,6 +347,8 @@ mod tests {
         );
         assert!(provider.capabilities.speaker_labels);
         assert!(provider.capabilities.confidence_scores);
+        assert!(provider.capabilities.context_text);
+        assert!(provider.capabilities.context_terms);
         assert_eq!(provider.pricing_usd_per_hour, Some(0.10));
     }
 }

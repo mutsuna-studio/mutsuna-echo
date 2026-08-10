@@ -1,6 +1,6 @@
 [package]
 name = "mutsuna-echo"
-version = "0.1.2"
+version = "0.1.3"
 description = "A cross-platform recording and pluggable transcription app"
 authors = ["Mutsuna Studio"]
 edition = "2021"
@@ -36,6 +36,7 @@ uuid = { version = "1", features = ["v7"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["time"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "pcm", "wav"] }
+sonora = "0.2.0"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"

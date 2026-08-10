@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    segments_from_tokens, TokenSpeakerSource, TokenTimeSource, Transcript, TranscriptSegment,
-    TranscriptToken,
+    context::TranscriptionContext, segments_from_tokens, TokenSpeakerSource, TokenTimeSource,
+    Transcript, TranscriptSegment, TranscriptToken,
 };
 
 pub(crate) mod client;
@@ -135,19 +135,26 @@ fn provider_error(status: StatusCode, body: &Value) -> String {
     }
 }
 
-pub(crate) async fn transcribe(path: &Path, api_key: &SecretString) -> Result<Transcript, String> {
-    let form = Form::new()
+pub(crate) async fn transcribe(
+    path: &Path,
+    api_key: &SecretString,
+    context: Option<&TranscriptionContext>,
+) -> Result<Transcript, String> {
+    let mut form = Form::new()
         .text("model_id", MODEL_ID)
         .text("language_code", LANGUAGE_CODE)
         .text("diarize", "true")
         .text("timestamps_granularity", "word")
-        .text("tag_audio_events", "false")
-        .file("file", path)
-        .await
-        .map_err(|error| {
-            eprintln!("Could not open selected audio file: {error:?}");
-            "選択した音声ファイルを開けませんでした。".to_string()
-        })?;
+        .text("tag_audio_events", "false");
+    if let Some(context) = context {
+        for term in &context.terms {
+            form = form.text("keyterms", term.clone());
+        }
+    }
+    let form = form.file("file", path).await.map_err(|error| {
+        eprintln!("Could not open selected audio file: {error:?}");
+        "選択した音声ファイルを開けませんでした。".to_string()
+    })?;
 
     let response = ElevenLabsClient::new(api_key, Duration::from_secs(60 * 30))?
         .post(SPEECH_TO_TEXT_URL)
