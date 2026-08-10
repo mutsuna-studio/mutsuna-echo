@@ -37,6 +37,10 @@ runs:
         toolchain: stable
         targets: aarch64-linux-android
 
+    - name: Prepare Sherpa ONNX Android runtime
+      shell: bash
+      run: bash ./scripts/prepare-android-runtime.sh arm64-v8a
+
     - name: Restore Rust dependency cache
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:

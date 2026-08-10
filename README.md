@@ -50,7 +50,7 @@ AndroidではAndroid Keystoreで生成した端末内AES-GCM鍵を使用しま�
 
 ## ローカルSTT基盤
 
-ローカルSTTはアプリ本体とモデルを分離し、現在はReazonSpeech K2 int8-fp32を任意にダウンロードして日本語文字起こしに使用できます。モデルは固定した配布元・サイズ・SHA-256を検証してから公開し、音声を外部へ送信しません。
+ローカルSTTはアプリ本体とモデルを分離し、Windows、macOS、AndroidではReazonSpeech K2 int8-fp32を任意にダウンロードして日本語文字起こしに使用できます。モデルは固定した配布元・サイズ・SHA-256を検証してから公開し、音声を外部へ送信しません。Androidでは発熱とメモリ使用量を抑えるため推論スレッド数を最大4に制限します。
 
 将来ダウンロードされたモデルは、OSごとのアプリローカルデータ領域にある `local-stt/models/<model-id>/<version>/` へ配置します。各導入単位は次の情報を持つ `manifest.json` で管理します。
 
@@ -87,6 +87,8 @@ cargo clippy --all-targets -- -D warnings
 同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存したうえで、Google Playの`ANDROID_RELEASE_TRACK`へ`completed`として送信します。個人用デベロッパーアカウントで製品版アクセスが未開放の間は`alpha`を使用し、12人以上・14日間以上のクローズドテストとGoogleの承認後に`production`へ切り替えます。Play ConsoleのManaged publishingを無効にしておけば、production送信後はGoogleの審査承認を経て自動公開されます。タグ、`package.json`、`Cargo.toml`、`tauri.conf.json`のバージョンが一致しない場合は、ビルド前に停止します。
 
 デスクトップビルドでは、Tauriがバンドル対象を検証する前に`scripts/prepare-desktop-runtime.ps1`が`sherpa-onnx-sys`だけを先行ビルドします。これにより、クリーンなRunnerでもSherpa ONNXとONNX RuntimeのDLL／dylibが確実に生成され、アプリ本体を二重にコンパイルせずに配布物へ含められます。
+
+Androidビルドでは、共有のセットアップActionが`scripts/prepare-android-runtime.sh`を実行し、Rust依存と同じSherpa ONNX v1.13.4の公式Android C APIランタイムを検証してARM64 AABへ同梱します。ローカルでAndroid版をビルドする場合も、同じスクリプトを実行し、表示された`SHERPA_ONNX_LIB_DIR`をビルド環境へ設定してください。
 
 リリースJobはGitHub Environmentsの承認後にだけ署名用Secretへアクセスします。次のEnvironmentを作成し、Required reviewersと`v*`タグのみ許可を設定してください。承認可能なMaintainerが2人以上になったら自己承認も禁止してください（現在の1人構成で禁止するとリリース不能になります）。
 

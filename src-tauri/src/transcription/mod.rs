@@ -2,13 +2,13 @@ pub(crate) mod audio_decode;
 pub(crate) mod context;
 pub mod diarization;
 pub(crate) mod elevenlabs;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 mod local;
 pub(crate) mod local_models;
 pub(crate) mod providers;
 pub(crate) mod soniox;
 pub mod types;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 pub(crate) mod vad;
 pub(crate) mod vad_models;
 pub(crate) mod vad_settings;
@@ -66,7 +66,7 @@ pub(crate) async fn transcribe(
                     .find(|model| model.model_id == local_models::REAZONSPEECH_MODEL_ID),
             }
             .ok_or_else(|| "選択したローカルSTTモデルがインストールされていません。".to_string())?;
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             {
                 let app = app.clone();
                 let audio_path = audio_path.to_path_buf();
@@ -83,7 +83,7 @@ pub(crate) async fn transcribe(
                     cost_usd: None,
                 })
             }
-            #[cfg(not(desktop))]
+            #[cfg(not(any(desktop, target_os = "android")))]
             {
                 let _ = (audio_path, model);
                 Err("この端末ではReazonSpeechのローカル推論をまだ利用できません。".into())

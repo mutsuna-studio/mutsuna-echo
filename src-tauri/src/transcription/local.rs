@@ -209,8 +209,9 @@ fn normalize_result(
 }
 
 fn available_threads() -> i32 {
+    let maximum = if cfg!(mobile) { 4 } else { 8 };
     std::thread::available_parallelism()
-        .map(|value| value.get().clamp(1, 8) as i32)
+        .map(|value| value.get().clamp(1, maximum) as i32)
         .unwrap_or(2)
 }
 

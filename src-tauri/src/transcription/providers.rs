@@ -235,7 +235,7 @@ fn soniox(has_api_key: bool) -> TranscriptionProviderDescriptor {
 }
 
 fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProviderDescriptor {
-    let engine_available = cfg!(desktop);
+    let engine_available = cfg!(any(desktop, target_os = "android"));
     let (availability, configured, model_id, model_label, status_message) = match installed {
         Some(model) => (
             if engine_available {
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_local_model_is_ready_on_desktop() {
+    fn installed_local_model_is_ready_when_the_native_engine_is_bundled() {
         let model = InstalledLocalModel {
             model_id: super::super::local_models::REAZONSPEECH_MODEL_ID.into(),
             version: "2024-08-01".into(),
@@ -324,7 +324,7 @@ mod tests {
             size_bytes: 169_180_699,
         };
         let provider = local_provider(Some(&model));
-        assert_eq!(provider.ready, cfg!(desktop));
+        assert_eq!(provider.ready, cfg!(any(desktop, target_os = "android")));
         assert!(provider.configured);
         assert_eq!(
             provider.capabilities.timing_granularity,

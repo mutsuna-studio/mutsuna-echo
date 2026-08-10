@@ -170,7 +170,7 @@ pub(crate) fn list_local_stt_model_catalog(
         size_bytes: total_download_bytes(),
         installed,
         downloading: DOWNLOAD_ACTIVE.load(Ordering::Acquire),
-        runtime_supported: cfg!(desktop),
+        runtime_supported: cfg!(any(desktop, target_os = "android")),
     }])
 }
 
@@ -179,7 +179,7 @@ pub(crate) async fn download_local_stt_model(
     app: AppHandle,
     model_id: String,
 ) -> Result<(), String> {
-    if !cfg!(desktop) {
+    if !cfg!(any(desktop, target_os = "android")) {
         return Err("このOS向けのReazonSpeech推論エンジンは準備中です。".into());
     }
     if model_id != REAZONSPEECH_MODEL_ID {
