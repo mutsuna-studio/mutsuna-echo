@@ -441,7 +441,7 @@ async fn fetch_usage_cost(
         let start_time = started_at - chrono::Duration::minutes(1);
         let start_time = start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let end_time = end_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let logs = fetch_usage_logs_page(&client, &start_time, &end_time, None).await?;
+        let logs = fetch_usage_logs_page(client, &start_time, &end_time, None).await?;
         if let Some(cost_usd) = logs
             .usage_logs
             .iter()

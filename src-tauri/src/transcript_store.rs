@@ -302,9 +302,10 @@ pub(crate) fn history(
     audio_path: Option<&Path>,
 ) -> Result<TranscriptionHistory, String> {
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
-    if !directory.join("index.json").exists() && audio_path.is_some() {
-        let audio_path = audio_path.expect("audio path was checked immediately above");
-        migrate_global_legacy_transcripts(app, meeting_id, audio_path)?;
+    if !directory.join("index.json").exists() {
+        if let Some(audio_path) = audio_path {
+            migrate_global_legacy_transcripts(app, meeting_id, audio_path)?;
+        }
     }
     let _guard = store_guard()?;
     let index = ensure_history_in(&directory, meeting_id)?;
