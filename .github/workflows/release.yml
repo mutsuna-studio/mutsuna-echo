@@ -446,7 +446,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
         run: |
-          gh release view "$RELEASE_TAG" --json isDraft,assets \
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets \
             --jq 'if .isDraft then .assets | length else error("Release is already published") end' \
             | grep -Eq '^[1-9][0-9]*$'
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
