@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+      android_only:
+        description: Publish only the Android release
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,10 +39,11 @@ jobs:
           node-version: 24
 
       - name: Verify tag and application versions
-        run: node scripts/verify-release-version.mjs "${{ github.ref_name }}"
+        run: node scripts/verify-release-version.mjs "${{ inputs.release_tag || github.ref_name }}"
 
   publish:
     name: Build ${{ matrix.name }}
+    if: github.event_name != 'workflow_dispatch' || !inputs.android_only
     needs: validate-release
     permissions:
       contents: write
@@ -339,14 +351,14 @@ jobs:
           fi
           node -e "JSON.parse(process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON)"
 
-      - name: Publish to Google Play production
+      - name: Publish to configured Google Play track
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: jp.mutsuna.echo
           releaseFiles: ${{ steps.verify-android.outputs.aab_path }}
-          track: production
+          tracks: ${{ vars.ANDROID_RELEASE_TRACK || 'alpha' }}
           status: completed
           changesNotSentForReview: false
-          releaseName: ${{ github.ref_name }}
+          releaseName: ${{ inputs.release_tag || github.ref_name }}
           whatsNewDirectory: distribution/whatsnew

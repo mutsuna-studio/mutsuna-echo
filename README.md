@@ -81,7 +81,7 @@ cargo clippy --all-targets -- -D warnings
 
 `v0.1.0`のようなバージョンタグをpushすると、GitHub ActionsがWindowsとApple Silicon版macOSのデスクトップ版をビルドし、下書きのGitHub Releaseを作成します。Intel Macは配布対象外です。Windowsの配布物はNSISセットアップ（`.exe`）だけです。Releaseを公開すると、アプリは署名済みの`latest.json`を使って更新を検出します。
 
-同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存したうえで、Google Playのproductionトラックへ`completed`として送信します。Play ConsoleのManaged publishingを無効にしておけば、Googleの審査承認後に自動公開されます。タグ、`package.json`、`Cargo.toml`、`tauri.conf.json`のバージョンが一致しない場合は、ビルド前に停止します。
+同じタグでAndroid 10以降のARM64端末向け署名済みAABも生成し、`android-aarch64-aab`というGitHub Actions Artifactへ保存したうえで、Google Playの`ANDROID_RELEASE_TRACK`へ`completed`として送信します。個人用デベロッパーアカウントで製品版アクセスが未開放の間は`alpha`を使用し、12人以上・14日間以上のクローズドテストとGoogleの承認後に`production`へ切り替えます。Play ConsoleのManaged publishingを無効にしておけば、production送信後はGoogleの審査承認を経て自動公開されます。タグ、`package.json`、`Cargo.toml`、`tauri.conf.json`のバージョンが一致しない場合は、ビルド前に停止します。
 
 デスクトップビルドでは、Tauriがバンドル対象を検証する前に`scripts/prepare-desktop-runtime.ps1`が`sherpa-onnx-sys`だけを先行ビルドします。これにより、クリーンなRunnerでもSherpa ONNXとONNX RuntimeのDLL／dylibが確実に生成され、アプリ本体を二重にコンパイルせずに配布物へ含められます。
 
@@ -106,6 +106,8 @@ cargo clippy --all-targets -- -D warnings
 - `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`: Google Play Developer APIへの公開権限を持つサービスアカウント鍵JSONの内容全体
 
 Google Playへの自動公開には、Google CloudでGoogle Play Developer APIを有効化してサービスアカウントを作成し、Play Consoleの「ユーザーと権限」で`jp.mutsuna.echo`をproductionへ公開できる権限を付与します。JSON鍵の内容全体をGitHub Environment `release-android`の`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`へ登録してください。完全自動公開にする場合は、Play ConsoleのManaged publishingを無効にします。
+
+GitHub Environment `release-android`のVariable `ANDROID_RELEASE_TRACK`には、製品版アクセスの承認前は`alpha`、承認後は`production`を設定します。失敗したAndroid公開だけを再実行する場合は、Release applications Workflowを`release_tag=v0.1.2`、`android_only=true`で手動実行します。
 
 リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.2`は`1002`になります。
 
