@@ -78,6 +78,18 @@ pub(super) fn run_recording(
     cancel: Arc<AtomicBool>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
+    let _power_guard = match crate::processing_power::acquire(&app, "録音中") {
+        Ok(guard) => guard,
+        Err(error) => {
+            publish_status(&app, &status, |current| {
+                current.phase = RecordingPhase::Failed;
+                current.error = Some(error.clone());
+                current.stop_reason = Some(StopReason::CaptureError);
+            });
+            let _ = ready.try_send(Err(error));
+            return;
+        }
+    };
     if let Err(error) =
         run_desktop_recording(&app, &request, &paths, &status, &stop, &cancel, &ready)
     {

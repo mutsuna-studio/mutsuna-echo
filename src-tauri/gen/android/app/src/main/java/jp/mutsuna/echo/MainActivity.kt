@@ -60,11 +60,13 @@ class MainActivity : TauriActivity() {
       isAppearanceLightNavigationBars = true
     }
     RecordingBridge.activity = this
+    ScreenOnController.attach(this)
     AppUpdateBridge.attach(this)
     AppUpdateBridge.check(applicationContext)
   }
 
   override fun onDestroy() {
+    ScreenOnController.detach(this)
     if (RecordingBridge.activity === this) RecordingBridge.activity = null
     AppUpdateBridge.detach(this)
     EchoInputMonitor.stop()

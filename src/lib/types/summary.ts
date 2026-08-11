@@ -56,3 +56,10 @@ export type SummaryStatus = {
   currentRevision: number | null;
   stale: boolean;
 };
+
+export type SummaryProgress = {
+  meetingId: string;
+  completedSteps: number;
+  totalSteps: number;
+  stage: "summarizing" | "merging" | "complete";
+};

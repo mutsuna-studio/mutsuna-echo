@@ -122,6 +122,7 @@ async fn transcribe_one(
                 crate::credentials::CredentialId::CloudflareAccountId,
             )?;
             cloudflare::transcribe(
+                app,
                 audio_path,
                 audio_duration_ms,
                 &account_id,

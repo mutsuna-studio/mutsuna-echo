@@ -8,7 +8,7 @@ mod keyring_store;
 #[cfg(target_os = "windows")]
 mod windows_dpapi;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CredentialId {
     ElevenLabs,
     Soniox,
@@ -81,4 +81,27 @@ pub(crate) fn has_api_key(app: &AppHandle) -> Result<bool, String> {
 
 pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
     load(app, CredentialId::ElevenLabs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CredentialId;
+
+    #[test]
+    fn android_bridge_declares_every_native_credential_id() {
+        let android_contract =
+            include_str!("../../gen/android/app/src/main/java/jp/mutsuna/echo/CredentialNames.kt");
+        for credential in [
+            CredentialId::ElevenLabs,
+            CredentialId::Soniox,
+            CredentialId::CloudflareApiToken,
+            CredentialId::CloudflareAccountId,
+        ] {
+            assert!(
+                android_contract.contains(&format!("\"{}\"", credential.id())),
+                "Android credential contract is missing {}",
+                credential.id()
+            );
+        }
+    }
 }

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import Download from "@lucide/svelte/icons/download";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
@@ -217,8 +216,6 @@
           <Button type="button" icon={RefreshCw} onclick={completeMobileUpdate} disabled={disabled || installing} loading={installing}>
             再起動して更新
           </Button>
-        {:else if androidUpdate?.phase === "latest" && !checking}
-          <span class="up-to-date"><CircleCheck aria-hidden="true" /> 最新です</span>
         {/if}
         <Button variant="outline" type="button" icon={RefreshCw} onclick={checkForUpdates} disabled={disabled || checking || installing || androidBusy} loading={checking}>
           更新を確認
@@ -230,8 +227,6 @@
           <Button type="button" icon={Download} onclick={installUpdate} disabled={disabled || installing} loading={installing}>
             v{availableUpdate.version}へ更新
           </Button>
-        {:else if !checking && !error}
-          <span class="up-to-date"><CircleCheck aria-hidden="true" /> 最新です</span>
         {/if}
         <Button variant="outline" type="button" icon={RefreshCw} onclick={checkForUpdates} disabled={disabled || checking || installing} loading={checking}>
           更新を確認
@@ -271,35 +266,33 @@
   .update-main,
   .update-heading,
   .update-title,
-  .update-actions,
-  .up-to-date {
+  .update-actions {
     display: flex;
     align-items: center;
   }
 
-  .update-main { min-height: 68px; justify-content: space-between; gap: 24px; padding: 10px 14px; }
+  .update-main { min-height: 76px; justify-content: space-between; gap: 24px; padding: 14px 2px; }
   .update-heading { min-width: 0; gap: 12px; }
   .update-heading > div:last-child { min-width: 0; }
   .update-title { flex-wrap: wrap; gap: 8px; }
-  .update-title h3 { margin: 0; font-size: 0.8rem; }
-  .update-title span, .update-heading p { color: var(--muted-foreground); font-size: 0.7rem; }
-  .update-heading p { margin: 3px 0 0; }
+  .update-title h3 { margin: 0; font-size: 0.9rem; font-weight: 680; }
+  .update-title span { color: var(--muted-foreground); font-size: 0.7rem; }
+  .update-heading p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 0.74rem; line-height: 1.55; }
 
   .update-icon {
     display: grid;
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     flex: none;
     place-items: center;
-    border-radius: 7px;
+    border-radius: 9px;
     color: var(--primary);
     background: color-mix(in oklch, var(--primary) 10%, var(--background));
   }
 
-  .update-icon :global(svg) { width: 17px; height: 17px; }
+  .update-icon :global(svg) { width: 18px; height: 18px; stroke-width: 1.8; }
   .update-actions { flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
-  .up-to-date { margin-right: auto; gap: 6px; color: var(--primary); font-size: 0.82rem; font-weight: 650; }
-  .up-to-date :global(svg) { width: 16px; height: 16px; }
+  .update-actions :global(button) { min-height: 34px; font-size: 0.74rem; font-weight: 650; }
 
   .download-progress { display: grid; gap: 6px; }
   .download-progress progress { width: 100%; height: 7px; accent-color: var(--primary); }

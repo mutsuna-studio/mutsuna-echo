@@ -48,13 +48,8 @@ object SecureCredentialBridge {
     if (store.containsAlias(alias)) store.deleteEntry(alias)
   }
 
-  private fun validate(credential: String): String = when (credential) {
-    "elevenlabs", "soniox", "cloudflare-api-token", "cloudflare-account-id" -> credential
-    else -> throw IllegalArgumentException("対応していない認証情報です。")
-  }
-
-  private fun alias(credential: String): String = "mutsuna_echo_${validate(credential)}_api_key"
-  private fun value(credential: String): String = "${validate(credential)}_api_key"
+  private fun alias(credential: String): String = CredentialNames.alias(credential)
+  private fun value(credential: String): String = CredentialNames.value(credential)
 
   private fun getKey(alias: String): SecretKey {
     val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

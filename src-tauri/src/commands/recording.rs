@@ -132,7 +132,8 @@ pub(crate) fn start_recording(
 ) -> Result<RecordingStatus, String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (app, state);
+        let _ = state;
+        crate::processing_power::sync_display_setting(&app)?;
         recording::android::start(&request)
     }
     #[cfg(not(target_os = "android"))]

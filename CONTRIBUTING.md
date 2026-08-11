@@ -17,6 +17,8 @@ cargo clippy --all-targets -- -D warnings
 
 When changing a dependency, local AI runtime, or model version, run `pnpm licenses:generate` from the repository root and include the generated license catalog in the same pull request. Use `pnpm licenses:check` to verify that the generated files are current.
 
+Cloud API credential changes must also follow `AGENTS.md`. In particular, run the Rust credential regression tests and Android credential contract tests. Changes to Android Keystore or its JNI bridge also require `connectedUniversalDebugAndroidTest` on an API 29+ emulator or device before release.
+
 Do not commit API keys, signing keys, keystores, recordings, transcripts, or other private meeting data. Use synthetic data in tests.
 
 ## Pull requests

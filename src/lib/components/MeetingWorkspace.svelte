@@ -50,7 +50,7 @@
     ContextSaveState,
     LocalDiarizationProgress
   } from "../types/transcript";
-  import type { SummaryProviderDefinition, SummaryStatus } from "../types/summary";
+  import type { SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "../types/summary";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
   import TranscriptView from "./TranscriptView.svelte";
@@ -72,6 +72,7 @@
     summaryModelId: string;
     summaryModelsLoading: boolean;
     summaryGenerating: boolean;
+    summaryProgress: SummaryProgress | null;
     transcriptFormatting: boolean;
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
@@ -130,6 +131,7 @@
     summaryModelId,
     summaryModelsLoading,
     summaryGenerating,
+    summaryProgress,
     transcriptFormatting,
     providers,
     provider,
@@ -493,6 +495,7 @@
           modelId={summaryModelId}
           modelsLoading={summaryModelsLoading}
           generating={summaryGenerating}
+          progress={summaryProgress}
           blocked={transcriptFormatting}
           playbackAvailable={Boolean(selectedAudio)}
           onProviderChange={onSummaryProviderChange}

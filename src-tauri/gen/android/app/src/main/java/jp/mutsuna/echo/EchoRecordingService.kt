@@ -34,6 +34,8 @@ class EchoRecordingService : Service() {
   @Volatile private var monitorWorker: Thread? = null
   @Volatile private var pendingCaptureIntent: Intent? = null
   private var projection: MediaProjection? = null
+  private var wakeLock: PowerManager.WakeLock? = null
+  private var screenOnRegistered = false
 
   override fun onCreate() {
     super.onCreate()
@@ -41,6 +43,8 @@ class EchoRecordingService : Service() {
   }
 
   override fun onDestroy() {
+    unregisterScreenOn()
+    releaseWakeLock()
     if (instance === this) instance = null
     super.onDestroy()
   }
@@ -100,6 +104,8 @@ class EchoRecordingService : Service() {
         override fun onStop() { stop.set(true) }
       }, Handler(Looper.getMainLooper()))
     }
+    acquireWakeLock()
+    registerScreenOn()
     worker = thread(name = "mutsuna-android-recording") { capture(config) }
   }
 
@@ -375,6 +381,8 @@ class EchoRecordingService : Service() {
       projection?.stop(); projection = null
       reuseSystemAudioSession = false
       worker = null
+      unregisterScreenOn()
+      releaseWakeLock()
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
     }
@@ -579,5 +587,29 @@ class EchoRecordingService : Service() {
     fun monitorStartFailed() {
       reuseSystemAudioSession = false
     }
+  }
+
+  private fun acquireWakeLock() {
+    if (wakeLock?.isHeld == true) return
+    wakeLock = getSystemService(PowerManager::class.java)
+      .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mutsuna-echo:recording")
+      .apply { acquire() }
+  }
+
+  private fun releaseWakeLock() {
+    wakeLock?.let { if (it.isHeld) it.release() }
+    wakeLock = null
+  }
+
+  private fun registerScreenOn() {
+    if (screenOnRegistered) return
+    ScreenOnController.begin(applicationContext)
+    screenOnRegistered = true
+  }
+
+  private fun unregisterScreenOn() {
+    if (!screenOnRegistered) return
+    screenOnRegistered = false
+    ScreenOnController.end(applicationContext)
   }
 }

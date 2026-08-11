@@ -6,7 +6,7 @@
   import { Button } from "@mutsuna/ui/button";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
   import type { EditableTranscript } from "../types/transcript";
-  import type { SummaryProviderDefinition, SummaryStatus } from "../types/summary";
+  import type { SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "../types/summary";
 
   type Props = {
     transcript: EditableTranscript | null;
@@ -16,6 +16,7 @@
     modelId: string;
     modelsLoading: boolean;
     generating: boolean;
+    progress: SummaryProgress | null;
     blocked: boolean;
     playbackAvailable: boolean;
     onProviderChange: (value: string) => void;
@@ -32,6 +33,7 @@
     modelId,
     modelsLoading,
     generating,
+    progress,
     blocked,
     playbackAvailable,
     onProviderChange,
@@ -46,6 +48,7 @@
   const canGenerate = $derived(Boolean(transcript && provider?.ready && !modelsLoading && !generating && !blocked && modelOptions.some((model) => model.value === modelId)));
   const summary = $derived(status?.summary ?? null);
   const selectedModelLabel = $derived(modelsLoading ? "モデルを取得中…" : (modelOptions.find((option) => option.value === modelId)?.label ?? "モデルを選択"));
+  const progressLabel = $derived(progress?.stage === "merging" ? "会議ノートを統合中" : "会議ノートを作成中");
 
   function seekToFirstSource(ids: readonly string[]) {
     const id = ids.find((candidate) => transcript?.segments.some((segment) => segment.segmentId === candidate));
@@ -81,6 +84,13 @@
 {/snippet}
 
 <section class="meeting-summary" aria-label="会議ノート">
+  {#if generating}
+    <div class="summary-progress" role="status" aria-live="polite">
+      <span>{progressLabel}</span>
+      {#if progress}<strong>{progress.completedSteps} / {progress.totalSteps}</strong>{/if}
+      <progress max={progress?.totalSteps ?? 1} value={progress?.completedSteps ?? 0} aria-label={progressLabel}></progress>
+    </div>
+  {/if}
   {#if summary}
     <header class="summary-toolbar">
       <div class="summary-heading">
@@ -169,6 +179,9 @@
 
 <style>
   .meeting-summary { max-width: 880px; margin: 22px auto 0; }
+  .summary-progress { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px 12px; padding: 2px 2px 18px; color: var(--muted-foreground); font-size: 0.76rem; }
+  .summary-progress strong { color: var(--foreground); font-variant-numeric: tabular-nums; }
+  .summary-progress progress { width: 100%; height: 7px; grid-column: 1 / -1; accent-color: var(--primary); }
   .summary-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
   .summary-heading { display: grid; min-width: 0; gap: 3px; }
   .summary-heading strong { font-size: 0.92rem; }

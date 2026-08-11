@@ -17,6 +17,7 @@ mod meeting_store;
 mod pcm_cache;
 mod pending_action;
 mod processing_metrics;
+mod processing_power;
 mod recording;
 #[cfg(desktop)]
 mod resident;
@@ -40,6 +41,7 @@ pub fn run() {
     );
     let builder = builder
         .manage(commands::transcribe::AudioSelectionState::default())
+        .manage(processing_power::ProcessingPowerState::default())
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
     let builder = builder
@@ -94,6 +96,8 @@ pub fn run() {
             pending_action::discard_pending_action,
             commands::transcribe::select_audio_file,
             commands::transcribe::get_transcription_session,
+            processing_power::get_processing_power_settings,
+            processing_power::set_processing_power_settings,
             audio_playback::get_audio_playback_backend,
             audio_playback::load_selected_audio_for_playback,
             audio_playback::play_selected_audio,

@@ -23,6 +23,7 @@
   import MeetingHome from "./lib/components/MeetingHome.svelte";
   import MeetingWorkspace from "./lib/components/MeetingWorkspace.svelte";
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
+  import PowerSettings from "./lib/components/PowerSettings.svelte";
   import SummaryAgentManager from "./lib/components/SummaryAgentManager.svelte";
   import SummaryDefaultsSettings from "./lib/components/SummaryDefaultsSettings.svelte";
   import SonioxUsagePanel from "./lib/components/SonioxUsagePanel.svelte";
@@ -38,7 +39,7 @@
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
-  import type { SummaryModelDefinition, SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
+  import type { SummaryModelDefinition, SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
   import type {
     SelectedAudioFile,
     EditableTranscript,
@@ -214,6 +215,7 @@
   let summaryModelsLoading = $state(false);
   let summaryStatus = $state.raw<SummaryStatus | null>(null);
   let summaryGenerating = $state(false);
+  let summaryProgress = $state.raw<SummaryProgress | null>(null);
   let transcriptFormatting = $state(false);
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
   let transcript = $state.raw<EditableTranscript | null>(null);
@@ -1002,9 +1004,10 @@
     let unlistenPending: UnlistenFn | undefined;
     let unlistenProgress: UnlistenFn | undefined;
     let unlistenDiarizationProgress: UnlistenFn | undefined;
+    let unlistenSummaryProgress: UnlistenFn | undefined;
     void (async () => {
       try {
-        [unlistenPending, unlistenProgress, unlistenDiarizationProgress] = await Promise.all([
+        [unlistenPending, unlistenProgress, unlistenDiarizationProgress, unlistenSummaryProgress] = await Promise.all([
           listen<PendingAction>("pending-action-available", ({ payload }) => {
             if (!cancelled) void handlePendingAction(payload);
           }),
@@ -1013,6 +1016,9 @@
           }),
           listen<LocalDiarizationProgress>("local-diarization-progress", ({ payload }) => {
             if (!cancelled) diarizationProgress = payload;
+          }),
+          listen<SummaryProgress>("summary-progress", ({ payload }) => {
+            if (!cancelled && payload.meetingId === selectedMeetingId) summaryProgress = payload;
           })
         ]);
         const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
@@ -1068,6 +1074,7 @@
       unlistenPending?.();
       unlistenProgress?.();
       unlistenDiarizationProgress?.();
+      unlistenSummaryProgress?.();
     };
   });
 
@@ -1396,6 +1403,7 @@
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
+    summaryProgress = null;
     try {
       summaryStatus = await invoke<SummaryStatus>("generate_selected_summary", {
         request: {
@@ -1409,6 +1417,7 @@
       showError(errorText(error));
     } finally {
       summaryGenerating = false;
+      summaryProgress = null;
     }
   }
 
@@ -1786,7 +1795,7 @@
   <AdminShellFrame
     {pageTitle}
     contentClass={section === "settings" ? "settings-shell-content p-0 overflow-hidden border-0 rounded-none" : "p-0 overflow-hidden"}
-    headerClass={section === "settings" ? "settings-shell-header app-main-header bg-background" : "app-main-header bg-background"}
+    headerClass={section === "settings" ? "settings-shell-header app-main-header" : "app-main-header"}
   >
     {#snippet headerActions()}
       {#if section === "meetings"}
@@ -1852,6 +1861,7 @@
           summaryModelId={summaryModelId}
           {summaryModelsLoading}
           summaryGenerating={summaryGenerating}
+          {summaryProgress}
           {transcriptFormatting}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
@@ -1918,6 +1928,7 @@
                   <h1>一般</h1>
                 </header>
                 <div class="settings-section native-settings-group">
+                  <PowerSettings disabled={updating} onError={showError} />
                   <AppUpdateManager
                     disabled={busy && !updating}
                     onBeforeInstall={prepareForUpdate}

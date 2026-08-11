@@ -11,6 +11,107 @@ use crate::transcription::elevenlabs::client::{api_error_kind, ApiErrorKind, Ele
 const ELEVENLABS_MODELS_URL: &str = "https://api.elevenlabs.io/v1/models";
 const API_KEY_VALIDATION_TIMEOUT: Duration = Duration::from_secs(25);
 
+trait CredentialStorage {
+    fn save(
+        &mut self,
+        credential: crate::credentials::CredentialId,
+        secret: &SecretString,
+    ) -> Result<(), String>;
+    fn has(&self, credential: crate::credentials::CredentialId) -> Result<bool, String>;
+    fn load(&self, credential: crate::credentials::CredentialId) -> Result<SecretString, String>;
+    fn delete(&mut self, credential: crate::credentials::CredentialId) -> Result<(), String>;
+}
+
+struct AppCredentialStorage<'a>(&'a AppHandle);
+
+impl CredentialStorage for AppCredentialStorage<'_> {
+    fn save(
+        &mut self,
+        credential: crate::credentials::CredentialId,
+        secret: &SecretString,
+    ) -> Result<(), String> {
+        crate::credentials::save(self.0, credential, secret)
+    }
+
+    fn has(&self, credential: crate::credentials::CredentialId) -> Result<bool, String> {
+        crate::credentials::has(self.0, credential)
+    }
+
+    fn load(&self, credential: crate::credentials::CredentialId) -> Result<SecretString, String> {
+        crate::credentials::load(self.0, credential)
+    }
+
+    fn delete(&mut self, credential: crate::credentials::CredentialId) -> Result<(), String> {
+        crate::credentials::delete(self.0, credential)
+    }
+}
+
+fn normalized_secret(value: String, empty_message: &str) -> Result<SecretString, String> {
+    let received = SecretString::from(value);
+    let normalized = received.expose_secret().trim();
+    if normalized.is_empty() {
+        Err(empty_message.to_string())
+    } else {
+        Ok(SecretString::from(normalized.to_owned()))
+    }
+}
+
+fn persist_verified<S: CredentialStorage>(
+    storage: &mut S,
+    values: &[(crate::credentials::CredentialId, &SecretString)],
+) -> Result<(), String> {
+    let mut previous = Vec::with_capacity(values.len());
+    for (credential, _) in values {
+        let value = if storage.has(*credential)? {
+            Some(storage.load(*credential)?)
+        } else {
+            None
+        };
+        previous.push((*credential, value));
+    }
+
+    let result = (|| {
+        for (credential, expected) in values {
+            storage.save(*credential, expected)?;
+            let actual = storage.load(*credential).map_err(|error| {
+                format!(
+                    "{}を保存後に確認できませんでした: {error}",
+                    credential.label()
+                )
+            })?;
+            if actual.expose_secret() != expected.expose_secret() {
+                return Err(format!(
+                    "{}を端末へ正しく保存できませんでした。",
+                    credential.label()
+                ));
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
+        for (credential, old_value) in previous {
+            let rollback = match old_value {
+                Some(old_value) => storage.save(credential, &old_value),
+                None => storage.delete(credential),
+            };
+            if let Err(rollback_error) = rollback {
+                rollback_errors.push(format!("{}: {rollback_error}", credential.label()));
+            }
+        }
+        return if rollback_errors.is_empty() {
+            Err(error)
+        } else {
+            Err(format!(
+                "{error} 保存前の状態へ戻せませんでした（{}）。",
+                rollback_errors.join("、")
+            ))
+        };
+    }
+    Ok(())
+}
+
 async fn validate_api_key(api_key: &SecretString) -> Result<bool, String> {
     let response = ElevenLabsClient::new(api_key, Duration::from_secs(20))?
         .get(ELEVENLABS_MODELS_URL)
@@ -71,41 +172,29 @@ pub(crate) async fn save_provider_api_key(
     account_id: Option<String>,
 ) -> Result<bool, String> {
     if provider_id == "cloudflare" {
-        let received_account_id = SecretString::from(account_id.unwrap_or_default());
-        let account_id = SecretString::from(received_account_id.expose_secret().trim().to_owned());
-        let received_api_key = SecretString::from(api_key);
-        let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
-        if account_id.expose_secret().is_empty() {
-            return Err("Cloudflare Account IDを入力してください。".into());
-        }
-        if api_key.expose_secret().is_empty() {
-            return Err("Cloudflare APIトークンを入力してください。".into());
-        }
-        crate::transcription::cloudflare::validate_credentials(&account_id, &api_key).await?;
-        crate::credentials::save(
-            &app,
-            crate::credentials::CredentialId::CloudflareApiToken,
-            &api_key,
+        let account_id = normalized_secret(
+            account_id.unwrap_or_default(),
+            "Cloudflare Account IDを入力してください。",
         )?;
-        if let Err(error) = crate::credentials::save(
-            &app,
-            crate::credentials::CredentialId::CloudflareAccountId,
-            &account_id,
-        ) {
-            let _ = crate::credentials::delete(
-                &app,
-                crate::credentials::CredentialId::CloudflareApiToken,
-            );
-            return Err(error);
-        }
+        let api_key = normalized_secret(api_key, "Cloudflare APIトークンを入力してください。")?;
+        crate::transcription::cloudflare::validate_credentials(&account_id, &api_key).await?;
+        persist_verified(
+            &mut AppCredentialStorage(&app),
+            &[
+                (
+                    crate::credentials::CredentialId::CloudflareApiToken,
+                    &api_key,
+                ),
+                (
+                    crate::credentials::CredentialId::CloudflareAccountId,
+                    &account_id,
+                ),
+            ],
+        )?;
         return Ok(true);
     }
     let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
-    let received_api_key = SecretString::from(api_key);
-    let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
-    if api_key.expose_secret().is_empty() {
-        return Err("APIキーを入力してください。".into());
-    }
+    let api_key = normalized_secret(api_key, "APIキーを入力してください。")?;
     eprintln!("[api-key] validation started provider={provider_id}");
     let validation = std::panic::AssertUnwindSafe(validate_provider_api_key(credential, &api_key))
         .catch_unwind();
@@ -120,7 +209,7 @@ pub(crate) async fn save_provider_api_key(
                 .to_string()
         })??;
     eprintln!("[api-key] validation completed provider={provider_id}");
-    crate::credentials::save(&app, credential, &api_key)?;
+    persist_verified(&mut AppCredentialStorage(&app), &[(credential, &api_key)])?;
     eprintln!("[api-key] credential saved provider={provider_id}");
     Ok(fully_accessible)
 }
@@ -164,14 +253,138 @@ pub(crate) fn load_api_key(app: &AppHandle) -> Result<SecretString, String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         io::{Read, Write},
         net::TcpListener,
         sync::mpsc,
         time::Duration,
     };
 
+    use super::{normalized_secret, persist_verified, CredentialStorage};
+    use crate::credentials::CredentialId;
     use crate::transcription::elevenlabs::client::ElevenLabsClient;
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
+
+    #[derive(Default)]
+    struct FakeCredentialStorage {
+        values: HashMap<CredentialId, String>,
+        save_count: usize,
+        fail_save_at: Option<usize>,
+        corrupt_readback_after_save: Option<CredentialId>,
+    }
+
+    impl CredentialStorage for FakeCredentialStorage {
+        fn save(&mut self, credential: CredentialId, secret: &SecretString) -> Result<(), String> {
+            self.save_count += 1;
+            if self.fail_save_at == Some(self.save_count) {
+                return Err("synthetic save failure".into());
+            }
+            self.values
+                .insert(credential, secret.expose_secret().to_owned());
+            Ok(())
+        }
+
+        fn has(&self, credential: CredentialId) -> Result<bool, String> {
+            Ok(self.values.contains_key(&credential))
+        }
+
+        fn load(&self, credential: CredentialId) -> Result<SecretString, String> {
+            if self.save_count > 0 && self.corrupt_readback_after_save == Some(credential) {
+                return Ok(SecretString::from("synthetic-corruption".to_string()));
+            }
+            self.values
+                .get(&credential)
+                .cloned()
+                .map(SecretString::from)
+                .ok_or_else(|| "not installed".into())
+        }
+
+        fn delete(&mut self, credential: CredentialId) -> Result<(), String> {
+            self.values.remove(&credential);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trims_credentials_and_rejects_blank_values() {
+        let secret =
+            normalized_secret("  synthetic-key\n".into(), "empty").expect("non-empty credential");
+        assert_eq!(secret.expose_secret(), "synthetic-key");
+        assert_eq!(
+            normalized_secret(" \t\n".into(), "empty").err().as_deref(),
+            Some("empty")
+        );
+    }
+
+    #[test]
+    fn verifies_single_credential_by_reading_it_back() {
+        let mut storage = FakeCredentialStorage::default();
+        let secret = SecretString::from("synthetic-soniox".to_string());
+
+        persist_verified(&mut storage, &[(CredentialId::Soniox, &secret)])
+            .expect("verified persistence");
+
+        assert_eq!(
+            storage
+                .values
+                .get(&CredentialId::Soniox)
+                .map(String::as_str),
+            Some("synthetic-soniox")
+        );
+    }
+
+    #[test]
+    fn rolls_back_when_readback_does_not_match() {
+        let mut storage = FakeCredentialStorage {
+            corrupt_readback_after_save: Some(CredentialId::Soniox),
+            ..Default::default()
+        };
+        let secret = SecretString::from("synthetic-soniox".to_string());
+
+        let error = persist_verified(&mut storage, &[(CredentialId::Soniox, &secret)])
+            .expect_err("mismatched readback must fail");
+
+        assert!(error.contains("正しく保存できませんでした"));
+        assert!(!storage.values.contains_key(&CredentialId::Soniox));
+    }
+
+    #[test]
+    fn cloudflare_pair_failure_restores_both_previous_values() {
+        let mut storage = FakeCredentialStorage {
+            values: HashMap::from([
+                (CredentialId::CloudflareApiToken, "old-token".into()),
+                (CredentialId::CloudflareAccountId, "old-account".into()),
+            ]),
+            fail_save_at: Some(2),
+            ..Default::default()
+        };
+        let token = SecretString::from("new-token".to_string());
+        let account = SecretString::from("new-account".to_string());
+
+        persist_verified(
+            &mut storage,
+            &[
+                (CredentialId::CloudflareApiToken, &token),
+                (CredentialId::CloudflareAccountId, &account),
+            ],
+        )
+        .expect_err("second write must roll back the pair");
+
+        assert_eq!(
+            storage
+                .values
+                .get(&CredentialId::CloudflareApiToken)
+                .map(String::as_str),
+            Some("old-token")
+        );
+        assert_eq!(
+            storage
+                .values
+                .get(&CredentialId::CloudflareAccountId)
+                .map(String::as_str),
+            Some("old-account")
+        );
+    }
 
     #[test]
     fn credential_client_does_not_follow_redirects() {

@@ -1,13 +1,24 @@
-use std::{path::Path, time::Duration};
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::{stream, StreamExt};
 use reqwest::{redirect::Policy, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 use super::{
-    context::TranscriptionContext, segments_from_tokens, TokenTimeSource, Transcript,
+    audio_decode, context::TranscriptionContext, segments_from_tokens, TokenTimeSource, Transcript,
     TranscriptSegment, TranscriptToken, TranscriptionOutcome,
+};
+use crate::commands::transcribe::{
+    publish_transcription_progress, TranscriptionProgress, TranscriptionStage,
 };
 
 pub(crate) const MODEL_ID: &str = "@cf/openai/whisper-large-v3-turbo";
@@ -16,13 +27,56 @@ pub(crate) const NEURONS_PER_AUDIO_MINUTE: f64 = 46.63;
 pub(crate) const FREE_DAILY_NEURONS: f64 = 10_000.0;
 const API_BASE_URL: &str = "https://api.cloudflare.com/client/v4/accounts";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const CHUNK_CORE_MS: u64 = 5 * 60 * 1_000;
+const CHUNK_OVERLAP_MS: u64 = 2_000;
+const CHUNK_SAMPLE_RATE: u32 = 16_000;
+#[cfg(target_os = "android")]
+const MAX_PARALLEL_CHUNKS: usize = 2;
+#[cfg(not(target_os = "android"))]
+const MAX_PARALLEL_CHUNKS: usize = 4;
+const MAX_CHUNK_ATTEMPTS: u32 = 3;
 
 #[derive(Serialize)]
 struct TranscriptionRequest {
     audio: String,
     task: &'static str,
+    language: &'static str,
+    vad_filter: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkSpec {
+    index: usize,
+    start_ms: u64,
+    duration_ms: u64,
+    path: PathBuf,
+}
+
+struct ChunkWorkspace(PathBuf);
+
+impl ChunkWorkspace {
+    fn create(parent: &Path) -> Result<Self, String> {
+        let path = parent.join(format!("cloudflare-stt-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("音声分割用の一時領域を作成できませんでした: {error}"))?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ChunkWorkspace {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!("Could not remove Cloudflare transcription chunks: {error}");
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ChunkRequestError {
+    message: String,
+    retryable: bool,
 }
 
 #[derive(Serialize)]
@@ -344,42 +398,139 @@ fn normalize(response: WorkersAiTranscript) -> Transcript {
     }
 }
 
-pub(crate) async fn transcribe(
-    path: &Path,
-    audio_duration_ms: u64,
-    account: &SecretString,
+fn chunk_windows(audio_duration_ms: u64) -> Result<Vec<(u64, u64)>, String> {
+    if audio_duration_ms == 0 {
+        return Err("音声の長さを確認できないため、Cloudflare向けに分割できませんでした。".into());
+    }
+    let mut windows = Vec::new();
+    let mut start_ms = 0u64;
+    while start_ms < audio_duration_ms {
+        let remaining = audio_duration_ms.saturating_sub(start_ms);
+        windows.push((
+            start_ms,
+            remaining.min(CHUNK_CORE_MS.saturating_add(CHUNK_OVERLAP_MS)),
+        ));
+        start_ms = start_ms.saturating_add(CHUNK_CORE_MS);
+    }
+    Ok(windows)
+}
+
+fn write_pcm16_wav(path: &Path, sample_rate: u32, samples: &[f32]) -> Result<(), String> {
+    let data_size = samples
+        .len()
+        .checked_mul(2)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| "分割した音声がWAVの上限を超えました。".to_string())?;
+    let mut file =
+        File::create(path).map_err(|error| format!("分割音声を作成できませんでした: {error}"))?;
+    file.write_all(b"RIFF")
+        .and_then(|_| file.write_all(&(36u32.saturating_add(data_size)).to_le_bytes()))
+        .and_then(|_| file.write_all(b"WAVEfmt "))
+        .and_then(|_| file.write_all(&16u32.to_le_bytes()))
+        .and_then(|_| file.write_all(&1u16.to_le_bytes()))
+        .and_then(|_| file.write_all(&1u16.to_le_bytes()))
+        .and_then(|_| file.write_all(&sample_rate.to_le_bytes()))
+        .and_then(|_| file.write_all(&(sample_rate.saturating_mul(2)).to_le_bytes()))
+        .and_then(|_| file.write_all(&2u16.to_le_bytes()))
+        .and_then(|_| file.write_all(&16u16.to_le_bytes()))
+        .and_then(|_| file.write_all(b"data"))
+        .and_then(|_| file.write_all(&data_size.to_le_bytes()))
+        .map_err(|error| format!("分割音声のヘッダーを書き込めませんでした: {error}"))?;
+    for sample in samples {
+        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+        file.write_all(&value.to_le_bytes())
+            .map_err(|error| format!("分割音声を書き込めませんでした: {error}"))?;
+    }
+    file.flush()
+        .map_err(|error| format!("分割音声を保存できませんでした: {error}"))
+}
+
+fn produce_chunks(
+    audio_path: &Path,
+    windows: &[(u64, u64)],
+    workspace: &Path,
+    sender: tokio::sync::mpsc::Sender<ChunkSpec>,
+    mut on_produced: impl FnMut(u32),
+) -> Result<(), String> {
+    let mut produced = 0usize;
+    audio_decode::decode_mono_regions_resampled(
+        audio_path,
+        CHUNK_SAMPLE_RATE,
+        windows,
+        |index, sample_rate, samples| {
+            let path = workspace.join(format!("chunk-{index:04}.wav"));
+            write_pcm16_wav(&path, sample_rate, samples)?;
+            let (start_ms, duration_ms) = windows[index];
+            sender
+                .blocking_send(ChunkSpec {
+                    index,
+                    start_ms,
+                    duration_ms,
+                    path,
+                })
+                .map_err(|_| "音声チャンクの送信処理が停止しました。".to_string())?;
+            produced = produced.saturating_add(1);
+            on_produced(u32::try_from(produced).unwrap_or(u32::MAX));
+            Ok(())
+        },
+    )?;
+    if produced != windows.len() {
+        return Err("Cloudflare向けの音声チャンクをすべて作成できませんでした。".into());
+    }
+    Ok(())
+}
+
+async fn request_chunk(
+    http_client: &reqwest::Client,
+    account: &str,
     api_token: &SecretString,
-    context: Option<&TranscriptionContext>,
-) -> Result<TranscriptionOutcome, String> {
-    let account = account_id(account)?;
-    let bytes = tokio::fs::read(path)
+    chunk: &ChunkSpec,
+    initial_prompt: Option<String>,
+) -> Result<WorkersAiTranscript, ChunkRequestError> {
+    let bytes = tokio::fs::read(&chunk.path)
         .await
-        .map_err(|error| format!("選択した音声ファイルを開けませんでした: {error}"))?;
+        .map_err(|error| ChunkRequestError {
+            message: format!("分割音声を開けませんでした: {error}"),
+            retryable: false,
+        })?;
     let request = TranscriptionRequest {
         audio: STANDARD.encode(bytes),
         task: "transcribe",
-        initial_prompt: prompt(context),
+        language: "ja",
+        vad_filter: true,
+        initial_prompt,
     };
-    let response = client()?
+    let response = http_client
         .post(endpoint(account, &format!("run/{MODEL_ID}")))
         .bearer_auth(api_token.expose_secret())
         .json(&request)
         .send()
         .await
-        .map_err(|error| format!("Cloudflareへ音声を送信できませんでした: {error}"))?;
+        .map_err(|error| ChunkRequestError {
+            message: format!("Cloudflareへ分割音声を送信できませんでした: {error}"),
+            retryable: error.is_timeout() || error.is_connect() || error.is_request(),
+        })?;
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Cloudflareの応答を読み取れませんでした: {error}"))?;
+    let bytes = response.bytes().await.map_err(|error| ChunkRequestError {
+        message: format!("Cloudflareの応答を読み取れませんでした: {error}"),
+        retryable: true,
+    })?;
     if !status.is_success() {
         let body = serde_json::from_slice::<ApiEnvelope<serde_json::Value>>(&bytes).ok();
-        return Err(api_error(status, body.as_ref()));
+        return Err(ChunkRequestError {
+            message: api_error(status, body.as_ref()),
+            retryable: status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT
+                || status.is_server_error(),
+        });
     }
     let envelope: ApiEnvelope<WorkersAiTranscript> =
         serde_json::from_slice(&bytes).map_err(|error| {
-            eprintln!("Could not parse Cloudflare Workers AI response: {error}");
-            "Cloudflare Workers AIの応答形式を読み取れませんでした。".to_string()
+            eprintln!("Could not parse Cloudflare Workers AI chunk response: {error}");
+            ChunkRequestError {
+                message: "Cloudflare Workers AIの応答形式を読み取れませんでした。".into(),
+                retryable: false,
+            }
         })?;
     if !envelope.success {
         let message = envelope
@@ -387,13 +538,249 @@ pub(crate) async fn transcribe(
             .first()
             .map(|error| error.message.as_str())
             .unwrap_or("詳細不明");
-        return Err(format!("Cloudflare Workers AI: {message}"));
+        return Err(ChunkRequestError {
+            message: format!("Cloudflare Workers AI: {message}"),
+            retryable: true,
+        });
     }
-    let result = envelope
-        .result
-        .ok_or_else(|| "Cloudflare Workers AIの応答に文字起こし結果がありません。".to_string())?;
+    envelope.result.ok_or_else(|| ChunkRequestError {
+        message: "Cloudflare Workers AIの応答に文字起こし結果がありません。".into(),
+        retryable: true,
+    })
+}
+
+async fn request_chunk_with_retry(
+    http_client: &reqwest::Client,
+    account: &str,
+    api_token: &SecretString,
+    chunk: &ChunkSpec,
+    initial_prompt: Option<String>,
+) -> Result<WorkersAiTranscript, String> {
+    let mut last_error = None;
+    for attempt in 1..=MAX_CHUNK_ATTEMPTS {
+        match request_chunk(
+            http_client,
+            account,
+            api_token,
+            chunk,
+            initial_prompt.clone(),
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                let retryable = error.retryable;
+                last_error = Some(error.message);
+                if !retryable || attempt == MAX_CHUNK_ATTEMPTS {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+            }
+        }
+    }
+    let start_minutes = chunk.start_ms as f64 / 60_000.0;
+    let end_minutes = chunk.start_ms.saturating_add(chunk.duration_ms) as f64 / 60_000.0;
+    Err(format!(
+        "音声チャンク{}（{start_minutes:.1}〜{end_minutes:.1}分）の処理に失敗しました: {}",
+        chunk.index + 1,
+        last_error.unwrap_or_else(|| "詳細不明".into())
+    ))
+}
+
+fn token_midpoint(token: &TranscriptToken) -> Option<u64> {
+    match (token.start_ms, token.end_ms) {
+        (Some(start), Some(end)) => Some(start.saturating_add(end.saturating_sub(start) / 2)),
+        (Some(start), None) => Some(start),
+        (None, Some(end)) => Some(end),
+        (None, None) => None,
+    }
+}
+
+fn owned_by_chunk(position_ms: Option<u64>, chunk: &ChunkSpec, total_chunks: usize) -> bool {
+    let Some(position_ms) = position_ms else {
+        return true;
+    };
+    let left = if chunk.index == 0 {
+        0
+    } else {
+        chunk.start_ms.saturating_add(CHUNK_OVERLAP_MS / 2)
+    };
+    let right = if chunk.index + 1 == total_chunks {
+        u64::MAX
+    } else {
+        chunk
+            .start_ms
+            .saturating_add(CHUNK_CORE_MS)
+            .saturating_add(CHUNK_OVERLAP_MS / 2)
+    };
+    position_ms >= left && position_ms < right
+}
+
+fn merge_chunks(chunks: &[ChunkSpec], transcripts: Vec<Transcript>) -> Transcript {
+    let mut language = "unknown".to_string();
+    let mut tokens = Vec::new();
+    let mut fallback_segments = Vec::new();
+    for (chunk, transcript) in chunks.iter().zip(transcripts) {
+        if language == "unknown" && transcript.language != "unknown" {
+            language = transcript.language.clone();
+        }
+        if transcript.tokens.is_empty() {
+            fallback_segments.extend(transcript.segments.into_iter().filter_map(|mut segment| {
+                if segment.start_ms == segment.end_ms {
+                    segment.end_ms = chunk.duration_ms;
+                }
+                segment.start_ms = segment.start_ms.saturating_add(chunk.start_ms);
+                segment.end_ms = segment.end_ms.saturating_add(chunk.start_ms);
+                let midpoint = segment
+                    .start_ms
+                    .saturating_add(segment.end_ms.saturating_sub(segment.start_ms) / 2);
+                owned_by_chunk(Some(midpoint), chunk, chunks.len()).then_some(segment)
+            }));
+        } else {
+            tokens.extend(transcript.tokens.into_iter().filter_map(|mut token| {
+                token.start_ms = token
+                    .start_ms
+                    .map(|time| time.saturating_add(chunk.start_ms));
+                token.end_ms = token.end_ms.map(|time| time.saturating_add(chunk.start_ms));
+                owned_by_chunk(token_midpoint(&token), chunk, chunks.len()).then_some(token)
+            }));
+        }
+    }
+    tokens.sort_by_key(|token| token.start_ms.unwrap_or(u64::MAX));
+    let mut segments = segments_from_tokens(&tokens);
+    segments.append(&mut fallback_segments);
+    segments.sort_by_key(|segment| segment.start_ms);
+    Transcript {
+        provider: "cloudflare".into(),
+        model: MODEL_ID.into(),
+        language,
+        tokens,
+        segments,
+    }
+}
+
+pub(crate) async fn transcribe(
+    app: &tauri::AppHandle,
+    path: &Path,
+    audio_duration_ms: u64,
+    account: &SecretString,
+    api_token: &SecretString,
+    context: Option<&TranscriptionContext>,
+) -> Result<TranscriptionOutcome, String> {
+    let account = account_id(account)?;
+    let windows = chunk_windows(audio_duration_ms)?;
+    let total_chunks = u32::try_from(windows.len()).unwrap_or(u32::MAX);
+    let total_work = total_chunks.saturating_mul(2);
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, Some(total_work)),
+    );
+    let cache_directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("音声分割用の保存先を取得できませんでした: {error}"))?;
+    let workspace = ChunkWorkspace::create(&cache_directory)?;
+    let audio_path = path.to_path_buf();
+    let chunk_workspace = workspace.0.clone();
+    let chunk_windows = windows.clone();
+    let (chunk_sender, chunk_receiver) =
+        tokio::sync::mpsc::channel(MAX_PARALLEL_CHUNKS.saturating_mul(2));
+    let completed = Arc::new(Mutex::new(0u32));
+    let producer_completed = Arc::clone(&completed);
+    let producer_app = app.clone();
+    let producer = tauri::async_runtime::spawn_blocking(move || {
+        produce_chunks(
+            &audio_path,
+            &chunk_windows,
+            &chunk_workspace,
+            chunk_sender,
+            |_| {
+                let mut progress = producer_completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *progress = progress.saturating_add(1);
+                publish_transcription_progress(
+                    &producer_app,
+                    TranscriptionProgress::new(
+                        TranscriptionStage::Transcribing,
+                        *progress,
+                        Some(total_work),
+                    ),
+                );
+            },
+        )
+    });
+    let http_client = client()?;
+    let base_prompt = prompt(context);
+    let chunk_stream = stream::unfold(chunk_receiver, |mut receiver| async move {
+        receiver.recv().await.map(|chunk| (chunk, receiver))
+    });
+    let requests = chunk_stream
+        .map(|chunk| {
+            let app = app.clone();
+            let completed = Arc::clone(&completed);
+            let initial_prompt = base_prompt.clone();
+            let http_client = http_client.clone();
+            async move {
+                let response = request_chunk_with_retry(
+                    &http_client,
+                    account,
+                    api_token,
+                    &chunk,
+                    initial_prompt,
+                )
+                .await?;
+                if let Err(error) = tokio::fs::remove_file(&chunk.path).await {
+                    eprintln!("Could not remove completed Cloudflare chunk: {error}");
+                }
+                let mut progress = completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *progress = progress.saturating_add(1);
+                publish_transcription_progress(
+                    &app,
+                    TranscriptionProgress::new(
+                        TranscriptionStage::Transcribing,
+                        *progress,
+                        Some(total_work),
+                    ),
+                );
+                Ok::<_, String>((chunk, normalize(response)))
+            }
+        })
+        .buffer_unordered(MAX_PARALLEL_CHUNKS);
+    futures_util::pin_mut!(requests);
+    let mut chunk_specs = vec![None; windows.len()];
+    let mut chunk_transcripts = vec![None; windows.len()];
+    while let Some(result) = requests.next().await {
+        let (chunk, transcript) = result?;
+        let index = chunk.index;
+        chunk_specs[index] = Some(chunk);
+        chunk_transcripts[index] = Some(transcript);
+    }
+    producer
+        .await
+        .map_err(|error| format!("音声の分割処理が停止しました: {error}"))??;
+    let chunks = chunk_specs
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            chunk.ok_or_else(|| format!("音声チャンク{}を作成できませんでした。", index + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transcripts = chunk_transcripts
+        .into_iter()
+        .enumerate()
+        .map(|(index, transcript)| {
+            transcript.ok_or_else(|| format!("音声チャンク{}の結果がありません。", index + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transcript = merge_chunks(&chunks, transcripts);
+    if transcript.tokens.is_empty() && transcript.segments.is_empty() {
+        return Err("Cloudflare Workers AIから文字起こし結果を受け取れませんでした。".into());
+    }
     Ok(TranscriptionOutcome {
-        transcript: normalize(result),
+        transcript,
         cost_usd: Some(format_cost_usd(audio_duration_ms)),
     })
 }
@@ -410,8 +797,11 @@ fn format_cost_usd(audio_duration_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_cost_usd, normalize, WorkersAiTextGeneration, WorkersAiTranscript, MODEL_ID,
+        chunk_windows, format_cost_usd, merge_chunks, normalize, ChunkSpec,
+        WorkersAiTextGeneration, WorkersAiTranscript, CHUNK_CORE_MS, CHUNK_OVERLAP_MS, MODEL_ID,
     };
+    use crate::transcription::{TokenTimeSource, Transcript, TranscriptToken};
+    use std::path::PathBuf;
 
     #[test]
     fn estimates_cost_from_cloudflare_audio_minute_pricing() {
@@ -455,5 +845,71 @@ mod tests {
         }))
         .expect("OpenAI-compatible response");
         assert_eq!(compatible.into_text().as_deref(), Some("compatible"));
+    }
+
+    #[test]
+    fn long_audio_is_split_into_overlapping_five_minute_windows() {
+        let duration = 2 * 60 * 60 * 1_000;
+        let windows = chunk_windows(duration).expect("valid duration");
+        assert_eq!(windows.len(), 24);
+        assert_eq!(windows[0], (0, CHUNK_CORE_MS + CHUNK_OVERLAP_MS));
+        assert_eq!(windows[1].0, CHUNK_CORE_MS);
+        assert_eq!(windows.last().expect("last").1, CHUNK_CORE_MS);
+        assert!(chunk_windows(0).is_err());
+    }
+
+    #[test]
+    fn merging_offsets_timestamps_and_discards_overlap_duplicates() {
+        let chunks = vec![
+            ChunkSpec {
+                index: 0,
+                start_ms: 0,
+                duration_ms: CHUNK_CORE_MS + CHUNK_OVERLAP_MS,
+                path: PathBuf::new(),
+            },
+            ChunkSpec {
+                index: 1,
+                start_ms: CHUNK_CORE_MS,
+                duration_ms: CHUNK_CORE_MS,
+                path: PathBuf::new(),
+            },
+        ];
+        let transcript = |tokens: Vec<TranscriptToken>| Transcript {
+            provider: "cloudflare".into(),
+            model: MODEL_ID.into(),
+            language: "ja".into(),
+            tokens,
+            segments: Vec::new(),
+        };
+        let token = |text: &str, start_ms, end_ms| TranscriptToken {
+            text: text.into(),
+            start_ms: Some(start_ms),
+            end_ms: Some(end_ms),
+            start_time_source: Some(TokenTimeSource::Provider),
+            end_time_source: Some(TokenTimeSource::Provider),
+            speaker: None,
+            speaker_source: None,
+            confidence: None,
+            utterance_id: None,
+        };
+        let merged = merge_chunks(
+            &chunks,
+            vec![
+                transcript(vec![
+                    token("前", 299_000, 300_200),
+                    token("重複", 300_200, 301_000),
+                ]),
+                transcript(vec![token("重複", 200, 1_000), token("後", 1_100, 2_000)]),
+            ],
+        );
+        assert_eq!(
+            merged
+                .tokens
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["前", "重複", "後"]
+        );
+        assert_eq!(merged.tokens[2].start_ms, Some(301_100));
     }
 }

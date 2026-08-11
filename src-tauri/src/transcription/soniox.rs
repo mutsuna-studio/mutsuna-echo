@@ -24,10 +24,15 @@ const MAX_USAGE_LOG_ATTEMPTS: usize = 5;
 struct SonioxClient {
     http: Client,
     authorization: HeaderValue,
+    base_url: String,
 }
 
 impl SonioxClient {
     fn new(api_key: &SecretString) -> Result<Self, String> {
+        Self::new_at(api_key, API_BASE_URL)
+    }
+
+    fn new_at(api_key: &SecretString, base_url: &str) -> Result<Self, String> {
         let mut authorization =
             HeaderValue::from_str(&format!("Bearer {}", api_key.expose_secret())).map_err(
                 |_| "Soniox APIキーの形式が不正です。設定し直してください。".to_string(),
@@ -45,19 +50,20 @@ impl SonioxClient {
         Ok(Self {
             http,
             authorization,
+            base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
 
     fn get(&self, path: &str) -> RequestBuilder {
-        self.request(self.http.get(format!("{API_BASE_URL}{path}")))
+        self.request(self.http.get(format!("{}{path}", self.base_url)))
     }
 
     fn post(&self, path: &str) -> RequestBuilder {
-        self.request(self.http.post(format!("{API_BASE_URL}{path}")))
+        self.request(self.http.post(format!("{}{path}", self.base_url)))
     }
 
     fn delete(&self, path: &str) -> RequestBuilder {
-        self.request(self.http.delete(format!("{API_BASE_URL}{path}")))
+        self.request(self.http.delete(format!("{}{path}", self.base_url)))
     }
 
     fn request(&self, request: RequestBuilder) -> RequestBuilder {
@@ -184,14 +190,14 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
 }
 
 pub(crate) async fn validate_api_key(api_key: &SecretString) -> Result<(), String> {
-    let response = SonioxClient::new(api_key)?
-        .get("/models")
-        .send()
-        .await
-        .map_err(|error| {
-            eprintln!("Soniox API key validation request failed: {error:?}");
-            format!("Sonioxに接続できませんでした: {error}")
-        })?;
+    validate_api_key_with_client(&SonioxClient::new(api_key)?).await
+}
+
+async fn validate_api_key_with_client(client: &SonioxClient) -> Result<(), String> {
+    let response = client.get("/models").send().await.map_err(|error| {
+        eprintln!("Soniox API key validation request failed: {error:?}");
+        format!("Sonioxに接続できませんでした: {error}")
+    })?;
     let body: Value = parse_response(response, "APIキーの確認").await?;
     let model_available = body
         .get("models")
@@ -527,15 +533,53 @@ pub(crate) async fn transcribe(
 #[cfg(test)]
 mod tests {
     use super::{
-        error_message, normalize, usage_cost, CreateTranscription, SonioxContext, SonioxTranscript,
-        API_BASE_URL,
+        error_message, normalize, usage_cost, validate_api_key_with_client, CreateTranscription,
+        SonioxClient, SonioxContext, SonioxTranscript, API_BASE_URL, MODEL_ID,
     };
     use reqwest::StatusCode;
+    use secrecy::SecretString;
     use serde_json::json;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
 
     #[test]
     fn uses_japan_regional_api() {
         assert_eq!(API_BASE_URL, "https://api.jp.soniox.com/v1");
+    }
+
+    #[test]
+    fn validates_against_models_endpoint_with_bearer_auth() {
+        let server = TcpListener::bind("127.0.0.1:0").expect("bind mock Soniox server");
+        let address = server.local_addr().expect("mock address");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().expect("accept validation request");
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).expect("read validation request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer synthetic-soniox"));
+            let body = format!(r#"{{"models":[{{"id":"{MODEL_ID}"}}]}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write validation response");
+        });
+
+        let client = SonioxClient::new_at(
+            &SecretString::from("synthetic-soniox".to_string()),
+            &format!("http://{address}/v1"),
+        )
+        .expect("build mock client");
+        tauri::async_runtime::block_on(validate_api_key_with_client(&client))
+            .expect("valid model response");
+        worker.join().expect("mock server");
     }
 
     #[test]

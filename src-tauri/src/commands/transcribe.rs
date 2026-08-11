@@ -751,6 +751,7 @@ pub(crate) async fn transcribe_selected_audio(
         .store(diarization_speaker_count.is_some(), Ordering::Release);
     state.diarization_cancelled.store(false, Ordering::Release);
     let _guard = TranscriptionGuard(&state);
+    let _power_guard = crate::processing_power::acquire(&app, "文字起こし中")?;
     let _combined_inference = diarization_speaker_count
         .filter(|_| cfg!(desktop))
         .map(|_| crate::compute_tuning::CombinedInferenceGuard::enter());

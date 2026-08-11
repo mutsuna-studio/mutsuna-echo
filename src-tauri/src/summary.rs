@@ -12,13 +12,19 @@ use std::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::transcript_store::SummaryTranscriptSnapshot;
 
 const SCHEMA_VERSION: u8 = 1;
 const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
+const SUMMARY_CHUNK_DURATION_MS: u64 = 15 * 60 * 1_000;
+const MAX_SUMMARY_CHUNK_BYTES: usize = 192 * 1024;
+#[cfg(target_os = "android")]
+const MAX_PARALLEL_SUMMARY_CHUNKS: usize = 2;
+#[cfg(not(target_os = "android"))]
+const MAX_PARALLEL_SUMMARY_CHUNKS: usize = 4;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
 const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOUDFLARE_PROVIDER_ID: &str = "cloudflare";
@@ -163,6 +169,15 @@ pub(crate) struct SummaryStatus {
     transcription_id: Option<String>,
     current_revision: Option<u64>,
     stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SummaryProgress {
+    meeting_id: String,
+    completed_steps: u32,
+    total_steps: u32,
+    stage: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +353,7 @@ pub(crate) async fn generate_selected_summary(
     app: AppHandle,
     request: GenerateSummaryRequest,
 ) -> Result<SummaryStatus, String> {
+    let _power_guard = crate::processing_power::acquire(&app, "会議ノートを生成中")?;
     generate(app, request).await
 }
 
@@ -346,6 +362,7 @@ pub(crate) async fn format_selected_transcript(
     app: AppHandle,
     request: FormatTranscriptRequest,
 ) -> Result<TranscriptFormattingResult, String> {
+    let _power_guard = crate::processing_power::acquire(&app, "文字起こしを整形中")?;
     format_transcript(app, request).await
 }
 
@@ -395,8 +412,16 @@ pub(crate) async fn generate(
         let executable =
             resolve_agent_executable(&app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
         let node_bin = managed_node_bin_directory(&app);
+        let generation_app = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            generate_with_acp(&snapshot, agent, executable, node_bin, &model_id)
+            generate_with_acp(
+                &generation_app,
+                &snapshot,
+                agent,
+                executable,
+                node_bin,
+                &model_id,
+            )
         })
         .await
         .map_err(|_| "ACPエージェントの要約処理を完了できませんでした。".to_string())??
@@ -770,12 +795,57 @@ async fn generate_with_cloudflare(
     snapshot: &SummaryTranscriptSnapshot,
     model_id: &str,
 ) -> Result<MeetingSummary, String> {
-    let prompt = build_prompt(snapshot)?;
-    if prompt.len() > MAX_PROMPT_BYTES {
-        return Err("文字起こしが大きすぎるため要約できません。".into());
-    }
-    let output = generate_cloudflare_text(app, model_id, &prompt).await?;
-    let content = parse_generated_content(&output, snapshot)?;
+    let chunks = split_summary_snapshot(snapshot);
+    let total_steps = summary_total_steps(chunks.len());
+    emit_summary_progress(app, &snapshot.meeting_id, 0, total_steps, "summarizing");
+
+    let content = if chunks.len() == 1 {
+        let prompt = build_prompt(snapshot)?;
+        ensure_prompt_size(&prompt)?;
+        let output = generate_cloudflare_text(app, model_id, &prompt).await?;
+        let content = parse_generated_content(&output, snapshot)?;
+        emit_summary_progress(app, &snapshot.meeting_id, 1, total_steps, "complete");
+        content
+    } else {
+        let requests = futures_util::stream::iter(chunks.into_iter().enumerate())
+            .map(|(index, chunk)| async move {
+                let prompt = build_prompt(&chunk)?;
+                ensure_prompt_size(&prompt)?;
+                let output = generate_cloudflare_text(app, model_id, &prompt).await?;
+                let content = parse_generated_content(&output, &chunk)?;
+                Ok::<_, String>((index, content))
+            })
+            .buffer_unordered(MAX_PARALLEL_SUMMARY_CHUNKS);
+        futures_util::pin_mut!(requests);
+        let mut completed = 0u32;
+        let mut partials = Vec::new();
+        while let Some(result) = requests.next().await {
+            partials.push(result?);
+            completed += 1;
+            emit_summary_progress(
+                app,
+                &snapshot.meeting_id,
+                completed,
+                total_steps,
+                "summarizing",
+            );
+        }
+        partials.sort_by_key(|(index, _)| *index);
+        let partials: Vec<_> = partials.into_iter().map(|(_, content)| content).collect();
+        let merge_prompt = build_summary_merge_prompt(&partials)?;
+        ensure_prompt_size(&merge_prompt)?;
+        emit_summary_progress(app, &snapshot.meeting_id, completed, total_steps, "merging");
+        let output = generate_cloudflare_text(app, model_id, &merge_prompt).await?;
+        let content = parse_generated_content(&output, snapshot)?;
+        emit_summary_progress(
+            app,
+            &snapshot.meeting_id,
+            total_steps,
+            total_steps,
+            "complete",
+        );
+        content
+    };
     Ok(MeetingSummary {
         schema_version: SCHEMA_VERSION,
         summary_id: uuid::Uuid::now_v7().to_string(),
@@ -790,16 +860,13 @@ async fn generate_with_cloudflare(
 }
 
 fn generate_with_acp(
+    app: &AppHandle,
     snapshot: &SummaryTranscriptSnapshot,
     agent: AcpAgentDefinition,
     executable: PathBuf,
     node_bin: Option<PathBuf>,
     model_id: &str,
 ) -> Result<MeetingSummary, String> {
-    let prompt = build_prompt(snapshot)?;
-    if prompt.len() > MAX_PROMPT_BYTES {
-        return Err("文字起こしが大きすぎるため要約できません。".into());
-    }
     let work_dir = std::env::temp_dir().join(format!(
         "mutsuna-echo-summary-{}-{}",
         std::process::id(),
@@ -807,11 +874,74 @@ fn generate_with_acp(
     ));
     fs::create_dir(&work_dir)
         .map_err(|error| format!("要約用の一時領域を作成できませんでした: {error}"))?;
-    let result = run_acp_agent(agent, executable, node_bin, &work_dir, model_id, &prompt).and_then(
-        |(output, model)| {
-            parse_generated_content(&output, snapshot).map(|content| (content, model))
-        },
-    );
+    let chunks = split_summary_snapshot(snapshot);
+    let total_steps = summary_total_steps(chunks.len());
+    emit_summary_progress(app, &snapshot.meeting_id, 0, total_steps, "summarizing");
+    let result: Result<(SummaryContent, String), String> = (|| {
+        if chunks.len() == 1 {
+            let prompt = build_prompt(snapshot)?;
+            ensure_prompt_size(&prompt)?;
+            let (output, model) = run_acp_agent(
+                agent,
+                executable.clone(),
+                node_bin.clone(),
+                &work_dir,
+                model_id,
+                &prompt,
+            )?;
+            let content = parse_generated_content(&output, snapshot)?;
+            emit_summary_progress(app, &snapshot.meeting_id, 1, total_steps, "complete");
+            return Ok((content, model));
+        }
+
+        let mut partials = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.iter().enumerate() {
+            let prompt = build_prompt(chunk)?;
+            ensure_prompt_size(&prompt)?;
+            let (output, _) = run_acp_agent(
+                agent,
+                executable.clone(),
+                node_bin.clone(),
+                &work_dir,
+                model_id,
+                &prompt,
+            )?;
+            partials.push(parse_generated_content(&output, chunk)?);
+            emit_summary_progress(
+                app,
+                &snapshot.meeting_id,
+                (index + 1) as u32,
+                total_steps,
+                "summarizing",
+            );
+        }
+        let merge_prompt = build_summary_merge_prompt(&partials)?;
+        ensure_prompt_size(&merge_prompt)?;
+        emit_summary_progress(
+            app,
+            &snapshot.meeting_id,
+            partials.len() as u32,
+            total_steps,
+            "merging",
+        );
+        let (output, model) = run_acp_agent(
+            agent,
+            executable,
+            node_bin,
+            &work_dir,
+            model_id,
+            &merge_prompt,
+        )?;
+        let content = parse_generated_content(&output, snapshot)?;
+        emit_summary_progress(
+            app,
+            &snapshot.meeting_id,
+            total_steps,
+            total_steps,
+            "complete",
+        );
+        Ok((content, model))
+    })();
     let _ = fs::remove_dir_all(&work_dir);
     let (content, resolved_model) = result?;
     Ok(MeetingSummary {
@@ -1094,6 +1224,94 @@ fn build_prompt(snapshot: &SummaryTranscriptSnapshot) -> Result<String, String> 
     Ok(format!(
         "あなたは会議記録の編集者です。次の修正版文字起こしだけを根拠に、日本語の会議ノートを作成してください。外部情報、ファイル、Web、ツールを使わず、推測で事実を補わないでください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"overview\":\"簡潔な概要\",\"decisions\":[{{\"text\":\"決定事項\",\"sourceSegmentIds\":[\"segment id\"]}}],\"actionItems\":[{{\"assignee\":nullまたは文字列,\"text\":\"作業\",\"due\":nullまたは文字列,\"sourceSegmentIds\":[\"segment id\"]}}]}} とします。決定事項とアクション項目には根拠となる実在のsourceSegmentIdsを付け、該当項目がなければ空配列にしてください。\n\n文字起こしJSON:\n{transcript}"
     ))
+}
+
+fn build_summary_merge_prompt(partials: &[SummaryContent]) -> Result<String, String> {
+    let summaries = serde_json::to_string(partials)
+        .map_err(|error| format!("部分要約を統合用に変換できませんでした: {error}"))?;
+    Ok(format!(
+        "あなたは会議記録の編集者です。時系列順の部分要約を、一つの日本語の会議ノートへ統合してください。部分要約だけを根拠にし、重複する内容をまとめ、決定事項とアクション項目を漏らさないでください。sourceSegmentIdsは入力に実在するIDだけをそのまま維持してください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"overview\":\"簡潔な概要\",\"decisions\":[{{\"text\":\"決定事項\",\"sourceSegmentIds\":[\"segment id\"]}}],\"actionItems\":[{{\"assignee\":nullまたは文字列,\"text\":\"作業\",\"due\":nullまたは文字列,\"sourceSegmentIds\":[\"segment id\"]}}]}} とします。\n\n部分要約JSON:\n{summaries}"
+    ))
+}
+
+fn ensure_prompt_size(prompt: &str) -> Result<(), String> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        Err("会議ノート生成用の入力が大きすぎます。".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn summary_total_steps(chunk_count: usize) -> u32 {
+    if chunk_count <= 1 {
+        1
+    } else {
+        chunk_count.saturating_add(1).min(u32::MAX as usize) as u32
+    }
+}
+
+fn split_summary_snapshot(snapshot: &SummaryTranscriptSnapshot) -> Vec<SummaryTranscriptSnapshot> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 0usize;
+    let mut chunk_start_ms = 0u64;
+
+    for segment in &snapshot.segments {
+        let segment_bytes = segment
+            .text
+            .len()
+            .saturating_add(segment.speaker.len())
+            .saturating_add(segment.segment_id.len())
+            .saturating_add(64);
+        let exceeds_duration = !current.is_empty()
+            && segment.end_ms.saturating_sub(chunk_start_ms) > SUMMARY_CHUNK_DURATION_MS;
+        let exceeds_size = !current.is_empty()
+            && current_bytes.saturating_add(segment_bytes) > MAX_SUMMARY_CHUNK_BYTES;
+        if exceeds_duration || exceeds_size {
+            chunks.push(summary_chunk(snapshot, std::mem::take(&mut current)));
+            current_bytes = 0;
+        }
+        if current.is_empty() {
+            chunk_start_ms = segment.start_ms;
+        }
+        current_bytes = current_bytes.saturating_add(segment_bytes);
+        current.push(segment.clone());
+    }
+    if !current.is_empty() {
+        chunks.push(summary_chunk(snapshot, current));
+    }
+    chunks
+}
+
+fn summary_chunk(
+    snapshot: &SummaryTranscriptSnapshot,
+    segments: Vec<crate::transcript_store::SummaryTranscriptSegment>,
+) -> SummaryTranscriptSnapshot {
+    SummaryTranscriptSnapshot {
+        meeting_id: snapshot.meeting_id.clone(),
+        transcription_id: snapshot.transcription_id.clone(),
+        revision: snapshot.revision,
+        language: snapshot.language.clone(),
+        segments,
+    }
+}
+
+fn emit_summary_progress(
+    app: &AppHandle,
+    meeting_id: &str,
+    completed_steps: u32,
+    total_steps: u32,
+    stage: &'static str,
+) {
+    let _ = app.emit(
+        "summary-progress",
+        SummaryProgress {
+            meeting_id: meeting_id.to_string(),
+            completed_steps,
+            total_steps,
+            stage,
+        },
+    );
 }
 
 fn mechanically_format_transcript_text(text: &str) -> String {
@@ -1920,6 +2138,54 @@ mod tests {
         assert!(prompt.contains("修正版です"));
         assert!(prompt.contains("岡本"));
         assert!(prompt.contains("segment-1"));
+    }
+
+    #[test]
+    fn splits_two_hour_transcript_into_fifteen_minute_chunks() {
+        let mut transcript = snapshot();
+        transcript.segments = (0..120)
+            .map(|minute| SummaryTranscriptSegment {
+                segment_id: format!("segment-{minute}"),
+                speaker: "話者".into(),
+                start_ms: minute * 60_000,
+                end_ms: (minute + 1) * 60_000,
+                text: format!("{minute}分の発話です。"),
+            })
+            .collect();
+
+        let chunks = split_summary_snapshot(&transcript);
+
+        assert_eq!(chunks.len(), 8);
+        assert_eq!(summary_total_steps(chunks.len()), 9);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.segments.len())
+                .sum::<usize>(),
+            120
+        );
+        assert_eq!(chunks[0].segments[0].segment_id, "segment-0");
+        assert_eq!(
+            chunks[7].segments.last().expect("last").segment_id,
+            "segment-119"
+        );
+    }
+
+    #[test]
+    fn merge_prompt_preserves_source_segment_ids() {
+        let partials = vec![SummaryContent {
+            overview: "概要".into(),
+            decisions: vec![SummaryReference {
+                text: "決定".into(),
+                source_segment_ids: vec!["segment-1".into()],
+            }],
+            action_items: Vec::new(),
+        }];
+
+        let prompt = build_summary_merge_prompt(&partials).expect("merge prompt");
+
+        assert!(prompt.contains("segment-1"));
+        assert!(prompt.contains("重複する内容をまとめ"));
     }
 
     #[test]

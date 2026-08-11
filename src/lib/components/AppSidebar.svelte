@@ -43,7 +43,7 @@
 
 </script>
 
-<Sidebar.Root class="app-sidebar" collapsible="offcanvas">
+<Sidebar.Root class="app-sidebar" collapsible="offcanvas" hideHeaderSeam>
   <div class="app-sidebar-content" aria-label="メインナビゲーション">
     <div class="brand" aria-label="Mutsuna Echo">
       <span class="brand-mark"><AudioLines aria-hidden="true" /></span>
@@ -100,7 +100,7 @@
 </Sidebar.Root>
 
 <style>
-  .app-sidebar-content { display: flex; height: 100%; min-width: 0; flex-direction: column; gap: 16px; padding: calc(20px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); border-right: 1px solid var(--border); background: color-mix(in oklch, var(--muted) 44%, var(--background)); }
+  .app-sidebar-content { display: flex; height: 100%; min-width: 0; flex-direction: column; gap: 16px; padding: calc(20px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); }
   .brand { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 0 8px; }
   .brand strong { overflow: hidden; font-size: 0.98rem; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
   .brand-mark { display: grid; width: 30px; height: 30px; flex: none; place-items: center; color: var(--primary); }

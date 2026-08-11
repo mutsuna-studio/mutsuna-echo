@@ -38,6 +38,7 @@
   let ecosystem = $state("all");
   let visibleLimit = $state(100);
   let selectedId = $state("project");
+  let componentListElement = $state<HTMLDivElement>();
 
   const ecosystems = $derived.by(() =>
     catalog ? [...new Set(catalog.components.map((component) => component.ecosystem))].sort() : []
@@ -93,11 +94,30 @@
   function updateQuery(event: Event) {
     query = (event.currentTarget as HTMLInputElement).value;
     visibleLimit = 100;
+    resetListPosition();
+    selectVisibleComponent();
   }
 
   function updateEcosystem(event: Event) {
     ecosystem = (event.currentTarget as HTMLSelectElement).value;
     visibleLimit = 100;
+    resetListPosition();
+    selectVisibleComponent();
+  }
+
+  function resetListPosition() {
+    componentListElement?.scrollTo({ top: 0 });
+  }
+
+  function selectVisibleComponent() {
+    queueMicrotask(() => {
+      if (!catalog) return;
+      const projectVisible = ecosystem === "all"
+        && (!query || catalog.project.name.toLocaleLowerCase("ja").includes(query.toLocaleLowerCase("ja")));
+      if (selectedId === "project" && projectVisible) return;
+      if (filteredComponents.some((component) => componentId(component) === selectedId)) return;
+      selectedId = projectVisible ? "project" : (filteredComponents[0] ? componentId(filteredComponents[0]) : "project");
+    });
   }
 </script>
 
@@ -144,7 +164,7 @@
         </div>
 
         <div class="license-browser">
-          <div class="component-list" aria-label="ライセンス対象一覧">
+          <div class="component-list" aria-label="ライセンス対象一覧" bind:this={componentListElement}>
             {#if ecosystem === "all" && (!query || catalog.project.name.toLocaleLowerCase("ja").includes(query.toLocaleLowerCase("ja")))}
               <button class:selected={selectedId === "project"} type="button" onclick={() => selectedId = "project"}>
                 <strong>{catalog.project.name}</strong>
@@ -197,7 +217,7 @@
 
 <style>
   .license-settings { display: grid; border-top: 1px solid var(--border); }
-  .license-summary { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 24px; padding: 14px; }
+  .license-summary { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 2px; }
   .license-heading { display: flex; min-width: 0; align-items: flex-start; gap: 12px; }
   .license-icon { display: grid; width: 34px; height: 34px; flex: none; place-items: center; border-radius: 9px; color: var(--primary); background: color-mix(in oklch, var(--primary) 10%, var(--background)); }
   .license-icon :global(svg) { width: 18px; height: 18px; stroke-width: 1.8; }
@@ -210,22 +230,22 @@
   .toggle-button:focus-visible, .component-list button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
   .toggle-button :global(svg) { width: 15px; height: 15px; transition: transform 160ms ease; }
   .toggle-button :global(svg.expanded) { transform: rotate(180deg); }
-  .license-details { display: grid; gap: 12px; padding: 16px 14px 14px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
+  .license-details { display: grid; gap: 12px; padding: 16px 0 0; border-top: 1px solid var(--border); }
   .license-controls { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(150px, 220px); gap: 8px; }
   .search-field { position: relative; display: flex; align-items: center; }
   .search-field :global(svg) { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--muted-foreground); pointer-events: none; }
   input, select { width: 100%; height: 36px; border: 1px solid var(--border); border-radius: 8px; color: var(--foreground); background: var(--background); font: inherit; font-size: 0.76rem; }
   input { padding: 0 10px 0 33px; }
   select { padding: 0 28px 0 10px; }
-  .license-browser { display: grid; min-height: 430px; grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.4fr); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
-  .component-list { max-height: 560px; overflow-y: auto; border-right: 1px solid var(--border); }
+  .license-browser { display: grid; min-height: 430px; grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.4fr); }
+  .component-list { max-height: 560px; overflow-y: auto; border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .component-list button { display: grid; width: 100%; gap: 3px; padding: 10px 12px; border: 0; border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent); color: var(--foreground); background: transparent; cursor: pointer; font: inherit; text-align: left; }
   .component-list button:hover { background: var(--muted); }
   .component-list button.selected { background: color-mix(in oklch, var(--primary) 10%, var(--background)); }
   .component-list strong { overflow: hidden; font-size: 0.77rem; font-weight: 670; text-overflow: ellipsis; white-space: nowrap; }
   .component-list span { overflow: hidden; color: var(--muted-foreground); font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
   .component-list .show-more { color: var(--primary); font-size: 0.72rem; font-weight: 650; text-align: center; }
-  .license-document { min-width: 0; max-height: 560px; overflow: auto; padding: 16px; }
+  .license-document { min-width: 0; max-height: 560px; overflow: auto; padding: 16px 0 16px 18px; }
   .license-document > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
   .license-document h3 { margin: 0; font-size: 0.98rem; font-weight: 680; overflow-wrap: anywhere; }
   .license-document header p, .license-document header > span { margin: 4px 0 0; color: var(--muted-foreground); font-size: 0.7rem; }
@@ -242,17 +262,37 @@
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
   @media (max-width: 760px) {
-    .license-summary { align-items: flex-start; }
+    .license-summary { align-items: flex-start; gap: 16px; }
     .license-controls { grid-template-columns: 1fr; }
     .license-browser { min-height: 0; grid-template-columns: 1fr; }
-    .component-list { max-height: 300px; border-right: 0; border-bottom: 1px solid var(--border); }
-    .license-document { max-height: 520px; }
+    .component-list {
+      max-height: 180px;
+      border-right: 0;
+      scrollbar-gutter: auto;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .component-list::-webkit-scrollbar { width: 0; height: 0; }
+    .license-document { max-height: none; padding-right: 0; padding-left: 0; }
   }
 
   @media (max-width: 520px) {
-    .license-summary { display: grid; gap: 12px; padding-right: 2px; padding-left: 2px; }
+    .license-settings { border-top-color: color-mix(in oklch, var(--border) 78%, transparent); }
+    .license-summary { display: grid; gap: 14px; padding: 15px 2px 14px; }
+    .license-heading { gap: 11px; }
+    .license-title { gap: 6px; }
+    .license-title h2 { font-size: 0.88rem; }
+    .license-heading p { margin-top: 5px; font-size: 0.72rem; line-height: 1.5; }
     .toggle-button { width: 100%; justify-content: center; }
-    .license-details { margin: 0 -2px; padding-right: 2px; padding-left: 2px; }
+    .license-details { gap: 10px; }
+    .license-controls { gap: 8px; }
+    .component-list { max-height: 164px; }
+    .component-list button { min-height: 52px; padding: 9px 11px; }
+    .license-document { padding: 14px 0 16px; }
+    .license-document > header { display: grid; gap: 2px; }
+    .license-document header > span { margin-top: 0; }
+    dl { margin: 12px 0; }
+    dl div { grid-template-columns: 44px minmax(0, 1fr); }
   }
 
   @media (prefers-reduced-motion: reduce) {
