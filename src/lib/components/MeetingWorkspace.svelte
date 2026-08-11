@@ -184,6 +184,7 @@
   let fileNameDraft = $state("");
   let fileNameInput = $state<HTMLInputElement | null>(null);
   let deleteDialogOpen = $state(false);
+  let deleteDialogMeetingId = $state<string | null>(null);
   let diarizationSpeakerCount = $state("off");
   let localRecognitionMode = $state<LocalRecognitionMode>("fast");
   let localRecognitionModeWorking = $state(false);
@@ -199,6 +200,20 @@
     LOCAL_RECOGNITION_MODE_OPTIONS.find((option) => option.value === localRecognitionMode)?.label
       ?? "高速"
   );
+
+  $effect(() => {
+    const currentMeetingId = meeting?.meetingId ?? null;
+    if (deleteDialogMeetingId === currentMeetingId) return;
+    deleteDialogMeetingId = currentMeetingId;
+    deleteDialogOpen = false;
+  });
+
+  async function deleteSelectedMeeting(mode: "audioOnly" | "all") {
+    const selectedMeeting = meeting;
+    if (!selectedMeeting) return;
+    deleteDialogOpen = false;
+    await onDelete(selectedMeeting, mode);
+  }
 
   $effect(() => {
     let cancelled = false;
@@ -699,10 +714,10 @@
         </AlertDialogDescription>
       </AlertDialogHeader>
       <div class="delete-options">
-        <AlertDialogAction variant="outline" onclick={() => onDelete(meeting, "audioOnly")}>
+        <AlertDialogAction variant="outline" onclick={() => deleteSelectedMeeting("audioOnly")}>
           <span><strong>音声ファイルだけ削除</strong><small>文字起こしと会議ノートは残す</small></span>
         </AlertDialogAction>
-        <AlertDialogAction variant="destructive" onclick={() => onDelete(meeting, "all")}>
+        <AlertDialogAction variant="destructive" onclick={() => deleteSelectedMeeting("all")}>
           <span><strong>会議をすべて削除</strong><small>音声・文字起こし・会議ノートを削除</small></span>
         </AlertDialogAction>
       </div>

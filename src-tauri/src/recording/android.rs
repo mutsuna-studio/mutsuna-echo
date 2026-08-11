@@ -42,7 +42,31 @@ pub fn status() -> Result<RecordingStatus, String> {
             .map(String::from)
             .map_err(|error| format!("Android録音状態を読み取れませんでした: {error}"))
     })?;
-    serde_json::from_str(&json).map_err(|error| format!("Android録音状態の応答が不正です: {error}"))
+    let status: RecordingStatus = serde_json::from_str(&json)
+        .map_err(|error| format!("Android録音状態の応答が不正です: {error}"))?;
+    if status.phase == super::types::RecordingPhase::Completed
+        && status
+            .output_path
+            .as_deref()
+            .is_none_or(|path| !std::path::Path::new(path).is_file())
+    {
+        clear_completed_status()?;
+        return Ok(RecordingStatus::default());
+    }
+    Ok(status)
+}
+
+pub fn clear_completed_status() -> Result<(), String> {
+    with_env(|env, app, bridge| {
+        env.call_static_method(
+            bridge,
+            "clearCompletedStatus",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(app)],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Android録音の完了状態を初期化できませんでした: {error}"))
+    })
 }
 
 pub fn start(request: &StartRecordingRequest) -> Result<RecordingStatus, String> {

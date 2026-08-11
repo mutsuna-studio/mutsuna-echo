@@ -173,6 +173,8 @@ pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult
             }
             cache_android_recorded_waveform(&app, &status, audio);
         }
+        // 完了結果はこの応答に含めて返すため、次回の新規録音画面へ持ち越さない。
+        recording::android::clear_completed_status()?;
         return Ok(StopRecordingResult { status, audio });
     }
     #[cfg(not(target_os = "android"))]

@@ -59,6 +59,12 @@ object RecordingBridge {
 
   @JvmStatic fun getStatus(@Suppress("UNUSED_PARAMETER") context: Context): String = synchronized(lock) { status.toString() }
 
+  @JvmStatic fun clearCompletedStatus(@Suppress("UNUSED_PARAMETER") context: Context) = synchronized(lock) {
+    if (status.optString("phase") !in setOf("starting", "recording", "finalizing")) {
+      status = JSONObject(defaultStatus())
+    }
+  }
+
   @JvmStatic fun copyContentUri(context: Context, value: String): String {
     val uri = Uri.parse(value)
     require(uri.scheme == "content") { "Androidのcontent URIではありません。" }

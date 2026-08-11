@@ -25,7 +25,8 @@ const MIN_EXCLUSIVE_SEGMENT_SAMPLES: usize = SAMPLE_RATE / 2;
 const LOCAL_CLUSTER_THRESHOLD: f32 = 0.9;
 const GLOBAL_EMBEDDING_THRESHOLD: f32 = 0.5;
 const MIN_REQUESTED_SPEAKER_ACTIVITY_MS: u64 = 1_000;
-const DIARIZATION_CACHE_SCHEMA: u8 = 2;
+const MAX_AUTO_SPEAKERS: usize = 10;
+const DIARIZATION_CACHE_SCHEMA: u8 = 3;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -131,7 +132,7 @@ pub(crate) fn diarize(
         Ok(fingerprint) => Some(crate::inference_cache::cache_key(
             &fingerprint,
             &format!(
-                "diarization-schema={DIARIZATION_CACHE_SCHEMA};model={}:{};speakers={:?};window={WINDOW_SAMPLES};overlap={OVERLAP_SAMPLES};local={LOCAL_CLUSTER_THRESHOLD};global={GLOBAL_EMBEDDING_THRESHOLD};same-chunk-cannot-link=true",
+                "diarization-schema={DIARIZATION_CACHE_SCHEMA};model={}:{};speakers={:?};window={WINDOW_SAMPLES};overlap={OVERLAP_SAMPLES};local={LOCAL_CLUSTER_THRESHOLD};global={GLOBAL_EMBEDDING_THRESHOLD};concurrent-speech-cannot-link=true;max-auto-speakers={MAX_AUTO_SPEAKERS}",
                 diarization_models::MODEL_PACK_ID,
                 diarization_models::MODEL_PACK_VERSION,
                 options.speaker_count
@@ -378,9 +379,6 @@ fn valid_cached_turns(turns: &[SpeakerTurn], total_ms: Option<u64>) -> bool {
 }
 
 fn valid_speaker_distribution(turns: &[SpeakerTurn], requested_speakers: Option<u8>) -> bool {
-    let Some(requested_speakers) = requested_speakers.map(usize::from) else {
-        return true;
-    };
     if turns.is_empty() {
         return true;
     }
@@ -390,6 +388,9 @@ fn valid_speaker_distribution(turns: &[SpeakerTurn], requested_speakers: Option<
         let total = activity.entry(turn.speaker.as_str()).or_default();
         *total = total.saturating_add(duration);
     }
+    let Some(requested_speakers) = requested_speakers.map(usize::from) else {
+        return activity.len() <= MAX_AUTO_SPEAKERS;
+    };
     activity.len() == requested_speakers
         && (requested_speakers <= 1
             || activity
@@ -533,7 +534,13 @@ fn stitch_chunks(
         merge_overlap_anchors(&pair[0], &pair[1], &node_index, &mut union);
     }
     let mut clusters = cluster_members(&nodes, &mut union);
+    let initial_cluster_count = clusters.len();
     agglomerate_embeddings(chunks, &nodes, &mut clusters, requested_speakers);
+    eprintln!(
+        "processing_diarization_clusters initial={} final={} requested={requested_speakers:?}",
+        initial_cluster_count,
+        clusters.len()
+    );
 
     let cluster_for_node = clusters
         .iter()
@@ -682,11 +689,16 @@ fn agglomerate_embeddings(
         let mut best: Option<(usize, usize, f32)> = None;
         for left in 0..clusters.len() {
             for right in left + 1..clusters.len() {
-                if clusters_share_chunk(&clusters[left], &clusters[right], nodes) {
+                if clusters_have_concurrent_speech(&clusters[left], &clusters[right], nodes, chunks)
+                {
                     continue;
                 }
                 let score = average_similarity(&clusters[left], &clusters[right], nodes, chunks);
-                let Some(score) = score.or_else(|| requested_speakers.map(|_| -2.0)) else {
+                let auto_over_limit =
+                    requested_speakers.is_none() && clusters.len() > MAX_AUTO_SPEAKERS;
+                let Some(score) = score
+                    .or_else(|| (requested_speakers.is_some() || auto_over_limit).then_some(-2.0))
+                else {
                     continue;
                 };
                 if best.is_none_or(|(_, _, current)| score > current) {
@@ -697,7 +709,10 @@ fn agglomerate_embeddings(
         let Some((left, right, score)) = best else {
             break;
         };
-        if requested_speakers.is_none() && score < GLOBAL_EMBEDDING_THRESHOLD {
+        if requested_speakers.is_none()
+            && clusters.len() <= MAX_AUTO_SPEAKERS
+            && score < GLOBAL_EMBEDDING_THRESHOLD
+        {
             break;
         }
         let removed = clusters.remove(right);
@@ -705,9 +720,34 @@ fn agglomerate_embeddings(
     }
 }
 
-fn clusters_share_chunk(left: &[usize], right: &[usize], nodes: &[NodeId]) -> bool {
-    left.iter()
-        .any(|a| right.iter().any(|b| nodes[*a].chunk == nodes[*b].chunk))
+fn clusters_have_concurrent_speech(
+    left: &[usize],
+    right: &[usize],
+    nodes: &[NodeId],
+    chunks: &[ChunkResult],
+) -> bool {
+    left.iter().any(|a| {
+        right.iter().any(|b| {
+            let first = nodes[*a];
+            let second = nodes[*b];
+            if first.chunk != second.chunk {
+                return false;
+            }
+            let turns = &chunks[first.chunk].turns;
+            turns
+                .iter()
+                .filter(|turn| turn.speaker == first.speaker)
+                .any(|first_turn| {
+                    turns
+                        .iter()
+                        .filter(|turn| turn.speaker == second.speaker)
+                        .any(|second_turn| {
+                            first_turn.start_sample < second_turn.end_sample
+                                && second_turn.start_sample < first_turn.end_sample
+                        })
+                })
+        })
+    })
 }
 
 fn average_similarity(
@@ -851,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_clustering_does_not_merge_speakers_from_the_same_chunk() {
+    fn auto_clustering_repairs_sequential_overclustering_in_the_same_chunk() {
         let chunks = vec![chunk(
             0,
             0,
@@ -861,6 +901,32 @@ mod tests {
                     1,
                     SAMPLE_RATE as u64,
                     2 * SAMPLE_RATE as u64,
+                    vec![1.0, 0.0],
+                ),
+            ],
+        )];
+        let turns = stitch_chunks(&chunks, None).expect("stitch chunks");
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| &turn.speaker)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn auto_clustering_preserves_simultaneous_speakers_in_the_same_chunk() {
+        let chunks = vec![chunk(
+            0,
+            0,
+            &[
+                (0, 0, 2 * SAMPLE_RATE as u64, vec![1.0, 0.0]),
+                (
+                    1,
+                    SAMPLE_RATE as u64,
+                    3 * SAMPLE_RATE as u64,
                     vec![1.0, 0.0],
                 ),
             ],
@@ -916,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_count_never_merges_speakers_that_coexist_in_one_chunk() {
+    fn requested_count_can_merge_sequential_overclustering_in_one_chunk() {
         let chunks = vec![chunk(
             0,
             0,
@@ -926,6 +992,32 @@ mod tests {
                     1,
                     SAMPLE_RATE as u64,
                     2 * SAMPLE_RATE as u64,
+                    vec![1.0, 0.0],
+                ),
+            ],
+        )];
+        let turns = stitch_chunks(&chunks, Some(1)).expect("stitch chunks");
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| &turn.speaker)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn requested_count_never_merges_simultaneous_speakers() {
+        let chunks = vec![chunk(
+            0,
+            0,
+            &[
+                (0, 0, 2 * SAMPLE_RATE as u64, vec![1.0, 0.0]),
+                (
+                    1,
+                    SAMPLE_RATE as u64,
+                    3 * SAMPLE_RATE as u64,
                     vec![1.0, 0.0],
                 ),
             ],
@@ -959,5 +1051,18 @@ mod tests {
         ];
         assert!(!valid_speaker_distribution(&turns, Some(2)));
         assert!(valid_speaker_distribution(&turns, None));
+    }
+
+    #[test]
+    fn automatic_speaker_distribution_rejects_pathological_overclustering() {
+        let turns = (0..=MAX_AUTO_SPEAKERS)
+            .map(|index| SpeakerTurn {
+                speaker: format!("Speaker {}", index + 1),
+                start_ms: index as u64 * 2_000,
+                end_ms: index as u64 * 2_000 + 1_000,
+                confidence: None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!valid_speaker_distribution(&turns, None));
     }
 }

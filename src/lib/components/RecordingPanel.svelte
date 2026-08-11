@@ -17,6 +17,8 @@
   import { Select } from "@mutsuna/ui/select";
   import Info from "@lucide/svelte/icons/info";
   import Mic from "@lucide/svelte/icons/mic";
+  import Square from "@lucide/svelte/icons/square";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import { VAD_PRESET_OPTIONS, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
@@ -312,6 +314,7 @@
     actionBusy = true;
     try {
       status = await invoke<RecordingStatus>("cancel_recording");
+      cancelDialogOpen = false;
       onMessage("録音を破棄しました。");
     } catch (error) {
       onError(errorText(error));
@@ -469,7 +472,25 @@
       <span class="desktop-start"><Button size="lg" type="button" onclick={start} disabled={!canStart}>録音を開始</Button></span>
     {/if}
   </div>
-  {#if !active}
+  {#if active}
+    <button
+      class="mobile-discard-button"
+      type="button"
+      onclick={() => cancelDialogOpen = true}
+      disabled={actionBusy || status?.phase === "finalizing"}
+    >
+      <Trash2 aria-hidden="true" /><span>録音を破棄</span>
+    </button>
+    <button
+      class="mobile-stop-button"
+      type="button"
+      onclick={stop}
+      disabled={actionBusy || status?.phase === "finalizing"}
+      aria-label={status?.phase === "finalizing" || actionBusy ? "録音を保存中" : "録音を停止"}
+    >
+      <Square aria-hidden="true" />
+    </button>
+  {:else}
     <button class="mobile-record-button" type="button" onclick={start} disabled={!canStart} aria-label="録音を開始">
       <Mic aria-hidden="true" />
     </button>
@@ -533,7 +554,9 @@
   .voice-activity.speaking span { background: #2c8058; box-shadow: 0 0 0 4px rgb(44 128 88 / 12%); }
   .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
   .mobile-recorder,
-  .mobile-record-button { display: none; }
+  .mobile-record-button,
+  .mobile-stop-button,
+  .mobile-discard-button { display: none; }
   @media (max-width: 600px) {
     .limitation { margin-top: 4px; padding: 8px 0; border-radius: 0; color: #68746c; background: transparent; font-size: 0.76rem; }
     .mobile-recorder { display: flex; min-height: 132px; flex-direction: column; justify-content: center; gap: 9px; margin: 0; padding: 4px 0 10px; background: transparent; }
@@ -553,13 +576,23 @@
     .meter span { background: repeating-linear-gradient(90deg, #2c8058 0 18px, transparent 18px 23px); }
     .monitor-note { margin-left: 59px; }
     .vad-setting { grid-template-columns: 1fr minmax(116px, 145px); justify-content: stretch; min-height: 68px; margin: 0; padding: 9px 2px; border-bottom: 1px solid #e4e9e5; color: #243129; font-size: 0.98rem; font-weight: 720; }
-    .record-actions :global(button) { flex: 1; }
-    .record-actions:has(.desktop-start) { display: none; }
+    .record-actions { display: none; }
     .desktop-start { display: none; }
-    .mobile-record-button { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); border: 0; border-radius: 50vw 50vw 0 0; color: white; background: #2c8058; box-shadow: 0 -8px 28px rgb(44 128 88 / 18%); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .mobile-record-button,
+    .mobile-stop-button { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); border: 0; border-radius: 50vw 50vw 0 0; color: white; box-shadow: 0 -8px 28px rgb(44 128 88 / 18%); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .mobile-record-button { background: #2c8058; }
     .mobile-record-button:active:not(:disabled) { background: #236a49; }
-    .mobile-record-button:disabled { opacity: 0.52; }
-    .mobile-record-button :global(svg) { width: clamp(68px, 22vw, 92px); height: clamp(68px, 22vw, 92px); stroke-width: 2.2; }
+    .mobile-stop-button { background: #d64b43; box-shadow: 0 -8px 28px rgb(177 48 42 / 20%); }
+    .mobile-stop-button:active:not(:disabled) { background: #b83b35; }
+    .mobile-record-button:disabled,
+    .mobile-stop-button:disabled { opacity: 0.58; }
+    .mobile-record-button :global(svg),
+    .mobile-stop-button :global(svg) { width: clamp(68px, 22vw, 92px); height: clamp(68px, 22vw, 92px); stroke-width: 2.2; }
+    .mobile-stop-button :global(svg) { fill: currentColor; stroke-width: 1.4; }
+    .mobile-discard-button { display: flex; position: fixed; z-index: 31; left: 50%; bottom: calc(50vw + 12px); min-height: 48px; align-items: center; justify-content: center; gap: 8px; padding: 0 18px; transform: translateX(-50%); border: 1px solid #d8a5a1; border-radius: 999px; color: #a93631; background: color-mix(in srgb, white 94%, #fff2f1); box-shadow: 0 5px 18px rgb(44 31 30 / 10%); font: inherit; font-size: 0.86rem; font-weight: 720; white-space: nowrap; }
+    .mobile-discard-button:active:not(:disabled) { background: #fff0ef; }
+    .mobile-discard-button:disabled { opacity: 0.48; }
+    .mobile-discard-button :global(svg) { width: 18px; height: 18px; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
   }
 </style>
