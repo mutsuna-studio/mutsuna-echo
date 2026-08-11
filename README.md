@@ -125,12 +125,12 @@ Google Playへの自動公開には、Google CloudでGoogle Play Developer API�
 
 GitHub Environment `release-android`のVariable `ANDROID_RELEASE_TRACK`には、製品版アクセスの承認前は`alpha`、承認後は`production`を設定します。失敗したAndroid公開だけを再実行する場合は、`v0.1.2-android-retry.1`のような再公開専用タグを作成します。この形式ではデスクトップJobをスキップし、元の`v0.1.2`をリリース名としてAndroid Jobだけを実行します。
 
-リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。タグのpushでWindows/macOS成果物をGitHub Releaseの下書きへ追加し、Androidを指定トラックへ配信します。すべて成功後、`release-production`の承認によって下書きが公開されます。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.4`は`1004`になります。
+リリース時は3か所のバージョンとストア向け更新文`distribution/whatsnew/whatsnew-ja-JP`を更新してから、同じバージョンのタグをpushします。タグのpushでWindows/macOS成果物をGitHub Releaseの下書きへ追加し、Androidを指定トラックへ配信します。すべて成功後、`release-production`の承認によって下書きが公開されます。Androidの`versionCode`はTauriがSemVerから生成し、`0.1.5`は`1005`になります。
 
 ```powershell
-node scripts/verify-release-version.mjs v0.1.4
-git tag v0.1.4
-git push origin v0.1.4
+node scripts/verify-release-version.mjs v0.1.5
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 ### macOS署名モード
