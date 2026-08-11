@@ -56,6 +56,10 @@ async fn validate_provider_api_key(
             crate::transcription::soniox::validate_api_key(api_key).await?;
             Ok(true)
         }
+        crate::credentials::CredentialId::CloudflareApiToken
+        | crate::credentials::CredentialId::CloudflareAccountId => {
+            Err("CloudflareではAPIトークンとAccount IDを一緒に設定してください。".into())
+        }
     }
 }
 
@@ -64,7 +68,38 @@ pub(crate) async fn save_provider_api_key(
     app: AppHandle,
     provider_id: String,
     api_key: String,
+    account_id: Option<String>,
 ) -> Result<bool, String> {
+    if provider_id == "cloudflare" {
+        let received_account_id = SecretString::from(account_id.unwrap_or_default());
+        let account_id = SecretString::from(received_account_id.expose_secret().trim().to_owned());
+        let received_api_key = SecretString::from(api_key);
+        let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
+        if account_id.expose_secret().is_empty() {
+            return Err("Cloudflare Account IDを入力してください。".into());
+        }
+        if api_key.expose_secret().is_empty() {
+            return Err("Cloudflare APIトークンを入力してください。".into());
+        }
+        crate::transcription::cloudflare::validate_credentials(&account_id, &api_key).await?;
+        crate::credentials::save(
+            &app,
+            crate::credentials::CredentialId::CloudflareApiToken,
+            &api_key,
+        )?;
+        if let Err(error) = crate::credentials::save(
+            &app,
+            crate::credentials::CredentialId::CloudflareAccountId,
+            &account_id,
+        ) {
+            let _ = crate::credentials::delete(
+                &app,
+                crate::credentials::CredentialId::CloudflareApiToken,
+            );
+            return Err(error);
+        }
+        return Ok(true);
+    }
     let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
     let received_api_key = SecretString::from(api_key);
     let api_key = SecretString::from(received_api_key.expose_secret().trim().to_owned());
@@ -92,6 +127,13 @@ pub(crate) async fn save_provider_api_key(
 
 #[tauri::command]
 pub(crate) fn delete_provider_api_key(app: AppHandle, provider_id: String) -> Result<(), String> {
+    if provider_id == "cloudflare" {
+        crate::credentials::delete(&app, crate::credentials::CredentialId::CloudflareApiToken)?;
+        return crate::credentials::delete(
+            &app,
+            crate::credentials::CredentialId::CloudflareAccountId,
+        );
+    }
     let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
     crate::credentials::delete(&app, credential)
 }
@@ -99,7 +141,7 @@ pub(crate) fn delete_provider_api_key(app: AppHandle, provider_id: String) -> Re
 /// Validate and store the API key in the operating system's credential store.
 #[tauri::command]
 pub(crate) async fn save_api_key(app: AppHandle, api_key: String) -> Result<bool, String> {
-    save_provider_api_key(app, "elevenlabs".into(), api_key).await
+    save_provider_api_key(app, "elevenlabs".into(), api_key, None).await
 }
 
 /// Report whether a key is configured without returning the secret to the UI.

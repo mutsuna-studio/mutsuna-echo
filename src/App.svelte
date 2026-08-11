@@ -13,6 +13,7 @@
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
+  import Settings from "@lucide/svelte/icons/settings";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import { checkAndroidUpdate, isAndroid, waitForAndroidUpdateCheck } from "./lib/androidUpdate";
@@ -21,10 +22,10 @@
   import MeetingHome from "./lib/components/MeetingHome.svelte";
   import MeetingWorkspace from "./lib/components/MeetingWorkspace.svelte";
   import PendingActionNotice from "./lib/components/PendingActionNotice.svelte";
-  import RecordingMode from "./lib/components/RecordingMode.svelte";
   import SummaryAgentManager from "./lib/components/SummaryAgentManager.svelte";
   import SummaryDefaultsSettings from "./lib/components/SummaryDefaultsSettings.svelte";
   import SonioxUsagePanel from "./lib/components/SonioxUsagePanel.svelte";
+  import CloudflareUsagePanel from "./lib/components/CloudflareUsagePanel.svelte";
   import TranscriptionContextEditor from "./lib/components/TranscriptionContextEditor.svelte";
   import UsagePanel from "./lib/components/UsagePanel.svelte";
   import {
@@ -51,6 +52,7 @@
     TranscriptionSession,
     TranscriptionUsage,
     SonioxUsage,
+    CloudflareUsage,
     ContextSaveState,
     GlobalTranscriptionContextSettings,
     MeetingTranscriptionContext,
@@ -68,7 +70,8 @@
   const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
     { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・重要用語", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
+    { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "cloudflare", label: "Cloudflare Workers AI", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIトークンとAccount IDが必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
   ];
   const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
     {
@@ -94,7 +97,7 @@
       ]
     }
   ];
-  type AppSection = "meetings" | "recording" | "settings";
+  type AppSection = "meetings" | "settings";
   type SettingsPane = "general" | "transcription" | "summary" | "usage";
   type TranscriptReplacementUndo = {
     transcriptionId: string;
@@ -187,6 +190,7 @@
   let diarizationModelStatus = $state.raw<LocalDiarizationModelStatus | null>(null);
   let usageLoading = $state(false);
   let sonioxUsageLoading = $state(false);
+  let cloudflareUsageLoading = $state(false);
   let recordingBusy = $state(false);
   let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
@@ -218,8 +222,10 @@
   let transcriptSaveState = $state<TranscriptSaveState>("saved");
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let sonioxUsage = $state.raw<SonioxUsage | null>(savedSonioxUsage());
+  let cloudflareUsage = $state.raw<CloudflareUsage | null>(null);
   let usageError = $state("");
   let sonioxUsageError = $state("");
+  let cloudflareUsageError = $state("");
   let lastErrorToast = $state("");
   let lastErrorToastAt = $state(0);
   let pendingActionPromise: Promise<void> | null = null;
@@ -242,6 +248,8 @@
   let lastSummaryMeetingId = "";
   let compactViewport = $state(false);
   let mobileMeetingDetail = $state(false);
+  let settingsViewElement = $state<HTMLElement | null>(null);
+  let settingsTabSwipe = $state<{ x: number; y: number } | null>(null);
   let hasAppHistoryEntry = false;
   const pendingTranscriptChanges = new Map<string, string>();
   const pendingLearnedCorrectionSegments = new Set<string>();
@@ -271,9 +279,10 @@
     const handlePopState = () => {
       hasAppHistoryEntry = false;
       if (recordingBusy) {
-        section = "recording";
+        section = "meetings";
+        mobileMeetingDetail = false;
         pushAppHistoryEntry();
-        showWarningToast("録音を続けています。", "録音画面へ戻りました。");
+        showWarningToast("録音を続けています。", "録音と会議へ戻りました。");
         return;
       }
       section = "meetings";
@@ -281,6 +290,55 @@
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  });
+
+  // 詳細画面が表示される経路では、Androidの戻る操作を統合画面へ戻す履歴を必ず用意する。
+  $effect(() => {
+    if (mobileMeetingDetail) pushAppHistoryEntry();
+  });
+
+  function startSettingsTabSwipe(event: TouchEvent) {
+    if (summarySettingsPreview || !window.matchMedia("(max-width: 780px)").matches) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("button, input, textarea, select, [role='slider'], [contenteditable='true'], [data-swipe-ignore]")) return;
+    const touch = event.touches[0];
+    if (touch) settingsTabSwipe = { x: touch.clientX, y: touch.clientY };
+  }
+
+  function updateSettingsTabSwipe(event: TouchEvent) {
+    if (!settingsTabSwipe) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const horizontalDistance = touch.clientX - settingsTabSwipe.x;
+    const verticalDistance = touch.clientY - settingsTabSwipe.y;
+    if (Math.abs(horizontalDistance) < 56 || Math.abs(horizontalDistance) <= Math.abs(verticalDistance) * 1.25) return;
+    event.preventDefault();
+    const panes: SettingsPane[] = ["general", "transcription", "summary", "usage"];
+    const currentIndex = panes.indexOf(settingsPane);
+    const nextIndex = horizontalDistance < 0
+      ? Math.min(panes.length - 1, currentIndex + 1)
+      : Math.max(0, currentIndex - 1);
+    if (nextIndex !== currentIndex) void selectSettingsPane(panes[nextIndex]);
+    settingsTabSwipe = null;
+  }
+
+  function endSettingsTabSwipe() {
+    settingsTabSwipe = null;
+  }
+
+  $effect(() => {
+    const element = settingsViewElement;
+    if (!element) return;
+    element.addEventListener("touchstart", startSettingsTabSwipe, { passive: true });
+    element.addEventListener("touchmove", updateSettingsTabSwipe, { passive: false });
+    element.addEventListener("touchend", endSettingsTabSwipe, { passive: true });
+    element.addEventListener("touchcancel", endSettingsTabSwipe, { passive: true });
+    return () => {
+      element.removeEventListener("touchstart", startSettingsTabSwipe);
+      element.removeEventListener("touchmove", updateSettingsTabSwipe);
+      element.removeEventListener("touchend", endSettingsTabSwipe);
+      element.removeEventListener("touchcancel", endSettingsTabSwipe);
+    };
   });
 
   const saving = $derived(savingProviderId !== null);
@@ -313,14 +371,15 @@
   const hasSonioxApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "soniox")?.configured ?? false
   );
+  const hasCloudflareApiKey = $derived(
+    transcriptionProviders.find((provider) => provider.id === "cloudflare")?.configured ?? false
+  );
   const pageTitle = $derived(
     section === "meetings"
       ? !mobileMeetingDetail
-        ? "会議"
+        ? "録音と会議"
         : meetings.find((meeting) => meeting.meetingId === selectedMeetingId)?.title ?? "会議"
-      : section === "recording"
-        ? "録音モード"
-        : "設定"
+      : "設定"
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
@@ -623,7 +682,8 @@
   }
 
   function startMobileRecording() {
-    navigate("recording");
+    section = "meetings";
+    mobileMeetingDetail = false;
   }
 
   async function selectHomeAudioFile() {
@@ -993,7 +1053,7 @@
           await restoreTranscriptionHistory();
         }
         if (hasApiKey) await refreshUsage();
-        void ensureStandardVad();
+        if (hasCloudflareApiKey) await refreshCloudflareUsage();
         void checkForAvailableUpdate();
       } catch (error) {
         showError(errorText(error));
@@ -1032,6 +1092,7 @@
         await restoreTranscriptionHistory();
         await refreshMeetings();
         await refreshUsage();
+        if (hasCloudflareApiKey) await refreshCloudflareUsage();
       }
     } catch (error) {
       if (reportError) showError(errorText(error));
@@ -1039,6 +1100,24 @@
     } finally {
       transcriptionSessionSyncing = false;
     }
+  }
+
+  async function refreshCloudflareUsage() {
+    if (!hasCloudflareApiKey || cloudflareUsageLoading) return;
+    cloudflareUsageLoading = true;
+    cloudflareUsageError = "";
+    try {
+      cloudflareUsage = await invoke<CloudflareUsage>("get_cloudflare_usage");
+    } catch (error) {
+      cloudflareUsageError = errorText(error);
+    } finally {
+      cloudflareUsageLoading = false;
+    }
+  }
+
+  function clearCloudflareUsage() {
+    cloudflareUsage = null;
+    cloudflareUsageError = "";
   }
 
   // WebViewを閉じている間に進んだ文字起こしを、再生成後に再同期する。
@@ -1075,14 +1154,14 @@
     };
   });
 
-  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string): Promise<boolean> {
+  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string, accountId?: string): Promise<boolean> {
     if (savingProviderId !== null) return false;
     savingProviderId = providerId;
     let saved = false;
 
     try {
       const modelsAccessible = await withTimeout(
-        invoke<boolean>("save_provider_api_key", { providerId, apiKey }),
+        invoke<boolean>("save_provider_api_key", { providerId, apiKey, accountId }),
         API_KEY_SAVE_TIMEOUT_MS,
         "APIキーの確認に時間がかかっています。通信状態を確認して、もう一度お試しください。"
       );
@@ -1104,6 +1183,10 @@
     }
     if (saved && providerId === "elevenlabs") void refreshUsage();
     if (saved && providerId === "soniox") clearSonioxUsage();
+    if (saved && providerId === "cloudflare") {
+      void refreshCloudflareUsage();
+      await refreshSummaryProviders();
+    }
     return saved;
   }
 
@@ -1117,6 +1200,10 @@
         usageError = "";
       }
       if (providerId === "soniox") clearSonioxUsage();
+      if (providerId === "cloudflare") {
+        clearCloudflareUsage();
+        await refreshSummaryProviders();
+      }
       showSuccessToast("APIキーを削除しました。");
     } catch (error) {
       showError(errorText(error));
@@ -1210,6 +1297,7 @@
       }
       await refreshMeetings();
       if (transcriptionProvider === "elevenlabs") await refreshUsage();
+      if (transcriptionProvider === "cloudflare") await refreshCloudflareUsage();
       section = "meetings";
     } catch (error) {
       showError(errorText(error));
@@ -1221,20 +1309,6 @@
     }
   }
 
-  async function ensureStandardVad() {
-    try {
-      const status = await invoke<{ installed: boolean; downloading: boolean; runtimeSupported: boolean }>(
-        "get_local_vad_model_status"
-      );
-      if (!status.installed && !status.downloading && status.runtimeSupported) {
-        await invoke("download_local_vad_model");
-        await refreshProviders();
-      }
-    } catch (error) {
-      console.warn("Could not install the standard VAD model", error);
-    }
-  }
-
   async function handleRecordedAudio(audio: SelectedAudioFile) {
     await flushTranscriptEdits();
     const contextSaved = await flushMeetingContext();
@@ -1243,6 +1317,7 @@
     selectedMeetingId = audio.meetingId;
     await restoreTranscriptionHistory();
     await refreshMeetings();
+    pushAppHistoryEntry();
     mobileMeetingDetail = true;
     section = "meetings";
   }
@@ -1712,21 +1787,22 @@
     contentClass={section === "settings" ? "settings-shell-content p-0 overflow-hidden border-0 rounded-none" : "p-0 overflow-hidden"}
     headerClass={section === "settings" ? "settings-shell-header app-main-header bg-background" : "app-main-header bg-background"}
   >
+    {#snippet headerActions()}
+      {#if section === "meetings"}
+        <button class="mobile-header-settings" type="button" onclick={() => navigate("settings")} aria-label="設定を開く" title="設定">
+          <Settings aria-hidden="true" />
+        </button>
+      {/if}
+    {/snippet}
+
     {#snippet sidebar()}
       <AppSidebar
         {section}
-        {meetings}
-        {selectedMeetingId}
         {settingsPane}
         settingsPreview={summarySettingsPreview}
-        loading={meetingsLoading}
-        busy={meetingBusy || busy}
-        allowMeetingNavigation={transcribing || diarizing}
         {recordingBusy}
         onNavigate={navigate}
         onSelectSettingsPane={selectSettingsPane}
-        onSelectMeeting={selectMeeting}
-        onRefreshMeetings={refreshMeetings}
       />
     {/snippet}
 
@@ -1748,12 +1824,16 @@
             {meetings}
             loading={meetingsLoading}
             busy={meetingBusy || busy}
+            {recordingDisabled}
+            {recordingBusy}
             allowMeetingNavigation={transcribing || diarizing}
             {selecting}
             onSelectMeeting={selectMeeting}
-            onRefresh={refreshMeetings}
-            onRecord={startMobileRecording}
             onSelectFile={selectHomeAudioFile}
+            onAudioReady={handleRecordedAudio}
+            onRecordingBusyChange={(value) => recordingBusy = value}
+            onMessage={showMessage}
+            onError={showError}
           />
         </div>
         <div class:mobile-detail-open={mobileMeetingDetail} class="meeting-workspace-container">
@@ -1815,21 +1895,11 @@
           onError={showError}
         />
         </div>
-      {:else if section === "recording"}
-        <RecordingMode
-          disabled={recordingDisabled}
-          busy={recordingBusy}
-          onBack={() => navigate("meetings")}
-          onAudioReady={handleRecordedAudio}
-          onBusyChange={(value) => recordingBusy = value}
-          onMessage={showMessage}
-          onError={showError}
-        />
       {:else}
-        <section class="settings-view">
+        <section class="settings-view" bind:this={settingsViewElement}>
           {#if recordingBusy}
-            <button class="mobile-recording-return" type="button" onclick={() => navigate("recording")}>
-              <ArrowLeft aria-hidden="true" /><span>録音画面へ戻る</span>
+            <button class="mobile-recording-return" type="button" onclick={() => navigate("meetings")}>
+              <ArrowLeft aria-hidden="true" /><span>録音へ戻る</span>
             </button>
           {/if}
           {#if !summarySettingsPreview}
@@ -1871,7 +1941,7 @@
                         {deleting}
                         hasApiKey={provider.configured}
                         {busy}
-                        onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
+                        onSave={(apiKey, accountId) => saveApiKey(provider.id, apiKey, accountId)}
                         onDelete={() => deleteApiKey(provider.id)}
                       />
                     {/each}
@@ -1947,11 +2017,14 @@
                   {#if hasSonioxApiKey}
                     <SonioxUsagePanel usage={sonioxUsage} loading={sonioxUsageLoading} error={sonioxUsageError} onRefresh={refreshSonioxUsage} />
                   {/if}
-                  {#if !hasApiKey && !hasSonioxApiKey}
+                  {#if hasCloudflareApiKey}
+                    <CloudflareUsagePanel usage={cloudflareUsage} loading={cloudflareUsageLoading} error={cloudflareUsageError} onRefresh={refreshCloudflareUsage} />
+                  {/if}
+                  {#if !hasApiKey && !hasSonioxApiKey && !hasCloudflareApiKey}
                     <section class="settings-empty-state">
                       <ChartNoAxesColumn aria-hidden="true" />
                       <h2>利用状況はまだありません</h2>
-                      <p>ElevenLabsまたはSonioxを接続すると表示されます。</p>
+                      <p>文字起こしサービスを接続すると表示されます。</p>
                       <button type="button" onclick={() => selectSettingsPane("transcription")}>サービスを接続</button>
                     </section>
                   {/if}

@@ -12,6 +12,8 @@
     LocalRecognitionMode,
     LocalRecognitionSettings,
     LocalDiarizationModelStatus,
+    LocalAiRuntimeProgress,
+    LocalAiRuntimeStatus,
     LocalVadModelStatus,
     VadPreset
   } from "../providers";
@@ -36,12 +38,17 @@
   let presetWorking = $state(false);
   let recognitionMode = $state<LocalRecognitionMode>("fast");
   let recognitionWorking = $state(false);
-  let autoInstallAttempted = $state(false);
+  let runtime = $state.raw<LocalAiRuntimeStatus | null>(null);
+  let bundleWorking = $state(false);
+  let bundleProgress = $state<LocalAiRuntimeProgress | null>(null);
   let diarizationModel = $state.raw<LocalDiarizationModelStatus | null>(null);
   let diarizationWorking = $state(false);
   let diarizationProgress = $state<LocalSttModelDownloadProgress | null>(null);
 
   const model = $derived(models[0] ?? null);
+  const bundleReady = $derived(runtime?.state === "ready" && !!model?.installed && !!vadModel?.installed);
+  const bundleSize = $derived((runtime?.sizeBytes ?? 25 * 1024 * 1024) + (model?.sizeBytes ?? 169 * 1024 * 1024) + (vadModel?.sizeBytes ?? 2.3 * 1024 * 1024));
+  const bundleStageLabel = $derived(bundleProgress?.stage === "runtime" ? "実行環境を追加中" : bundleProgress?.stage === "reazonSpeech" ? "日本語モデルを追加中" : bundleProgress?.stage === "sileroVad" ? "無音検出を追加中" : "仕上げ中");
   const progressPercent = $derived(
     progress && progress.totalBytes > 0
       ? Math.min(100, progress.downloadedBytes / progress.totalBytes * 100)
@@ -66,12 +73,13 @@
 
   async function refresh() {
     let recognitionSettings: LocalRecognitionSettings;
-    [models, vadModel, vadPreset, recognitionSettings, diarizationModel] = await Promise.all([
+    [models, vadModel, vadPreset, recognitionSettings, diarizationModel, runtime] = await Promise.all([
       invoke<LocalSttModelCatalogEntry[]>("list_local_stt_model_catalog"),
       invoke<LocalVadModelStatus>("get_local_vad_model_status"),
       invoke<VadPreset>("get_vad_preset"),
       invoke<LocalRecognitionSettings>("get_local_recognition_settings"),
-      invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status")
+      invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status"),
+      invoke<LocalAiRuntimeStatus>("get_local_ai_runtime_status")
     ]);
     recognitionMode = recognitionSettings.mode;
     working = models.some((entry) => entry.downloading);
@@ -82,6 +90,7 @@
   $effect(() => {
     if (preview) {
       models = [{ modelId: "reazonspeech-k2", displayName: "ReazonSpeech K2 int8-fp32", version: "preview", languageCodes: ["ja"], sizeBytes: 177_209_344, installed: true, downloading: false, runtimeSupported: true }];
+      runtime = { state: "ready", source: "githubRelease", protocolVersion: 1, requiredRuntimeVersion: "preview", installedRuntimeVersion: "preview", progress: null, error: null, sizeBytes: 25 * 1024 * 1024, canDelete: false };
       vadModel = { modelId: "silero-vad", displayName: "Silero VAD", version: "preview", sizeBytes: 2_306_867, installed: true, downloading: false, runtimeSupported: true };
       diarizationModel = { modelId: "pyannote-3.0-int8-3dspeaker-eres2net-base", displayName: "pyannote 3.0 INT8 + 3D-Speaker ERes2Net Base", version: "preview", sizeBytes: 41_134_267, installed: true, downloading: false, runtimeSupported: true };
       loading = false;
@@ -135,17 +144,28 @@
             }
           }
         );
+        const unlistenRuntime = await listen<LocalAiRuntimeProgress>(
+          "local-ai-runtime-progress",
+          ({ payload }) => {
+            if (!cancelled) {
+              bundleWorking = payload.state === "downloading" || payload.state === "installing";
+              bundleProgress = payload;
+              if (payload.stage === "ready") {
+                window.setTimeout(() => {
+                  if (!cancelled) void refresh().catch((error) => onError(errorText(error)));
+                }, 300);
+              }
+            }
+          }
+        );
         const unlistenStt = unlisten;
         unlisten = () => {
           unlistenStt?.();
           unlistenVad();
           unlistenDiarization();
+          unlistenRuntime();
         };
         if (!cancelled) await refresh();
-        if (!cancelled && !autoInstallAttempted && models[0]?.installed && vadModel && !vadModel.installed && !vadModel.downloading && vadModel.runtimeSupported) {
-          autoInstallAttempted = true;
-          await downloadVad(true);
-        }
       } catch (error) {
         if (!cancelled) onError(errorText(error));
       } finally {
@@ -158,25 +178,37 @@
     };
   });
 
-  async function download() {
-    if (!model || working) return;
-    working = true;
-    progress = { modelId: model.modelId, downloadedBytes: 0, totalBytes: model.sizeBytes };
+  async function installBundle() {
+    if (bundleWorking || bundleReady) return;
+    bundleWorking = true;
+    bundleProgress = { state: "downloading", stage: "runtime", downloadedBytes: 0, totalBytes: runtime?.sizeBytes ?? 1, progress: 0 };
     try {
-      await invoke("download_local_stt_model", { modelId: model.modelId });
+      await invoke("install_local_transcription_bundle");
       await refresh();
       await onChanged();
-      onMessage("端末だけで文字起こしできるようになりました。");
+      onMessage("端末内文字起こしを利用できるようになりました。");
     } catch (error) {
       onError(errorText(error));
     } finally {
-      working = false;
-      progress = null;
-      try {
-        await refresh();
-        await onChanged();
-      } catch { /* 次回表示時に再取得する */ }
+      bundleWorking = false;
+      bundleProgress = null;
+      try { await refresh(); } catch { /* 次回表示時に再取得する */ }
     }
+  }
+
+  async function cancelBundle() {
+    try { await invoke("cancel_local_transcription_bundle_install"); }
+    catch (error) { onError(errorText(error)); }
+  }
+
+  async function removeRuntime() {
+    if (!runtime?.canDelete || !window.confirm("ローカルAIの実行環境を削除しますか？")) return;
+    try {
+      await invoke("delete_local_ai_runtime");
+      await refresh();
+      await onChanged();
+      onMessage("ローカルAIの実行環境を削除しました。");
+    } catch (error) { onError(errorText(error)); }
   }
 
   async function cancelDownload() {
@@ -199,26 +231,6 @@
       onError(errorText(error));
     } finally {
       working = false;
-    }
-  }
-
-  async function downloadVad(automatic = false) {
-    if (!vadModel || vadWorking) return;
-    vadWorking = true;
-    vadProgress = { modelId: vadModel.modelId, downloadedBytes: 0, totalBytes: vadModel.sizeBytes };
-    try {
-      await invoke("download_local_vad_model");
-      await refresh();
-      await onChanged();
-      onMessage(automatic
-        ? "音声のない部分を見つける機能を追加しました。"
-        : "音声のない部分を見つける機能を追加しました。次回の文字起こしから処理時間を短くします。");
-    } catch (error) {
-      onError(errorText(error));
-    } finally {
-      vadWorking = false;
-      vadProgress = null;
-      try { await refresh(); } catch { /* 次回表示時に再取得する */ }
     }
   }
 
@@ -267,6 +279,21 @@
     }
   }
 
+  async function removeVad() {
+    if (!vadModel?.installed || vadWorking || !window.confirm("無音検出モデルを削除しますか？")) return;
+    vadWorking = true;
+    try {
+      await invoke("delete_local_vad_model");
+      await refresh();
+      await onChanged();
+      onMessage("無音検出モデルを削除しました。");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      vadWorking = false;
+    }
+  }
+
   async function downloadDiarization() {
     if (!diarizationModel || diarizationWorking) return;
     diarizationWorking = true;
@@ -310,10 +337,35 @@
 
 </script>
 
+<div class="local-model-manager model-row" aria-busy={loading || bundleWorking}>
+  <div class="local-model-copy">
+    <div class="local-model-title">
+      <strong>端末内文字起こしのセットアップ</strong>
+      <span class:ready={bundleReady} class="model-status">{#if bundleReady}<CircleCheck aria-hidden="true" />{/if}{bundleReady ? "利用可能" : "未完了"}</span>
+    </div>
+    <small>実行環境・日本語モデル・無音検出をまとめて追加 · 最大約{formatFileSize(bundleSize)}</small>
+    {#if model?.installed && runtime?.state !== "ready"}
+      <small>既存モデルの利用を続けるには、実行環境を追加してください。</small>
+    {/if}
+    {#if runtime?.state === "incompatible"}<small>実行環境の更新が必要です。</small>{/if}
+    {#if runtime?.state === "removalPending"}<small>実行環境はGoogle Playによる削除待ちです。</small>{/if}
+    {#if runtime?.error}<small>{runtime.error}</small>{/if}
+    {#if bundleWorking && bundleProgress}
+      <progress max="100" value={Math.min(100, bundleProgress.progress * 100)} aria-label={bundleStageLabel}></progress>
+      <small>{bundleStageLabel}</small>
+    {/if}
+  </div>
+  {#if bundleWorking}
+    <Button variant="outline" type="button" onclick={cancelBundle}>キャンセル</Button>
+  {:else if !bundleReady}
+    <Button type="button" onclick={installBundle} disabled={disabled || loading}>不足分を追加</Button>
+  {/if}
+</div>
+
 <div class="local-model-manager model-row" aria-busy={loading || working}>
   <div class="local-model-copy">
     <div class="local-model-title">
-      <strong>端末内文字起こし</strong>
+      <strong>日本語文字起こしモデル</strong>
       <span class:ready={model?.installed} class="model-status">{#if model?.installed}<CircleCheck aria-hidden="true" />{/if}{model?.installed ? "利用可能" : "未追加"}</span>
     </div>
     <small>
@@ -342,10 +394,6 @@
     </Button>
   {:else if working}
     <Button variant="outline" type="button" onclick={cancelDownload}>キャンセル</Button>
-  {:else}
-    <Button type="button" onclick={download} disabled={disabled || loading || !model || !model.runtimeSupported}>
-      追加
-    </Button>
   {/if}
 </div>
 
@@ -368,7 +416,7 @@
   {:else if diarizationWorking}
     <Button variant="outline" type="button" onclick={cancelDiarizationDownload}>キャンセル</Button>
   {:else}
-    <Button type="button" onclick={downloadDiarization} disabled={disabled || loading || !diarizationModel || !diarizationModel.runtimeSupported}>追加</Button>
+    <Button type="button" onclick={downloadDiarization} disabled={disabled || loading || runtime?.state !== "ready" || !diarizationModel || !diarizationModel.runtimeSupported}>追加</Button>
   {/if}
 </div>
 
@@ -400,9 +448,21 @@
   </div>
   {#if vadWorking && !vadModel?.installed}
     <Button variant="outline" type="button" onclick={cancelVadDownload}>キャンセル</Button>
-  {:else if !vadModel?.installed}
-    <Button type="button" onclick={() => downloadVad()} disabled={disabled || loading || !vadModel || !vadModel.runtimeSupported}>
-      追加
-    </Button>
+  {:else if vadModel?.installed}
+    <Button variant="outline" type="button" onclick={removeVad} disabled={disabled || vadWorking}>削除</Button>
+  {/if}
+</div>
+
+<div class="local-model-manager model-row" aria-busy={loading}>
+  <div class="local-model-copy">
+    <div class="local-model-title">
+      <strong>ローカルAI実行環境</strong>
+      <span class:ready={runtime?.state === "ready"} class="model-status">{runtime?.state === "ready" ? `v${runtime.installedRuntimeVersion}` : "未追加"}</span>
+    </div>
+    <small>{runtime?.source === "googlePlay" ? "Google Playから追加" : "署名を確認してGitHub Releaseから追加"} · 約{formatFileSize(runtime?.sizeBytes ?? 25 * 1024 * 1024)}</small>
+    {#if runtime?.state === "ready" && !runtime.canDelete}<small>モデルが残っている間は削除できません。</small>{/if}
+  </div>
+  {#if runtime?.state === "ready"}
+    <Button variant="outline" type="button" onclick={removeRuntime} disabled={disabled || !runtime.canDelete}>削除</Button>
   {/if}
 </div>

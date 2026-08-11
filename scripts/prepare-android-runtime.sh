@@ -11,7 +11,7 @@ readonly REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CACHE_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mutsuna-echo-sherpa-onnx-v${SHERPA_ONNX_VERSION}"
 readonly ARCHIVE_PATH="${CACHE_ROOT}/${ARCHIVE_NAME}"
 readonly EXTRACTED_PATH="${CACHE_ROOT}/extracted"
-readonly DESTINATION="${REPOSITORY_ROOT}/src-tauri/gen/android/app/src/main/jniLibs/${ABI}"
+readonly DESTINATION="${REPOSITORY_ROOT}/src-tauri/gen/android/local_ai_runtime/src/main/jniLibs/${ABI}"
 
 case "${ABI}" in
   arm64-v8a|armeabi-v7a|x86|x86_64) ;;
@@ -68,11 +68,4 @@ onnxruntime_library="$(find_runtime_library libonnxruntime.so)"
 mkdir -p "${DESTINATION}"
 cp "${sherpa_library}" "${onnxruntime_library}" "${DESTINATION}/"
 
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  printf 'SHERPA_ONNX_LIB_DIR=%s\n' "${DESTINATION}" >> "${GITHUB_ENV}"
-fi
-
 printf 'Sherpa ONNX Android runtime: %s\n' "${DESTINATION}"
-if [[ -z "${GITHUB_ENV:-}" ]]; then
-  printf 'Set SHERPA_ONNX_LIB_DIR=%s before running the Android build.\n' "${DESTINATION}"
-fi

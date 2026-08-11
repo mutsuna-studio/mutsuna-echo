@@ -21,6 +21,10 @@ const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
 const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const CLOUDFLARE_PROVIDER_ID: &str = "cloudflare";
+const CLOUDFLARE_GRANITE_MODEL_ID: &str = "@cf/ibm-granite/granite-4.0-h-micro";
+const CLOUDFLARE_GLM_MODEL_ID: &str = "@cf/zai-org/glm-4.7-flash";
+const CLOUDFLARE_GEMMA_MODEL_ID: &str = "@cf/google/gemma-4-26b-a4b-it";
 const NODE_VERSION: &str = "24.18.0";
 const LEGACY_NODE_VERSIONS: &[&str] = &["22.23.2"];
 const MAX_NODE_ARCHIVE_BYTES: u64 = 100 * 1024 * 1024;
@@ -204,7 +208,7 @@ pub(crate) struct TranscriptFormattingResult {
 
 pub(crate) async fn providers(app: AppHandle) -> Vec<SummaryProviderDefinition> {
     tauri::async_runtime::spawn_blocking(move || {
-        ACP_AGENTS
+        let mut providers: Vec<_> = ACP_AGENTS
             .iter()
             .map(|agent| {
                 let ready = resolve_agent_executable(&app, agent).is_some();
@@ -226,7 +230,28 @@ pub(crate) async fn providers(app: AppHandle) -> Vec<SummaryProviderDefinition> 
                     }],
                 }
             })
-            .collect()
+            .collect();
+        let cloudflare_ready =
+            crate::credentials::has(&app, crate::credentials::CredentialId::CloudflareApiToken)
+                .unwrap_or(false)
+                && crate::credentials::has(
+                    &app,
+                    crate::credentials::CredentialId::CloudflareAccountId,
+                )
+                .unwrap_or(false);
+        providers.push(SummaryProviderDefinition {
+            id: CLOUDFLARE_PROVIDER_ID.into(),
+            label: "Cloudflare Workers AI".into(),
+            description: "保存済みのCloudflare認証情報で会議ノートを生成します。".into(),
+            ready: cloudflare_ready,
+            status_message: if cloudflare_ready {
+                "APIトークンとAccount IDを設定済みです。".into()
+            } else {
+                "文字起こし設定でCloudflare APIトークンとAccount IDを設定してください。".into()
+            },
+            models: cloudflare_summary_models(),
+        });
+        providers
     })
     .await
     .unwrap_or_default()
@@ -242,6 +267,19 @@ pub(crate) async fn get_summary_models(
     app: AppHandle,
     provider_id: String,
 ) -> Result<Vec<SummaryModelDefinition>, String> {
+    if provider_id == CLOUDFLARE_PROVIDER_ID {
+        let ready =
+            crate::credentials::has(&app, crate::credentials::CredentialId::CloudflareApiToken)
+                .unwrap_or(false)
+                && crate::credentials::has(
+                    &app,
+                    crate::credentials::CredentialId::CloudflareAccountId,
+                )
+                .unwrap_or(false);
+        return ready
+            .then(cloudflare_summary_models)
+            .ok_or_else(|| "Cloudflare APIトークンとAccount IDを設定してください。".into());
+    }
     let agent = ACP_AGENTS
         .iter()
         .find(|agent| agent.id == provider_id)
@@ -339,26 +377,30 @@ pub(crate) async fn generate(
     request: GenerateSummaryRequest,
 ) -> Result<SummaryStatus, String> {
     crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
-    let agent = ACP_AGENTS
-        .iter()
-        .find(|agent| agent.id == request.provider_id)
-        .copied()
-        .ok_or_else(|| "選択した要約プロバイダーには対応していません。".to_string())?;
     validate_model_id(&request.model_id)?;
     let snapshot = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
         .ok_or_else(|| "先に文字起こしを作成してください。".to_string())?;
     if snapshot.segments.is_empty() {
         return Err("要約できる文字起こしがありません。".into());
     }
-    let model_id = request.model_id.clone();
-    let executable =
-        resolve_agent_executable(&app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
-    let node_bin = managed_node_bin_directory(&app);
-    let generated = tauri::async_runtime::spawn_blocking(move || {
-        generate_with_acp(&snapshot, agent, executable, node_bin, &model_id)
-    })
-    .await
-    .map_err(|_| "ACPエージェントの要約処理を完了できませんでした。".to_string())??;
+    let generated = if request.provider_id == CLOUDFLARE_PROVIDER_ID {
+        generate_with_cloudflare(&app, &snapshot, &request.model_id).await?
+    } else {
+        let agent = ACP_AGENTS
+            .iter()
+            .find(|agent| agent.id == request.provider_id)
+            .copied()
+            .ok_or_else(|| "選択した要約プロバイダーには対応していません。".to_string())?;
+        let model_id = request.model_id.clone();
+        let executable =
+            resolve_agent_executable(&app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
+        let node_bin = managed_node_bin_directory(&app);
+        tauri::async_runtime::spawn_blocking(move || {
+            generate_with_acp(&snapshot, agent, executable, node_bin, &model_id)
+        })
+        .await
+        .map_err(|_| "ACPエージェントの要約処理を完了できませんでした。".to_string())??
+    };
     let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
         .ok_or_else(|| "要約中に文字起こしが削除されました。".to_string())?;
     if current.transcription_id != generated.transcription_id
@@ -454,6 +496,16 @@ async fn generate_transcript_formatting_with_acp(
     provider_id: &str,
     model_id: &str,
 ) -> Result<(Vec<TranscriptFormattingChange>, String), String> {
+    if provider_id == CLOUDFLARE_PROVIDER_ID {
+        validate_cloudflare_model_id(model_id)?;
+        let prompt = build_transcript_formatting_prompt(snapshot)?;
+        if prompt.len() > MAX_PROMPT_BYTES {
+            return Err("文字起こしが大きすぎるため整形できません。".into());
+        }
+        let output = generate_cloudflare_text(app, model_id, &prompt).await?;
+        let changes = parse_transcript_formatting_content(&output, snapshot)?;
+        return Ok((changes, model_id.to_string()));
+    }
     let agent = ACP_AGENTS
         .iter()
         .find(|agent| agent.id == provider_id)
@@ -664,6 +716,77 @@ fn model_definitions_from_session(
         );
     }
     models
+}
+
+fn cloudflare_summary_models() -> Vec<SummaryModelDefinition> {
+    vec![
+        SummaryModelDefinition {
+            id: CLOUDFLARE_GLM_MODEL_ID.into(),
+            label: "GLM-4.7-Flash".into(),
+            description: "高速な多言語モデル。日本語の会議ノートに適しています。".into(),
+            is_default: true,
+        },
+        SummaryModelDefinition {
+            id: CLOUDFLARE_GRANITE_MODEL_ID.into(),
+            label: "Granite 4.0 H Micro".into(),
+            description: "軽量で低コストな指示追従モデルです。".into(),
+            is_default: false,
+        },
+        SummaryModelDefinition {
+            id: CLOUDFLARE_GEMMA_MODEL_ID.into(),
+            label: "Gemma 4 26B-A4B".into(),
+            description: "長い文脈と推論に対応する高品質なMoEモデルです。".into(),
+            is_default: false,
+        },
+    ]
+}
+
+fn validate_cloudflare_model_id(model_id: &str) -> Result<(), String> {
+    [
+        CLOUDFLARE_GRANITE_MODEL_ID,
+        CLOUDFLARE_GLM_MODEL_ID,
+        CLOUDFLARE_GEMMA_MODEL_ID,
+    ]
+    .contains(&model_id)
+    .then_some(())
+    .ok_or_else(|| "選択したCloudflare Workers AIモデルには対応していません。".into())
+}
+
+async fn generate_cloudflare_text(
+    app: &AppHandle,
+    model_id: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    validate_cloudflare_model_id(model_id)?;
+    let api_token =
+        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareApiToken)?;
+    let account_id =
+        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareAccountId)?;
+    crate::transcription::cloudflare::generate_text(&account_id, &api_token, model_id, prompt).await
+}
+
+async fn generate_with_cloudflare(
+    app: &AppHandle,
+    snapshot: &SummaryTranscriptSnapshot,
+    model_id: &str,
+) -> Result<MeetingSummary, String> {
+    let prompt = build_prompt(snapshot)?;
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err("文字起こしが大きすぎるため要約できません。".into());
+    }
+    let output = generate_cloudflare_text(app, model_id, &prompt).await?;
+    let content = parse_generated_content(&output, snapshot)?;
+    Ok(MeetingSummary {
+        schema_version: SCHEMA_VERSION,
+        summary_id: uuid::Uuid::now_v7().to_string(),
+        meeting_id: snapshot.meeting_id.clone(),
+        transcription_id: snapshot.transcription_id.clone(),
+        source_revision: snapshot.revision,
+        provider: CLOUDFLARE_PROVIDER_ID.into(),
+        model: model_id.into(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        content,
+    })
 }
 
 fn generate_with_acp(
@@ -1073,9 +1196,8 @@ fn parse_transcript_formatting_content(
         .strip_suffix("```")
         .unwrap_or(without_prefix)
         .trim();
-    let content: TranscriptFormattingContent = serde_json::from_str(json).map_err(|error| {
-        format!("ACPエージェントの整形結果をJSONとして解析できませんでした: {error}")
-    })?;
+    let content: TranscriptFormattingContent = serde_json::from_str(json)
+        .map_err(|error| format!("AIの整形結果をJSONとして解析できませんでした: {error}"))?;
     validate_formatting_changes(&content.changes, snapshot)?;
     Ok(content.changes)
 }
@@ -1140,9 +1262,8 @@ fn parse_generated_content(
         .strip_suffix("```")
         .unwrap_or(without_prefix)
         .trim();
-    let content: SummaryContent = serde_json::from_str(json).map_err(|error| {
-        format!("ACPエージェントの要約結果をJSONとして解析できませんでした: {error}")
-    })?;
+    let content: SummaryContent = serde_json::from_str(json)
+        .map_err(|error| format!("AIの要約結果をJSONとして解析できませんでした: {error}"))?;
     validate_content(&content, snapshot)?;
     Ok(content)
 }
@@ -1937,5 +2058,17 @@ mod tests {
         assert_eq!(models[0].id, "default");
         assert_eq!(models[0].label, "Claude Codeの既定モデル");
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn exposes_supported_cloudflare_summary_models() {
+        let models = cloudflare_summary_models();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, CLOUDFLARE_GLM_MODEL_ID);
+        assert!(models[0].is_default);
+        assert!(models
+            .iter()
+            .all(|model| validate_cloudflare_model_id(&model.id).is_ok()));
+        assert!(validate_cloudflare_model_id("@cf/unknown/model").is_err());
     }
 }

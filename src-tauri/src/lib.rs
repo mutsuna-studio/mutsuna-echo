@@ -8,6 +8,9 @@ mod commands;
 mod compute_tuning;
 mod credentials;
 mod inference_cache;
+#[allow(dead_code)]
+mod local_ai_protocol;
+mod local_ai_runtime;
 #[cfg(desktop)]
 mod meeting_detection;
 mod meeting_store;
@@ -52,6 +55,12 @@ pub fn run() {
             android_update::check_android_update,
             android_update::start_android_update,
             android_update::complete_android_update,
+            local_ai_runtime::get_local_ai_runtime_status,
+            local_ai_runtime::install_local_ai_runtime,
+            local_ai_runtime::cancel_local_ai_runtime_install,
+            local_ai_runtime::delete_local_ai_runtime,
+            local_ai_runtime::install_local_transcription_bundle,
+            local_ai_runtime::cancel_local_transcription_bundle_install,
             commands::api_key::save_api_key,
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,
@@ -113,6 +122,7 @@ pub fn run() {
             summary::format_selected_transcript,
             commands::usage::get_transcription_usage,
             commands::usage::get_soniox_usage,
+            commands::usage::get_cloudflare_usage,
             commands::recording::get_recording_capabilities,
             commands::recording::get_recording_status,
             commands::recording::start_recording_monitor,

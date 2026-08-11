@@ -50,6 +50,32 @@ pub(crate) struct SonioxUsage {
     fetched_at: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudflareUsage {
+    estimated_cost_usd: String,
+    used_duration_ms: u64,
+    estimated_neurons: f64,
+    transcription_count: u64,
+    period_start: String,
+    daily_used_duration_ms: u64,
+    daily_estimated_neurons: f64,
+    daily_transcription_count: u64,
+    daily_free_allocation_neurons: f64,
+    daily_remaining_neurons: f64,
+    daily_usage_percent: f64,
+    daily_period_start: String,
+    daily_resets_at: String,
+    fetched_at: String,
+}
+
+struct CloudflareUsageEstimate {
+    cost_usd: f64,
+    duration_ms: u64,
+    neurons: f64,
+    run_count: u64,
+}
+
 enum ApiResponse<T> {
     Data(T),
     MissingPermission,
@@ -289,6 +315,104 @@ pub(crate) async fn get_soniox_usage(app: AppHandle) -> Result<SonioxUsage, Stri
         period_start: period_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         fetched_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     })
+}
+
+#[tauri::command]
+pub(crate) fn get_cloudflare_usage(app: AppHandle) -> Result<CloudflareUsage, String> {
+    let now = Utc::now();
+    let period_start = now
+        .date_naive()
+        .with_day(1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date| date.and_utc())
+        .ok_or_else(|| "Cloudflareの利用期間を計算できませんでした。".to_string())?;
+    let daily_period_start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|date| date.and_utc())
+        .ok_or_else(|| "Cloudflareの日次利用期間を計算できませんでした。".to_string())?;
+    let monthly = estimate_cloudflare_usage_since(&app, period_start)?;
+    let daily = estimate_cloudflare_usage_since(&app, daily_period_start)?;
+    let free_allocation = crate::transcription::cloudflare::FREE_DAILY_NEURONS;
+    let daily_remaining_neurons = (free_allocation - daily.neurons).max(0.0);
+    let daily_usage_percent = if free_allocation > 0.0 {
+        daily.neurons / free_allocation * 100.0
+    } else {
+        0.0
+    };
+    let daily_resets_at = daily_period_start + chrono::Duration::days(1);
+    let formatted = format!("{:.10}", monthly.cost_usd);
+    Ok(CloudflareUsage {
+        estimated_cost_usd: formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned(),
+        used_duration_ms: monthly.duration_ms,
+        estimated_neurons: monthly.neurons,
+        transcription_count: monthly.run_count,
+        period_start: period_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        daily_used_duration_ms: daily.duration_ms,
+        daily_estimated_neurons: daily.neurons,
+        daily_transcription_count: daily.run_count,
+        daily_free_allocation_neurons: free_allocation,
+        daily_remaining_neurons,
+        daily_usage_percent,
+        daily_period_start: daily_period_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        daily_resets_at: daily_resets_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        fetched_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    })
+}
+
+fn estimate_cloudflare_usage_since(
+    app: &AppHandle,
+    since: DateTime<Utc>,
+) -> Result<CloudflareUsageEstimate, String> {
+    let usage = crate::transcript_store::provider_cost_usage_since(
+        app,
+        crate::transcription::TranscriptionProvider::Cloudflare.id(),
+        since,
+    )?;
+    let mut used_minutes =
+        usage.cost_usd / crate::transcription::cloudflare::PRICE_USD_PER_AUDIO_MINUTE;
+    let mut recovered_durations = std::collections::HashMap::<String, u64>::new();
+    for run in &usage.unpriced_runs {
+        let duration_ms = if let Some(duration_ms) = recovered_durations.get(&run.meeting_id) {
+            *duration_ms
+        } else {
+            let duration_ms = cloudflare_billed_duration_ms(app, &run.meeting_id)
+                .unwrap_or(run.fallback_duration_ms);
+            recovered_durations.insert(run.meeting_id.clone(), duration_ms);
+            duration_ms
+        };
+        used_minutes += duration_ms as f64 / 60_000.0;
+    }
+    let estimated_cost_usd =
+        used_minutes * crate::transcription::cloudflare::PRICE_USD_PER_AUDIO_MINUTE;
+    let used_duration_ms = (used_minutes * 60_000.0).round().max(0.0) as u64;
+    let estimated_neurons =
+        used_minutes * crate::transcription::cloudflare::NEURONS_PER_AUDIO_MINUTE;
+    Ok(CloudflareUsageEstimate {
+        cost_usd: estimated_cost_usd,
+        duration_ms: used_duration_ms,
+        neurons: estimated_neurons,
+        run_count: usage.run_count,
+    })
+}
+
+fn cloudflare_billed_duration_ms(app: &AppHandle, meeting_id: &str) -> Result<u64, String> {
+    let tracks = crate::meeting_store::recording_tracks(app, meeting_id)?;
+    let sources = [tracks.microphone, tracks.system]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if !sources.is_empty() {
+        return sources.into_iter().try_fold(0_u64, |total, path| {
+            crate::commands::transcribe::audio_duration_ms(&path)
+                .map(|duration| total.saturating_add(duration))
+        });
+    }
+    let path = crate::meeting_store::local_audio_path(app, meeting_id)?;
+    crate::commands::transcribe::audio_duration_ms(&path)
 }
 
 #[cfg(test)]

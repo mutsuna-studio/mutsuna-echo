@@ -15,8 +15,21 @@ class MainActivity : TauriActivity() {
   private external fun initializeAndroidContext(context: android.content.Context)
 
   private var pendingConfig: String? = null
-  private var pendingInputMonitor = false
+  private var pendingMonitorRequest = false
+  private var pendingMonitorMicrophone = false
+  private var pendingMonitorSystemAudio = false
+  private var projectionForMonitor = false
   private val projectionConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    val forMonitor = projectionForMonitor.also { projectionForMonitor = false }
+    if (forMonitor) {
+      if (result.resultCode != Activity.RESULT_OK || result.data == null) {
+        EchoRecordingService.monitorStartFailed()
+        RecordingBridge.failMonitor("システム音声の確認が許可されませんでした。")
+        return@registerForActivityResult
+      }
+      EchoRecordingService.startMonitor(this, result.resultCode, result.data!!)
+      return@registerForActivityResult
+    }
     val config = pendingConfig.also { pendingConfig = null }
     if (config == null || result.resultCode != Activity.RESULT_OK || result.data == null) {
       RecordingBridge.failStart("画面共有が許可されなかったため、システム音声を録音できません。")
@@ -26,10 +39,14 @@ class MainActivity : TauriActivity() {
   }
 
   private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-    if (pendingInputMonitor) {
-      pendingInputMonitor = false
-      if (granted) EchoInputMonitor.start()
-      else RecordingBridge.failMonitor("マイクの権限がないため入力レベルを確認できません。")
+    if (pendingMonitorRequest) {
+      pendingMonitorRequest = false
+      if (granted) beginPendingMonitor()
+      else {
+        pendingMonitorMicrophone = false
+        pendingMonitorSystemAudio = false
+        RecordingBridge.failMonitor("マイクの権限がないため入力レベルを確認できません。")
+      }
     } else if (!granted) RecordingBridge.failStart("マイクの録音権限が許可されていません。")
     else beginPendingRecording()
   }
@@ -79,20 +96,39 @@ class MainActivity : TauriActivity() {
     }
   }
 
-  fun requestInputMonitor() {
+  fun requestInputMonitor(microphone: Boolean, systemAudio: Boolean) {
     runOnUiThread {
-      if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-        EchoInputMonitor.start()
-      } else {
-        pendingInputMonitor = true
+      pendingMonitorMicrophone = microphone
+      pendingMonitorSystemAudio = systemAudio
+      if ((microphone || systemAudio) && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        pendingMonitorRequest = true
         microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+      } else {
+        beginPendingMonitor()
       }
+    }
+  }
+
+  private fun beginPendingMonitor() {
+    val microphone = pendingMonitorMicrophone.also { pendingMonitorMicrophone = false }
+    val systemAudio = pendingMonitorSystemAudio.also { pendingMonitorSystemAudio = false }
+    if (microphone) EchoInputMonitor.start()
+    if (systemAudio && !EchoRecordingService.canReuseSystemAudioSession()) {
+      projectionForMonitor = true
+      val manager = getSystemService(MediaProjectionManager::class.java)
+      projectionConsent.launch(manager.createScreenCaptureIntent())
     }
   }
 
   private fun beginPendingRecording() {
     val config = pendingConfig ?: return
     if (RecordingBridge.requiresSystemAudio(config)) {
+      if (EchoRecordingService.canReuseSystemAudioSession()) {
+        pendingConfig = null
+        EchoRecordingService.startUsingMonitor(this, config)
+        return
+      }
+      projectionForMonitor = false
       val manager = getSystemService(MediaProjectionManager::class.java)
       projectionConsent.launch(manager.createScreenCaptureIntent())
     } else {

@@ -53,6 +53,17 @@ pub(crate) struct TranscriptionRunSummary {
     pub(crate) cost_usd: Option<String>,
 }
 
+pub(crate) struct ProviderCostUsage {
+    pub(crate) run_count: u64,
+    pub(crate) cost_usd: f64,
+    pub(crate) unpriced_runs: Vec<UnpricedProviderRun>,
+}
+
+pub(crate) struct UnpricedProviderRun {
+    pub(crate) meeting_id: String,
+    pub(crate) fallback_duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EditableTranscriptSegment {
@@ -330,6 +341,82 @@ pub(crate) fn history(
         runs: index.runs,
         selected_transcription_id: index.selected_transcription_id,
     })
+}
+
+pub(crate) fn provider_cost_usage_since(
+    app: &AppHandle,
+    provider_id: &str,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<ProviderCostUsage, String> {
+    let meetings = crate::meeting_store::list_stored_meetings(app)?;
+    let _guard = store_guard()?;
+    let mut usage = ProviderCostUsage {
+        run_count: 0,
+        cost_usd: 0.0,
+        unpriced_runs: Vec::new(),
+    };
+    for meeting in meetings {
+        let directory =
+            crate::meeting_store::meeting_directory(app, &meeting.meeting_id)?.join("transcripts");
+        let index_path = directory.join("index.json");
+        if !index_path.exists() {
+            continue;
+        }
+        let index = read_history_index(&index_path, &meeting.meeting_id)?;
+        for run in index.runs {
+            if run.provider != provider_id {
+                continue;
+            }
+            let created_at = chrono::DateTime::parse_from_rfc3339(&run.created_at)
+                .map_err(|_| "文字起こし履歴の作成日時を読み取れませんでした。".to_string())?
+                .with_timezone(&chrono::Utc);
+            if created_at < since {
+                continue;
+            }
+            let fallback_duration_ms = if run.cost_usd.is_none() {
+                let stored = read_run(&directory, &meeting.meeting_id, &run.transcription_id)?;
+                stored
+                    .source
+                    .segments
+                    .iter()
+                    .map(|segment| segment.end_ms)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            record_provider_usage(
+                &mut usage,
+                &meeting.meeting_id,
+                fallback_duration_ms,
+                run.cost_usd.as_deref(),
+            )?;
+        }
+    }
+    Ok(usage)
+}
+
+fn record_provider_usage(
+    usage: &mut ProviderCostUsage,
+    meeting_id: &str,
+    fallback_duration_ms: u64,
+    cost_usd: Option<&str>,
+) -> Result<(), String> {
+    usage.run_count = usage.run_count.saturating_add(1);
+    if let Some(cost) = cost_usd {
+        let cost = cost
+            .parse::<f64>()
+            .ok()
+            .filter(|cost| cost.is_finite() && *cost >= 0.0)
+            .ok_or_else(|| "文字起こし履歴の料金を読み取れませんでした。".to_string())?;
+        usage.cost_usd += cost;
+    } else {
+        usage.unpriced_runs.push(UnpricedProviderRun {
+            meeting_id: meeting_id.to_owned(),
+            fallback_duration_ms,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn create_run_with_diarization(
@@ -1340,10 +1427,28 @@ mod tests {
     use super::{
         apply_segment_changes, apply_speaker_label_changes, audio_key, document_from_transcript,
         ensure_history_in, load_current_in, load_legacy_in, read_run, rebase_document_segments,
-        reset_document_from_source, save_in, transcript_path_in, StoredTranscriptionRun,
-        TranscriptSegmentChange, TranscriptSpeakerLabelChange, TranscriptionSettingsSnapshot,
-        RUN_SCHEMA_VERSION, SCHEMA_VERSION,
+        record_provider_usage, reset_document_from_source, save_in, transcript_path_in,
+        ProviderCostUsage, StoredTranscriptionRun, TranscriptSegmentChange,
+        TranscriptSpeakerLabelChange, TranscriptionSettingsSnapshot, RUN_SCHEMA_VERSION,
+        SCHEMA_VERSION,
     };
+
+    #[test]
+    fn unpriced_provider_runs_still_count_and_retain_recovery_duration() {
+        let mut usage = ProviderCostUsage {
+            run_count: 0,
+            cost_usd: 0.0,
+            unpriced_runs: Vec::new(),
+        };
+
+        record_provider_usage(&mut usage, "meeting-1", 3_829_397, None)
+            .expect("unpriced run should be recoverable");
+
+        assert_eq!(usage.run_count, 1);
+        assert_eq!(usage.cost_usd, 0.0);
+        assert_eq!(usage.unpriced_runs.len(), 1);
+        assert_eq!(usage.unpriced_runs[0].fallback_duration_ms, 3_829_397);
+    }
     use crate::transcription::{
         diarization::SpeakerTurn, TokenSpeakerSource, TokenTimeSource, Transcript,
         TranscriptSegment, TranscriptToken, TranscriptionProvider,

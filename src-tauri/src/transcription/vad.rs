@@ -32,6 +32,8 @@ pub(crate) struct SpeechRegion {
     pub(crate) end_ms: u64,
 }
 
+type VadAnalysisResult = (u64, Vec<SpeechRegion>, Vec<u64>, Vec<SpeechRegion>);
+
 impl SpeechRegion {
     pub(crate) fn duration_ms(&self) -> u64 {
         self.end_ms.saturating_sub(self.start_ms)
@@ -47,7 +49,7 @@ pub(crate) fn visit_speech_regions(
     preset: VadPreset,
     mut on_progress: impl FnMut(u64) -> Result<(), String>,
     mut on_resampled_audio: impl FnMut(&[f32]) -> Result<(), String>,
-) -> Result<(u64, Vec<SpeechRegion>, Vec<u64>, Vec<SpeechRegion>), String> {
+) -> Result<VadAnalysisResult, String> {
     let parameters = preset.parameters();
     let detector = create_detector(model_path, parameters)?;
     let mut resampler: Option<StreamingAreaResampler> = None;
@@ -191,17 +193,21 @@ fn create_detector(
 }
 
 pub(crate) struct LiveVoiceActivityDetector {
+    _runtime: crate::local_ai_runtime::RuntimeUseGuard,
     detector: VoiceActivityDetector,
     resampler: StreamingAreaResampler,
 }
 
 impl LiveVoiceActivityDetector {
     pub(crate) fn create(
+        app: &tauri::AppHandle,
         model_path: &Path,
         source_sample_rate: u32,
         preset: VadPreset,
     ) -> Result<Self, String> {
+        let runtime = crate::local_ai_runtime::begin_use(app)?;
         Ok(Self {
+            _runtime: runtime,
             detector: create_detector(model_path, preset.parameters())?,
             resampler: StreamingAreaResampler::new(source_sample_rate, SAMPLE_RATE),
         })

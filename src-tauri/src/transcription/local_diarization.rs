@@ -111,6 +111,7 @@ pub(crate) fn diarize(
     cancelled: &AtomicBool,
     mut report: impl FnMut(LocalDiarizationProgress),
 ) -> Result<LocalDiarizationOutput, String> {
+    let _runtime = crate::local_ai_runtime::begin_use(app)?;
     let total_timer = crate::processing_metrics::StageTimer::start(
         "local_diarization",
         "total",

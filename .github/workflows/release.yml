@@ -92,13 +92,6 @@ jobs:
       - name: Check frontend
         run: pnpm check
 
-      - name: Prepare desktop runtime libraries
-        shell: pwsh
-        run: >-
-          ./scripts/prepare-desktop-runtime.ps1
-          -Platform ${{ startsWith(matrix.name, 'macOS') && 'macos' || 'windows' }}
-          ${{ startsWith(matrix.name, 'macOS') && '-Target aarch64-apple-darwin' || '' }}
-
       - name: Configure macOS signing
         if: startsWith(matrix.name, 'macOS')
         shell: bash
@@ -235,6 +228,15 @@ jobs:
           kill "$app_pid" 2>/dev/null || true
           wait "$app_pid" 2>/dev/null || true
 
+      - name: Verify desktop application excludes local AI runtime
+        shell: bash
+        run: |
+          if find src-tauri/target -type f \( -iname '*sherpa*' -o -iname '*onnxruntime*.dll' -o -iname '*onnxruntime*.dylib' \) \
+            -path '*/bundle/*' -print | grep -q .; then
+            echo "::error::Local AI runtime leaked into the desktop application bundle."
+            exit 1
+          fi
+
   build-android:
     name: Build signed Android AAB
     if: ${{ !contains(github.ref_name, '-android-retry.') }}
@@ -300,6 +302,18 @@ jobs:
           jarsigner -verify "$aab_path" > "$RUNNER_TEMP/aab-signature-verification.txt"
           grep -q "jar verified" "$RUNNER_TEMP/aab-signature-verification.txt"
           echo "aab_path=$aab_path" >> "$GITHUB_OUTPUT"
+
+      - name: Verify local AI is isolated in the on-demand feature
+        shell: bash
+        run: |
+          aab_path="${{ steps.verify-android.outputs.aab_path }}"
+          unzip -l "$aab_path" > "$RUNNER_TEMP/aab-files.txt"
+          if grep -E 'base/lib/arm64-v8a/(libonnxruntime|libsherpa-onnx-c-api)\.so' "$RUNNER_TEMP/aab-files.txt"; then
+            echo "::error::Local AI runtime leaked into the base Android module."
+            exit 1
+          fi
+          grep -E 'local_ai_runtime/lib/arm64-v8a/libonnxruntime\.so' "$RUNNER_TEMP/aab-files.txt"
+          grep -E 'local_ai_runtime/lib/arm64-v8a/libsherpa-onnx-c-api\.so' "$RUNNER_TEMP/aab-files.txt"
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,4 +1,5 @@
 pub(crate) mod audio_decode;
+pub(crate) mod cloudflare;
 pub(crate) mod context;
 pub mod diarization;
 pub(crate) mod diarization_models;
@@ -107,6 +108,27 @@ async fn transcribe_one(
             }
             let api_key = crate::credentials::load(app, crate::credentials::CredentialId::Soniox)?;
             soniox::transcribe(audio_path, &api_key, context).await
+        }
+        TranscriptionProvider::Cloudflare => {
+            if model_id.is_some_and(|model| model != cloudflare::MODEL_ID) {
+                return Err("選択したCloudflare Workers AIモデルには対応していません。".into());
+            }
+            let api_token = crate::credentials::load(
+                app,
+                crate::credentials::CredentialId::CloudflareApiToken,
+            )?;
+            let account_id = crate::credentials::load(
+                app,
+                crate::credentials::CredentialId::CloudflareAccountId,
+            )?;
+            cloudflare::transcribe(
+                audio_path,
+                audio_duration_ms,
+                &account_id,
+                &api_token,
+                context,
+            )
+            .await
         }
         TranscriptionProvider::Local => {
             let installed = local_models::list_installed(app)?;

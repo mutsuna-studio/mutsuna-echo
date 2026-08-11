@@ -1,31 +1,45 @@
 # Design QA
 
-## Sources
+## Evidence
 
-- Reference: `C:/Users/taich.000/AppData/Local/Temp/codex-clipboard-7c1fd0c7-fef4-48eb-bc97-1eadff28c990.png`
-- Desktop implementation: `E:/MutsunaJP/mutsuna-echo/.local-notes/summary-transcription-settings-desktop.png`
-- Mobile implementation: `E:/MutsunaJP/mutsuna-echo/.local-notes/summary-settings-mobile.png`
+- Visual source of truth: `C:\Users\taich.000\.codex\generated_images\019feed0-56cd-7d41-b80c-9ff0a981ab84\exec-903bd854-690d-4ba1-9ee7-0deaeacce831.png`
+- Android implementation capture: `E:\MutsunaJP\mutsuna-echo\.local-notes\unified-home-android-final-v3.png`
+- Side-by-side comparison: `E:\MutsunaJP\mutsuna-echo\.local-notes\design-qa-comparison.png`
+- Source dimensions: 1536 x 1024 px (desktop and mobile concept board)
+- Implementation dimensions: 1080 x 2424 px (Pixel 9a physical-device capture)
+- Compared state: Android, portrait, idle recording, system audio off, empty meeting list
+- Normalization note: the source is a composite concept board rather than a device-native viewport. The mobile concept column was cropped and compared at equal rendered height; no claim of pixel-identical scaling is made.
 
-## Test conditions
+## Full-view comparison
 
-- Desktop: Codex in-app browser, default 1280 × 720 viewport, development preview state.
-- Mobile: Codex in-app browser, 390 × 844 CSS viewport, 1x screenshot density, development preview state.
-- Data: long ACP model names, installed and uninstalled cloud transcription providers, installed local STT and VAD models.
+- Passed: one shared header contains the only `録音と会議` title.
+- Passed: recording options, file selection, and meeting list form one flat screen without card containers.
+- Passed: file selection is the first list item.
+- Passed: idle state does not show elapsed time.
+- Passed: the meeting-list fade communicates scrolling without covering the recording control.
+- Passed: the mobile recording control remains a full-width-diameter semicircle attached to the bottom edge.
 
-## Comparison
+## Focused comparison
 
-- Full view: local and cloud transcription models are grouped into one bordered manager card. Each model uses the same row structure: identity/status on the left and its relevant action on the right.
-- Focused view: the reference Select allowed a long label to collide with the chevron. The implementation reserves the chevron/action space, applies `min-width: 0`, and truncates only the label with an ellipsis.
-- The per-provider summary default Select is placed directly left of Delete, only for installed agents. At mobile width the action area uses a bounded two-column grid so Delete remains visible.
+- Passed: the list-to-control transition follows the circle's curve instead of ending as a straight clipped line.
+- Passed: the recording control's shadow remains visible above the circle and is not clipped by the list overlay.
+- Passed: microphone and system-audio rows remain aligned without overlap.
+- Passed: the common content surface keeps its intended rounded top corners.
 
-## Iterations
+## Iteration history
 
-1. Combined local and cloud transcription settings under one `文字起こしモデル` card.
-2. Converted cloud API-key settings from separate nested cards to rows matching the local model and AI-agent managers.
-3. Fixed the mobile API-key form after visual QA exposed an input shrinking to nearly zero width.
-4. Fixed the mobile summary-agent action row after visual QA exposed the Delete button outside the viewport.
-5. Opened the installed-agent model Select, selected another model, and verified the trigger updated.
+- Fixed P1: removed duplicate main-content title below the common header.
+- Fixed P1: moved the bottom fade behind the recording control after it obscured the semicircle.
+- Fixed P2: extended and softened the fade so the lower list edge no longer reads as a straight cut.
+- Fixed P1: added a safe default for `onBusyChange` to prevent the recording screen from crashing during component initialization or hot reload.
+
+## Required surfaces
+
+- Default state: verified on the physical Android device.
+- Empty state: verified; explanatory text appears without a redundant section heading.
+- Responsive/mobile state: verified at the physical-device capture size.
+- Loading/error state: no new visual treatment introduced by this change; existing shared handling remains in place.
 
 ## Result
 
-passed
+Passed. No remaining P0, P1, or P2 visual mismatch was found in the requested mobile idle/empty state.

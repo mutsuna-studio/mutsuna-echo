@@ -104,6 +104,7 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    dynamicFeatures += setOf(":local_ai_runtime")
 }
 
 rust {
@@ -112,6 +113,7 @@ rust {
 
 dependencies {
     implementation("com.google.android.play:app-update:2.1.0")
+    implementation("com.google.android.play:feature-delivery:2.1.0")
     implementation("rustls:rustls-platform-verifier:latest.release")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")

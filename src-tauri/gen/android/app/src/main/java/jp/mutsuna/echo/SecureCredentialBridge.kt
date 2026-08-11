@@ -49,7 +49,7 @@ object SecureCredentialBridge {
   }
 
   private fun validate(credential: String): String = when (credential) {
-    "elevenlabs", "soniox" -> credential
+    "elevenlabs", "soniox", "cloudflare-api-token", "cloudflare-account-id" -> credential
     else -> throw IllegalArgumentException("対応していない認証情報です。")
   }
 

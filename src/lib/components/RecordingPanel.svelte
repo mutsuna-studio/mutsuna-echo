@@ -19,7 +19,7 @@
   import Mic from "@lucide/svelte/icons/mic";
   import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
-  import { VAD_PRESET_OPTIONS, type VadPreset } from "../providers";
+  import { VAD_PRESET_OPTIONS, type LocalVadModelStatus, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
     RecoverableRecording,
@@ -30,6 +30,8 @@
 
   interface Props {
     disabled?: boolean;
+    mobileExpanded?: boolean;
+    consumeMobileAction?: () => boolean;
     onAudioReady: (audio: SelectedAudioFile) => void;
     onBusyChange: (busy: boolean) => void;
     onMessage: (message: string) => void;
@@ -38,8 +40,10 @@
 
   let {
     disabled = false,
+    mobileExpanded = false,
+    consumeMobileAction = () => false,
     onAudioReady,
-    onBusyChange,
+    onBusyChange = () => {},
     onMessage,
     onError
   }: Props = $props();
@@ -63,6 +67,7 @@
   let monitorRevision = 0;
   let vadPreset = $state<VadPreset>("standard");
   let vadPresetBusy = $state(false);
+  let vadModel = $state.raw<LocalVadModelStatus | null>(null);
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -73,13 +78,16 @@
   const metering = $derived(active || monitoring);
   const microphoneMeterPercent = $derived(toMeterPercent(status?.microphoneLevel ?? 0, metering && microphone));
   const systemMeterPercent = $derived(toMeterPercent(status?.systemLevel ?? 0, metering && systemAudio));
-  const voiceActivityLabel = $derived(
-    status?.voiceActivity === "speechDetected"
-      ? "Speech detected"
-      : status?.voiceActivity === "listening"
-        ? "Listening…"
-        : "VAD unavailable"
-  );
+  const vadAvailability = $derived.by<"preparing" | "available" | "unavailable">(() => {
+    if (loading || !capabilities || !vadModel || vadModel.downloading) return "preparing";
+    // AndroidのVADランタイムは文字起こし用で、録音中の無音検出にはまだ接続されていない。
+    if (capabilities.platform === "android" || !vadModel.runtimeSupported || !vadModel.installed) {
+      return "unavailable";
+    }
+    if (status?.phase === "starting") return "preparing";
+    if (active && status?.voiceActivity === "unavailable") return "unavailable";
+    return "available";
+  });
   const microphoneOptions = $derived([
     { value: "", label: "OSの既定マイク" },
     ...((capabilities?.microphoneDevices ?? []).map((device) => ({
@@ -181,11 +189,12 @@
         } catch (error) {
           console.error("Could not subscribe to recording status events", error);
         }
-        const [nextCapabilities, nextStatus, nextRecoverable, nextVadPreset] = await Promise.all([
+        const [nextCapabilities, nextStatus, nextRecoverable, nextVadPreset, nextVadModel] = await Promise.all([
           invoke<RecordingCapabilities>("get_recording_capabilities"),
           invoke<RecordingStatus>("get_recording_status"),
           invoke<RecoverableRecording[]>("list_recoverable_recordings"),
-          invoke<VadPreset>("get_vad_preset")
+          invoke<VadPreset>("get_vad_preset"),
+          invoke<LocalVadModelStatus>("get_local_vad_model_status")
         ]);
         if (cancelled) return;
         capabilities = nextCapabilities;
@@ -196,6 +205,7 @@
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
         vadPreset = nextVadPreset;
+        vadModel = nextVadModel;
         await acceptStatus(nextStatus);
       } catch (error) {
         onError(errorText(error));
@@ -216,7 +226,9 @@
     const revision = ++monitorRevision;
     if (!ready) {
       monitoring = false;
-      void invoke("stop_recording_monitor").catch(() => {});
+      if (!(monitorSuspended && capabilities?.platform === "android" && systemAudio)) {
+        void invoke("stop_recording_monitor").catch(() => {});
+      }
       return;
     }
 
@@ -245,7 +257,9 @@
       window.clearTimeout(timer);
       if (revision === monitorRevision) monitorRevision += 1;
       monitoring = false;
-      void invoke("stop_recording_monitor").catch(() => {});
+      if (!(monitorSuspended && capabilities?.platform === "android" && systemAudio)) {
+        void invoke("stop_recording_monitor").catch(() => {});
+      }
     };
   });
 
@@ -266,7 +280,9 @@
     onMessage("");
     onError("");
     try {
-      await invoke("stop_recording_monitor");
+      if (!(capabilities?.platform === "android" && systemAudio)) {
+        await invoke("stop_recording_monitor");
+      }
       status = await invoke<RecordingStatus>("start_recording", {
         request: currentRequest()
       });
@@ -385,13 +401,16 @@
     </Alert>
   {/if}
 
+  <div class:active class:mobile-expanded={mobileExpanded} class="recording-console">
+  {#if active}
   <div class:active class="recorder mobile-recorder" role="status">
     <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
     <span class="mobile-recording-state">
       <span class="record-dot" aria-hidden="true"></span>
-      {active ? (status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中") : "録音待機中"}
+      {status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中"}
     </span>
   </div>
+  {/if}
 
   <div class="sources" aria-disabled={active || disabled}>
     <div class="source">
@@ -430,36 +449,34 @@
         aria-valuemax="100"
         aria-valuenow={systemMeterPercent}
       ><span style:width={`${systemMeterPercent}%`}></span></div>
-      {#if capabilities.platform === "android" && systemAudio && !active}
-        <small class="monitor-note">システム音声は録音開始後に確認できます</small>
+      {#if capabilities.platform === "android" && systemAudio && !active && status?.warning}
+        <small class="monitor-note">{status.warning}</small>
       {/if}
     </div>
   </div>
 
-  <div class="vad-setting">
-    <span>音声検出</span>
+  <div class:unavailable={vadAvailability === "unavailable"} class="vad-setting">
+    <span>無音自動停止</span>
     <Select
       value={vadPreset}
       options={VAD_PRESET_OPTIONS}
       onValueChange={changeVadPreset}
-      disabled={active || disabled || vadPresetBusy}
+      disabled={vadAvailability !== "available" || active || disabled || vadPresetBusy}
       ariaLabel="録音中の音声検出感度"
     />
+    {#if vadAvailability === "preparing"}
+      <small>音声検出を準備中</small>
+    {:else if vadAvailability === "unavailable"}
+      <small>この端末では無音自動停止を利用できません</small>
+    {/if}
   </div>
 
-  <div class:active class="recorder desktop-recorder">
+  {#if active}
+  <div class:active class="recorder desktop-recorder" role="status">
     <span class="record-dot" aria-hidden="true"></span>
     <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
-    <small>48 kHz · mono · AAC-LC · 64 kbps</small>
+    <small>{status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中"}</small>
   </div>
-  {#if active}
-    <p class:speaking={status?.voiceActivity === "speechDetected"} class="voice-activity" role="status">
-      <span aria-hidden="true"></span>{voiceActivityLabel}
-    </p>
-  {/if}
-
-  {#if active && status?.warning}
-    <p class="capture-warning" role="status">{status.warning}</p>
   {/if}
 
   <div class="record-actions">
@@ -469,9 +486,16 @@
       </Button>
       <Button variant="outline" size="lg" type="button" onclick={() => cancelDialogOpen = true} disabled={actionBusy || status?.phase === "finalizing"}>破棄</Button>
     {:else}
-      <span class="desktop-start"><Button size="lg" type="button" onclick={start} disabled={!canStart}>録音を開始</Button></span>
+      <button class="desktop-start" type="button" onclick={start} disabled={!canStart} aria-label="録音を開始">
+        <Mic aria-hidden="true" />
+      </button>
     {/if}
   </div>
+  </div>
+
+  {#if active && status?.warning}
+    <p class="capture-warning" role="status">{status.warning}</p>
+  {/if}
   {#if active}
     <button
       class="mobile-discard-button"
@@ -481,20 +505,21 @@
     >
       <Trash2 aria-hidden="true" /><span>録音を破棄</span>
     </button>
-    <button
-      class="mobile-stop-button"
-      type="button"
-      onclick={stop}
-      disabled={actionBusy || status?.phase === "finalizing"}
-      aria-label={status?.phase === "finalizing" || actionBusy ? "録音を保存中" : "録音を停止"}
-    >
-      <Square aria-hidden="true" />
-    </button>
-  {:else}
-    <button class="mobile-record-button" type="button" onclick={start} disabled={!canStart} aria-label="録音を開始">
-      <Mic aria-hidden="true" />
-    </button>
   {/if}
+  <button
+    class:active
+    class="mobile-record-toggle"
+    type="button"
+    onclick={() => {
+      if (consumeMobileAction()) return;
+      return active ? stop() : start();
+    }}
+    disabled={active ? actionBusy || status?.phase === "finalizing" : !canStart}
+    aria-label={active ? (status?.phase === "finalizing" || actionBusy ? "録音を保存中" : "録音を停止") : "録音を開始"}
+  >
+    <span class:visible={!active} class="mobile-action-icon start-icon"><Mic aria-hidden="true" /></span>
+    <span class:visible={active} class="mobile-action-icon stop-icon"><Square aria-hidden="true" /></span>
+  </button>
 {/if}
 
 <AlertDialog bind:open={cancelDialogOpen}>
@@ -534,65 +559,89 @@
   .limitation :global(svg) { width: 17px; height: 17px; flex: 0 0 auto; }
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
-  .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
-  .source { display: grid; gap: 10px; padding: 15px; border: 1px solid #dce3de; border-radius: 12px; background: #f8faf8; }
+  .recording-console { display: grid; grid-template-areas: "mic system vad action"; grid-template-columns: minmax(185px, 1fr) minmax(185px, 1fr) minmax(150px, 0.76fr) auto; align-items: stretch; }
+  .recording-console.active { grid-template-areas: "status mic system vad action"; grid-template-columns: minmax(138px, 0.72fr) minmax(185px, 1fr) minmax(185px, 1fr) minmax(150px, 0.76fr) auto; }
+  .sources { display: contents; }
+  .source { display: grid; align-content: center; gap: 10px; min-width: 0; padding: 16px 20px; border-left: 1px solid #e4e9e5; background: transparent; }
+  .source:first-child { grid-area: mic; }
+  .source:last-child { grid-area: system; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
   .meter { height: 5px; overflow: hidden; border-radius: 99px; background: #dfe6e1; }
   .meter.live { background: color-mix(in srgb, #2c8058 13%, #dfe6e1); }
   .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 90ms linear; }
   .monitor-note { color: #68746c; font-size: 0.7rem; }
-  .recorder { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: #f3f6f4; }
-  .vad-setting { display: grid; grid-template-columns: auto minmax(180px, 280px); align-items: center; justify-content: end; gap: 10px; margin-top: 12px; color: #68746c; font-size: 0.82rem; }
+  .recorder { display: flex; align-items: center; gap: 9px; margin: 0; padding: 16px 20px 16px 4px; background: transparent; }
+  .desktop-recorder { grid-area: status; }
+  .vad-setting { display: grid; grid-area: vad; grid-template-columns: 1fr; align-content: center; gap: 7px; min-width: 0; margin: 0; padding: 16px 20px; border-left: 1px solid #e4e9e5; color: #243129; font-size: 0.78rem; font-weight: 680; }
+  .vad-setting.unavailable { color: var(--muted-foreground); }
+  .vad-setting small { color: var(--muted-foreground); font-size: 0.68rem; font-weight: 500; line-height: 1.4; }
   .recorder strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
   .recorder small { margin-left: auto; color: #68746c; }
-  .record-dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca7a0; }
+  .record-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #2c8058; }
   .recorder.active .record-dot { background: #dc4438; box-shadow: 0 0 0 5px rgb(220 68 56 / 12%); }
   .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; font-size: 0.84rem; }
-  .voice-activity { display: flex; align-items: center; gap: 7px; margin: 9px 2px 0; color: #68746c; font-size: 0.82rem; }
-  .voice-activity span { width: 7px; height: 7px; border-radius: 50%; background: #9ca7a0; }
-  .voice-activity.speaking { color: #256b4a; font-weight: 700; }
-  .voice-activity.speaking span { background: #2c8058; box-shadow: 0 0 0 4px rgb(44 128 88 / 12%); }
-  .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
+  .record-actions { display: flex; grid-area: action; align-items: center; justify-content: flex-end; gap: 9px; padding: 10px 4px 10px 20px; border-left: 1px solid #e4e9e5; }
+  .desktop-start { display: grid; width: 58px; height: 58px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: white; background: #2c8058; box-shadow: 0 6px 16px rgb(44 128 88 / 18%); cursor: pointer; }
+  .desktop-start:hover:not(:disabled) { background: #236a49; }
+  .desktop-start:focus-visible { outline: 3px solid color-mix(in srgb, #2c8058 34%, transparent); outline-offset: 3px; }
+  .desktop-start:disabled { cursor: not-allowed; opacity: 0.52; }
+  .desktop-start :global(svg) { width: 29px; height: 29px; stroke-width: 2; }
   .mobile-recorder,
-  .mobile-record-button,
-  .mobile-stop-button,
+  .mobile-record-toggle,
   .mobile-discard-button { display: none; }
   @media (max-width: 600px) {
-    .limitation { margin-top: 4px; padding: 8px 0; border-radius: 0; color: #68746c; background: transparent; font-size: 0.76rem; }
-    .mobile-recorder { display: flex; min-height: 132px; flex-direction: column; justify-content: center; gap: 9px; margin: 0; padding: 4px 0 10px; background: transparent; }
+    .limitation { display: none; }
+    .recording-console { --settings-motion: 300ms cubic-bezier(0.22, 1, 0.36, 1); display: block; }
+    .mobile-recorder { display: flex; min-height: 52px; flex-direction: row; justify-content: flex-start; gap: 9px; margin: 0; padding: 8px 2px; background: transparent; }
     .mobile-recorder strong { font-size: clamp(2.55rem, 13vw, 3.35rem); font-weight: 760; line-height: 1; letter-spacing: 0.025em; }
     .mobile-recording-state { display: flex; align-items: center; gap: 7px; color: #4f5c54; font-size: 0.82rem; }
     .mobile-recording-state .record-dot { width: 8px; height: 8px; background: #2c8058; }
     .mobile-recorder.active .record-dot { background: #dc4438; }
     .desktop-recorder { display: none; }
-    .sources { grid-template-columns: 1fr; gap: 0; margin-top: 0; border-top: 1px solid #e4e9e5; }
-    .source { display: grid; grid-template-columns: 1fr; gap: 10px; min-height: 94px; padding: 16px 2px 14px; border: 0; border-bottom: 1px solid #e4e9e5; border-radius: 0; background: transparent; }
-    .source-toggle { gap: 13px; font-size: 1.02rem; }
-    .source-toggle :global(button) { width: 46px; height: 46px; border-radius: 10px; }
-    .source-toggle :global(svg) { width: 27px; height: 27px; }
-    :global(.source-select) { margin-left: 59px; }
-    .meter { height: 7px; margin-left: 59px; background: repeating-linear-gradient(90deg, #e0e5e1 0 18px, transparent 18px 23px); }
-    .meter.live { background: repeating-linear-gradient(90deg, #d8e7de 0 18px, transparent 18px 23px); }
-    .meter span { background: repeating-linear-gradient(90deg, #2c8058 0 18px, transparent 18px 23px); }
-    .monitor-note { margin-left: 59px; }
-    .vad-setting { grid-template-columns: 1fr minmax(116px, 145px); justify-content: stretch; min-height: 68px; margin: 0; padding: 9px 2px; border-bottom: 1px solid #e4e9e5; color: #243129; font-size: 0.98rem; font-weight: 720; }
+    .sources { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: 0; }
+    .source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 42%); align-items: center; gap: 9px 12px; min-height: 58px; padding: 9px 2px; border: 0; border-bottom: 1px solid #e4e9e5; background: transparent; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion); }
+    .source:first-child,
+    .source:last-child { grid-area: auto; }
+    .source-toggle { gap: 10px; font-size: 0.88rem; transition: min-height var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
+    .source-toggle :global(button) { width: 34px; height: 34px; border-radius: 7px; transition: width var(--settings-motion), height var(--settings-motion), border-radius var(--settings-motion); }
+    .source-toggle :global(svg) { width: 20px; height: 20px; transition: width var(--settings-motion), height var(--settings-motion); }
+    :global(.source-select) { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
+    .meter { height: 6px; margin-left: 0; background: repeating-linear-gradient(90deg, #e0e5e1 0 9px, transparent 9px 13px); transition: width var(--settings-motion), height var(--settings-motion); }
+    .meter.live { background: repeating-linear-gradient(90deg, #d8e7de 0 9px, transparent 9px 13px); }
+    .meter span { background: repeating-linear-gradient(90deg, #2c8058 0 9px, transparent 9px 13px); }
+    .monitor-note { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
+    .vad-setting { grid-template-columns: 1fr minmax(108px, 132px); justify-content: stretch; min-height: 54px; margin: 0; padding: 7px 2px; border: 0; color: #243129; font-size: 0.86rem; font-weight: 720; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
+    .vad-setting small { grid-column: 1 / -1; padding-bottom: 4px; transition: padding var(--settings-motion), font-size var(--settings-motion), line-height var(--settings-motion); }
+    .recording-console.mobile-expanded .source { min-height: 112px; grid-template-columns: 1fr; align-content: center; gap: 16px; padding: 18px 4px; }
+    .recording-console.mobile-expanded .source-toggle { min-height: 54px; gap: 14px; font-size: 1.12rem; }
+    .recording-console.mobile-expanded .source-toggle :global(button) { width: 52px; height: 52px; border-radius: 11px; }
+    .recording-console.mobile-expanded .source-toggle :global(svg) { width: 29px; height: 29px; }
+    .recording-console.mobile-expanded :global(.source-select) { grid-column: 1; margin-left: 66px; font-size: 0.95rem; }
+    .recording-console.mobile-expanded .meter { width: 100%; height: 14px; }
+    .recording-console.mobile-expanded .monitor-note { grid-column: 1; margin-left: 66px; font-size: 0.8rem; }
+    .recording-console.mobile-expanded .vad-setting { min-height: 96px; grid-template-columns: 1fr; align-content: center; gap: 12px; padding: 16px 4px; font-size: 1.1rem; }
+    .recording-console.mobile-expanded .vad-setting small { grid-column: 1; padding-bottom: 0; font-size: 0.8rem; line-height: 1.55; }
     .record-actions { display: none; }
     .desktop-start { display: none; }
-    .mobile-record-button,
-    .mobile-stop-button { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); border: 0; border-radius: 50vw 50vw 0 0; color: white; box-shadow: 0 -8px 28px rgb(44 128 88 / 18%); cursor: pointer; -webkit-tap-highlight-color: transparent; }
-    .mobile-record-button { background: #2c8058; }
-    .mobile-record-button:active:not(:disabled) { background: #236a49; }
-    .mobile-stop-button { background: #d64b43; box-shadow: 0 -8px 28px rgb(177 48 42 / 20%); }
-    .mobile-stop-button:active:not(:disabled) { background: #b83b35; }
-    .mobile-record-button:disabled,
-    .mobile-stop-button:disabled { opacity: 0.58; }
-    .mobile-record-button :global(svg),
-    .mobile-stop-button :global(svg) { width: clamp(68px, 22vw, 92px); height: clamp(68px, 22vw, 92px); stroke-width: 2.2; }
-    .mobile-stop-button :global(svg) { fill: currentColor; stroke-width: 1.4; }
+    .mobile-record-toggle { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); overflow: hidden; border: 0; border-radius: 50vw 50vw 0 0; color: white; background: #2c8058; box-shadow: 0 -12px 34px rgb(44 128 88 / 22%); cursor: pointer; transition: background-color 360ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease; -webkit-tap-highlight-color: transparent; }
+    .mobile-record-toggle:active:not(:disabled) { background: #236a49; }
+    .mobile-record-toggle.active { background: #d64b43; box-shadow: 0 -8px 28px rgb(177 48 42 / 20%); }
+    .mobile-record-toggle.active:active:not(:disabled) { background: #b83b35; }
+    .mobile-record-toggle:disabled { opacity: 0.58; }
+    .mobile-action-icon { display: grid; position: absolute; inset: 0; place-items: center; padding-bottom: env(safe-area-inset-bottom, 0px); opacity: 0; transform: scale(0.72) rotate(-12deg); transition: opacity 220ms ease, transform 360ms cubic-bezier(0.22, 1, 0.36, 1); pointer-events: none; }
+    .mobile-action-icon.visible { opacity: 1; transform: scale(1) rotate(0deg); }
+    .mobile-action-icon :global(svg) { width: clamp(68px, 22vw, 92px); height: clamp(68px, 22vw, 92px); stroke-width: 2.2; }
+    .mobile-action-icon.stop-icon :global(svg) { fill: currentColor; stroke-width: 1.4; }
     .mobile-discard-button { display: flex; position: fixed; z-index: 31; left: 50%; bottom: calc(50vw + 12px); min-height: 48px; align-items: center; justify-content: center; gap: 8px; padding: 0 18px; transform: translateX(-50%); border: 1px solid #d8a5a1; border-radius: 999px; color: #a93631; background: color-mix(in srgb, white 94%, #fff2f1); box-shadow: 0 5px 18px rgb(44 31 30 / 10%); font: inherit; font-size: 0.86rem; font-weight: 720; white-space: nowrap; }
     .mobile-discard-button:active:not(:disabled) { background: #fff0ef; }
     .mobile-discard-button:disabled { opacity: 0.48; }
     .mobile-discard-button :global(svg) { width: 18px; height: 18px; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
+  }
+
+  @media (max-width: 600px) and (prefers-reduced-motion: reduce) {
+    .recording-console { --settings-motion: 0ms linear; }
+    .mobile-record-toggle,
+    .mobile-action-icon { transition-duration: 0ms; }
   }
 </style>

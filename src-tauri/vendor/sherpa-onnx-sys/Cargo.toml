@@ -1,0 +1,23 @@
+[package]
+name = "sherpa-onnx-sys"
+version = "1.13.4"
+edition = "2021"
+description = "Vendored ABI declarations for the on-demand sherpa-onnx runtime"
+license = "Apache-2.0"
+
+[features]
+default = []
+linked = []
+shared = []
+static = []
+
+[lib]
+name = "sherpa_onnx_sys"
+path = "src/lib.rs"
+
+[dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }

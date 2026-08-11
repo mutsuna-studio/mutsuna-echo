@@ -1,4 +1,4 @@
-export type TranscriptionProviderId = "elevenlabs" | "soniox" | "local";
+export type TranscriptionProviderId = "elevenlabs" | "soniox" | "cloudflare" | "local";
 export type TranscriptionProviderKind = "cloud" | "local";
 export type TranscriptionProviderSetup = "apiKey" | "modelDownload";
 export type TranscriptionProviderAvailability =
@@ -62,6 +62,35 @@ export type LocalSttModelDownloadProgress = {
   totalBytes: number;
 };
 
+export type LocalAiRuntimeState =
+  | "notInstalled"
+  | "downloading"
+  | "installing"
+  | "ready"
+  | "incompatible"
+  | "removalPending"
+  | "failed";
+
+export type LocalAiRuntimeStatus = {
+  state: LocalAiRuntimeState;
+  source: "googlePlay" | "githubRelease";
+  protocolVersion: number;
+  requiredRuntimeVersion: string;
+  installedRuntimeVersion: string | null;
+  progress: number | null;
+  error: string | null;
+  sizeBytes: number;
+  canDelete: boolean;
+};
+
+export type LocalAiRuntimeProgress = {
+  state: LocalAiRuntimeState;
+  stage: "runtime" | "reazonSpeech" | "sileroVad" | "ready";
+  downloadedBytes: number;
+  totalBytes: number;
+  progress: number;
+};
+
 export type LocalVadModelStatus = {
   modelId: string;
   displayName: string;
@@ -98,7 +127,7 @@ export const VAD_PRESET_OPTIONS = [
 ] as const;
 
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
-  return value === "elevenlabs" || value === "soniox" || value === "local";
+  return value === "elevenlabs" || value === "soniox" || value === "cloudflare" || value === "local";
 }
 
 export function getTranscriptionProvider(
@@ -123,6 +152,6 @@ export function transcriptionProviderLabel(
   providers: readonly TranscriptionProviderDefinition[] = []
 ): string {
   return providers.find((provider) => provider.id === id)?.label
-    ?? ({ elevenlabs: "ElevenLabs", soniox: "Soniox", local: "ローカルSTT" } as Record<string, string>)[id]
+    ?? ({ elevenlabs: "ElevenLabs", soniox: "Soniox", cloudflare: "Cloudflare Workers AI", local: "ローカルSTT" } as Record<string, string>)[id]
     ?? id;
 }

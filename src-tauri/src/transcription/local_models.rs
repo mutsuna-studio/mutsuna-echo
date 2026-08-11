@@ -187,9 +187,6 @@ pub(crate) async fn download_local_stt_model(
     }
     let _guard = DownloadGuard::acquire()?;
     download_reazonspeech(&app).await?;
-    if let Err(error) = super::vad_models::download_local_vad_model(app).await {
-        eprintln!("ReazonSpeechの導入後にSilero VADを追加できませんでした: {error}");
-    }
     Ok(())
 }
 

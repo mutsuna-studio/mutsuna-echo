@@ -37,9 +37,26 @@ runs:
         toolchain: stable
         targets: aarch64-linux-android
 
-    - name: Prepare Sherpa ONNX Android runtime
+    - name: Download signed local AI Dynamic Feature runtime
       shell: bash
-      run: bash ./scripts/prepare-android-runtime.sh arm64-v8a
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y minisign
+        version="1.13.4-1"
+        asset="mutsuna-local-ai-runtime-v${version}-android-arm64.zip"
+        url="https://github.com/mutsuna-studio/mutsuna-echo/releases/download/local-ai-runtime-v${version}/${asset}"
+        mkdir -p "$RUNNER_TEMP/local-ai-runtime" "src-tauri/gen/android/local_ai_runtime/src/main/jniLibs/arm64-v8a"
+        curl --fail --location --retry 5 --output "$RUNNER_TEMP/local-ai-runtime/$asset" "$url"
+        curl --fail --location --retry 5 --output "$RUNNER_TEMP/local-ai-runtime/$asset.sig" "$url.sig"
+        printf '%s\n%s\n' \
+          'untrusted comment: minisign public key: 1EE92D443A7A97CA' \
+          'RWTKl3o6RC3pHpQe7ilIUo5clZxt6vyrf+WplGxhzK/lI/p7zrlNAok+' \
+          > "$RUNNER_TEMP/local-ai-runtime/minisign.pub"
+        minisign -Vm "$RUNNER_TEMP/local-ai-runtime/$asset" -p "$RUNNER_TEMP/local-ai-runtime/minisign.pub"
+        unzip -q "$RUNNER_TEMP/local-ai-runtime/$asset" -d "$RUNNER_TEMP/local-ai-runtime/extracted"
+        cp "$RUNNER_TEMP/local-ai-runtime/extracted/libonnxruntime.so" \
+           "$RUNNER_TEMP/local-ai-runtime/extracted/libsherpa-onnx-c-api.so" \
+           src-tauri/gen/android/local_ai_runtime/src/main/jniLibs/arm64-v8a/
 
     - name: Restore Rust dependency cache
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

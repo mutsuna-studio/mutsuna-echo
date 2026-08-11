@@ -29,21 +29,44 @@ import kotlin.math.max
 class EchoRecordingService : Service() {
   private val stop = AtomicBoolean(false)
   private val cancel = AtomicBoolean(false)
+  private val monitorStop = AtomicBoolean(false)
   private var worker: Thread? = null
+  @Volatile private var monitorWorker: Thread? = null
+  @Volatile private var pendingCaptureIntent: Intent? = null
   private var projection: MediaProjection? = null
+
+  override fun onCreate() {
+    super.onCreate()
+    instance = this
+  }
+
+  override fun onDestroy() {
+    if (instance === this) instance = null
+    super.onDestroy()
+  }
 
   override fun onBind(intent: Intent?) = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
-      ACTION_STOP -> stop.set(true)
+      ACTION_STOP -> if (worker != null) stop.set(true) else stopSystemMonitor()
       ACTION_CANCEL -> { cancel.set(true); stop.set(true) }
-      ACTION_START -> if (worker == null) startCapture(intent)
+      ACTION_START_MONITOR -> if (worker == null && monitorWorker == null) startSystemMonitor(intent)
+      ACTION_STOP_MONITOR -> stopSystemMonitor()
+      ACTION_START -> if (worker == null) {
+        if (monitorWorker != null) {
+          pendingCaptureIntent = Intent(intent)
+          monitorStop.set(true)
+        } else startCapture(intent)
+      }
     }
     return START_NOT_STICKY
   }
 
   private fun startCapture(intent: Intent) {
+    stop.set(false)
+    cancel.set(false)
+    val config = JSONObject(intent.getStringExtra(EXTRA_CONFIG) ?: "{}")
     createChannel()
     val openIntent = PendingIntent.getActivity(
       this,
@@ -63,12 +86,13 @@ class EchoRecordingService : Service() {
       .addAction(0, "録音を停止", stopIntent)
       .build()
     if (Build.VERSION.SDK_INT >= 29) {
-      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-        if (intent.getBooleanExtra(EXTRA_SYSTEM, false)) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
+      val foregroundTypes =
+        (if (config.optBoolean("microphone")) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0) or
+        (if (config.optBoolean("systemAudio")) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
+      startForeground(NOTIFICATION_ID, notification, foregroundTypes)
     } else startForeground(NOTIFICATION_ID, notification)
 
-    val config = JSONObject(intent.getStringExtra(EXTRA_CONFIG) ?: "{}")
-    if (config.optBoolean("systemAudio")) {
+    if (config.optBoolean("systemAudio") && projection == null) {
       val data = intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
       projection = getSystemService(MediaProjectionManager::class.java)
         .getMediaProjection(intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED), data!!)
@@ -77,6 +101,94 @@ class EchoRecordingService : Service() {
       }, Handler(Looper.getMainLooper()))
     }
     worker = thread(name = "mutsuna-android-recording") { capture(config) }
+  }
+
+  private fun startSystemMonitor(intent: Intent) {
+    createChannel()
+    val openIntent = PendingIntent.getActivity(
+      this,
+      0,
+      Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    val stopIntent = PendingIntent.getService(
+      this,
+      2,
+      Intent(this, EchoRecordingService::class.java).setAction(ACTION_STOP_MONITOR),
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    val notification = NotificationCompat.Builder(this, CHANNEL)
+      .setSmallIcon(R.mipmap.ic_launcher)
+      .setContentTitle("システム音声を確認中")
+      .setContentText("録音前の音量を確認しています。")
+      .setOngoing(true)
+      .setContentIntent(openIntent)
+      .addAction(0, "確認を停止", stopIntent)
+      .build()
+    if (Build.VERSION.SDK_INT >= 29) {
+      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+    } else startForeground(NOTIFICATION_ID, notification)
+
+    try {
+      val data = intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
+        ?: error("画面共有の許可情報がありません。")
+      projection = getSystemService(MediaProjectionManager::class.java)
+        .getMediaProjection(intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED), data)
+      projection?.registerCallback(object : MediaProjection.Callback() {
+        override fun onStop() {
+          monitorStop.set(true)
+          stop.set(true)
+        }
+      }, Handler(Looper.getMainLooper()))
+      monitorStop.set(false)
+      monitorWorker = thread(name = "mutsuna-system-audio-monitor") { monitorSystemAudio() }
+    } catch (error: Throwable) {
+      monitorStartFailed()
+      RecordingBridge.failMonitor(error.message ?: "システム音声を確認できませんでした。")
+      finishSystemMonitor()
+    }
+  }
+
+  private fun monitorSystemAudio() {
+    var system: AudioRecord? = null
+    try {
+      system = buildSystemAudio(projection ?: error("画面共有セッションがありません。"))
+        .apply { startRecording() }
+      val buffer = ShortArray(FRAMES_PER_CHUNK)
+      while (!monitorStop.get()) {
+        val count = system.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+        if (count < 0) error("システム音声を確認できませんでした。")
+        RecordingBridge.updateSystemMonitorLevel(if (count > 0) peak(buffer, count) else 0.0)
+      }
+    } catch (error: Throwable) {
+      if (!monitorStop.get()) RecordingBridge.failMonitor(error.message ?: "システム音声を確認できませんでした。")
+    } finally {
+      try { system?.stop() } catch (_: Throwable) {}
+      try { system?.release() } catch (_: Throwable) {}
+      RecordingBridge.updateSystemMonitorLevel(0.0)
+      monitorWorker = null
+      Handler(Looper.getMainLooper()).post {
+        val recording = pendingCaptureIntent.also { pendingCaptureIntent = null }
+        if (recording != null && projection != null) startCapture(recording)
+        else finishSystemMonitor()
+      }
+    }
+  }
+
+  private fun stopSystemMonitor() {
+    reuseSystemAudioSession = false
+    pendingCaptureIntent = null
+    monitorStop.set(true)
+    if (monitorWorker == null && worker == null) finishSystemMonitor()
+  }
+
+  private fun finishSystemMonitor() {
+    try { projection?.stop() } catch (_: Throwable) {}
+    projection = null
+    if (worker == null) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      stopSelf()
+    }
   }
 
   private fun capture(config: JSONObject) {
@@ -261,6 +373,8 @@ class EchoRecordingService : Service() {
       try { mic?.release() } catch (_: Throwable) {}
       try { system?.release() } catch (_: Throwable) {}
       projection?.stop(); projection = null
+      reuseSystemAudioSession = false
+      worker = null
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
     }
@@ -419,6 +533,8 @@ class EchoRecordingService : Service() {
     const val ACTION_START = "jp.mutsuna.echo.START_RECORDING"
     const val ACTION_STOP = "jp.mutsuna.echo.STOP_RECORDING"
     const val ACTION_CANCEL = "jp.mutsuna.echo.CANCEL_RECORDING"
+    private const val ACTION_START_MONITOR = "jp.mutsuna.echo.START_SYSTEM_MONITOR"
+    private const val ACTION_STOP_MONITOR = "jp.mutsuna.echo.STOP_SYSTEM_MONITOR"
     private const val EXTRA_CONFIG = "config"
     private const val EXTRA_RESULT_CODE = "resultCode"
     private const val EXTRA_PROJECTION_DATA = "projectionData"
@@ -427,12 +543,41 @@ class EchoRecordingService : Service() {
     private const val NOTIFICATION_ID = 41
     private const val FRAMES_PER_CHUNK = 960
     private const val MAX_DURATION_MS = 36_000_000L
+    @Volatile private var instance: EchoRecordingService? = null
+    @Volatile private var reuseSystemAudioSession = false
 
     fun start(context: Context, config: String, resultCode: Int, projectionData: Intent) {
       val intent = Intent(context, EchoRecordingService::class.java).setAction(ACTION_START)
         .putExtra(EXTRA_CONFIG, config).putExtra(EXTRA_RESULT_CODE, resultCode)
         .putExtra(EXTRA_PROJECTION_DATA, projectionData).putExtra(EXTRA_SYSTEM, JSONObject(config).optBoolean("systemAudio"))
       context.startForegroundService(intent)
+    }
+
+    fun startMonitor(context: Context, resultCode: Int, projectionData: Intent) {
+      reuseSystemAudioSession = true
+      val intent = Intent(context, EchoRecordingService::class.java).setAction(ACTION_START_MONITOR)
+        .putExtra(EXTRA_RESULT_CODE, resultCode)
+        .putExtra(EXTRA_PROJECTION_DATA, projectionData)
+      context.startForegroundService(intent)
+    }
+
+    fun stopMonitor(context: Context) {
+      if (!reuseSystemAudioSession && instance?.monitorWorker == null) return
+      reuseSystemAudioSession = false
+      context.startService(Intent(context, EchoRecordingService::class.java).setAction(ACTION_STOP_MONITOR))
+    }
+
+    fun canReuseSystemAudioSession(): Boolean = reuseSystemAudioSession
+
+    fun startUsingMonitor(context: Context, config: String) {
+      val intent = Intent(context, EchoRecordingService::class.java).setAction(ACTION_START)
+        .putExtra(EXTRA_CONFIG, config)
+        .putExtra(EXTRA_SYSTEM, true)
+      context.startService(intent)
+    }
+
+    fun monitorStartFailed() {
+      reuseSystemAudioSession = false
     }
   }
 }

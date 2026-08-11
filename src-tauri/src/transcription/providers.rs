@@ -72,6 +72,15 @@ const REAZONSPEECH_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabi
     context_terms: true,
 };
 
+const CLOUDFLARE_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
+    timing_granularity: TimingGranularity::Word,
+    speaker_labels: false,
+    confidence_scores: false,
+    external_diarization: true,
+    context_text: true,
+    context_terms: true,
+};
+
 #[derive(Debug, Clone, Copy)]
 struct ProviderDefinition {
     id: &'static str,
@@ -101,6 +110,16 @@ const SONIOX_DEFINITION: ProviderDefinition = ProviderDefinition {
     default_model_label: "Soniox v5",
     capability_summary: "多言語・話者分離・トークンタイムスタンプ",
     capabilities: SONIOX_CAPABILITIES,
+};
+
+const CLOUDFLARE_DEFINITION: ProviderDefinition = ProviderDefinition {
+    id: "cloudflare",
+    label: "Cloudflare Workers AI",
+    kind: ProviderKind::Cloud,
+    setup: ProviderSetup::ApiKey,
+    default_model_label: "Whisper Large v3 Turbo",
+    capability_summary: "多言語・単語タイムスタンプ・セルフキー",
+    capabilities: CLOUDFLARE_CAPABILITIES,
 };
 
 const LOCAL_DEFINITION: ProviderDefinition = ProviderDefinition {
@@ -147,18 +166,30 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
             format!("APIキーの保存状態を確認できませんでした: {error}"),
         ),
     };
+    let cloudflare = match (
+        crate::credentials::has(app, crate::credentials::CredentialId::CloudflareApiToken),
+        crate::credentials::has(app, crate::credentials::CredentialId::CloudflareAccountId),
+    ) {
+        (Ok(has_token), Ok(has_account)) => cloudflare(has_token && has_account),
+        (Err(error), _) | (_, Err(error)) => unavailable_provider(
+            CLOUDFLARE_DEFINITION,
+            format!("資格情報の保存状態を確認できませんでした: {error}"),
+        ),
+    };
     let vad_installed =
         super::vad_models::installed_model_path(app).is_ok_and(|path| path.is_some());
+    let runtime_ready = crate::local_ai_runtime::is_installed_compatible(app);
     let local = match super::local_models::list_installed(app) {
         Ok(models) => local_provider(
             models
                 .iter()
                 .find(|model| model.model_id == super::local_models::REAZONSPEECH_MODEL_ID),
             vad_installed,
+            runtime_ready,
         ),
         Err(error) => unavailable_provider(LOCAL_DEFINITION, error),
     };
-    Ok(vec![elevenlabs, soniox, local])
+    Ok(vec![elevenlabs, soniox, cloudflare, local])
 }
 
 fn unavailable_provider(
@@ -237,16 +268,44 @@ fn soniox(has_api_key: bool) -> TranscriptionProviderDescriptor {
     }
 }
 
+fn cloudflare(configured: bool) -> TranscriptionProviderDescriptor {
+    TranscriptionProviderDescriptor {
+        id: CLOUDFLARE_DEFINITION.id,
+        label: CLOUDFLARE_DEFINITION.label,
+        kind: CLOUDFLARE_DEFINITION.kind,
+        setup: CLOUDFLARE_DEFINITION.setup,
+        availability: if configured {
+            ProviderAvailability::Ready
+        } else {
+            ProviderAvailability::ApiKeyRequired
+        },
+        ready: configured,
+        configured,
+        model_id: Some(super::cloudflare::MODEL_ID.into()),
+        model_label: CLOUDFLARE_DEFINITION.default_model_label.into(),
+        capability_summary: CLOUDFLARE_DEFINITION.capability_summary,
+        capabilities: CLOUDFLARE_DEFINITION.capabilities,
+        status_message: if configured {
+            "セルフキーでCloudflare Workers AIを利用できます。".into()
+        } else {
+            "Cloudflare APIトークンとAccount IDを設定してください。".into()
+        },
+        pricing_usd_per_hour: Some(super::cloudflare::PRICE_USD_PER_AUDIO_MINUTE * 60.0),
+        pricing_verified_on: Some("2026-08-11"),
+    }
+}
+
 fn local_provider(
     installed: Option<&InstalledLocalModel>,
     vad_installed: bool,
+    runtime_ready: bool,
 ) -> TranscriptionProviderDescriptor {
     let engine_available = cfg!(any(desktop, target_os = "android"));
     let (availability, configured, model_id, model_label, status_message) = match installed {
         Some(model) => (
-            if engine_available && vad_installed {
+            if engine_available && vad_installed && runtime_ready {
                 ProviderAvailability::Ready
-            } else if engine_available {
+            } else if engine_available && runtime_ready {
                 ProviderAvailability::ModelRequired
             } else {
                 ProviderAvailability::EngineUnavailable
@@ -254,8 +313,10 @@ fn local_provider(
             true,
             Some(model.model_id.clone()),
             model.display_name.clone(),
-            if engine_available && vad_installed {
+            if engine_available && vad_installed && runtime_ready {
                 "端末内で日本語を文字起こしできます。話者分離には未対応です。".into()
+            } else if !runtime_ready {
+                "利用を続けるには設定からローカルAI実行環境を追加してください。".into()
             } else if engine_available {
                 "音声区間検出モデルの導入が完了すると会議ページで選択できます。".into()
             } else {
@@ -276,7 +337,7 @@ fn local_provider(
         kind: LOCAL_DEFINITION.kind,
         setup: LOCAL_DEFINITION.setup,
         availability,
-        ready: installed.is_some() && vad_installed && engine_available,
+        ready: installed.is_some() && vad_installed && engine_available && runtime_ready,
         configured,
         model_id,
         model_label,
@@ -311,7 +372,7 @@ mod tests {
 
     #[test]
     fn local_provider_requires_an_external_model() {
-        let provider = local_provider(None, false);
+        let provider = local_provider(None, false, false);
         assert!(!provider.ready);
         assert!(!provider.configured);
         assert!(matches!(provider.kind, ProviderKind::Local));
@@ -333,7 +394,7 @@ mod tests {
             language_codes: vec!["ja".into()],
             size_bytes: 169_180_699,
         };
-        let provider = local_provider(Some(&model), true);
+        let provider = local_provider(Some(&model), true, true);
         assert_eq!(provider.ready, cfg!(any(desktop, target_os = "android")));
         assert!(provider.configured);
         assert_eq!(
@@ -357,7 +418,7 @@ mod tests {
             size_bytes: 169_180_699,
         };
 
-        let provider = local_provider(Some(&model), false);
+        let provider = local_provider(Some(&model), false, true);
 
         assert!(!provider.ready);
         assert!(provider.configured);

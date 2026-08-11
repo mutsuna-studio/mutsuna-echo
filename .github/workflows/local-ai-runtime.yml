@@ -1,0 +1,149 @@
+name: Release local AI runtime
+
+on:
+  push:
+    tags:
+      - "local-ai-runtime-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Validate runtime tag
+        shell: bash
+        run: test "${GITHUB_REF_NAME}" = "local-ai-runtime-v1.13.4-1"
+
+  build:
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x86_64
+            platform: windows
+          - os: macos-latest
+            target: macos-arm64
+            platform: macos
+          - os: ubuntu-latest
+            target: android-arm64
+            platform: android
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24 }
+      - name: Prepare desktop libraries
+        if: matrix.platform != 'android'
+        shell: pwsh
+        run: ./scripts/prepare-desktop-runtime.ps1 -Platform '${{ matrix.platform }}' -OutputDirectory '${{ runner.temp }}/runtime'
+      - name: Prepare Android libraries
+        if: matrix.platform == 'android'
+        shell: bash
+        run: |
+          bash scripts/prepare-android-runtime.sh arm64-v8a
+          mkdir -p "$RUNNER_TEMP/runtime"
+          cp src-tauri/gen/android/local_ai_runtime/src/main/jniLibs/arm64-v8a/*.so "$RUNNER_TEMP/runtime/"
+      - name: Configure and sign macOS libraries
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && \
+             [ -n "$APPLE_SIGNING_IDENTITY_SECRET" ] && [ -n "$APPLE_API_ISSUER" ] && \
+             [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            certificate_path="$RUNNER_TEMP/runtime-signing.p12"
+            keychain_path="$RUNNER_TEMP/runtime-signing.keychain-db"
+            node -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_CERTIFICATE, 'base64'))" "$certificate_path"
+            security create-keychain -p runtime-build "$keychain_path"
+            security set-keychain-settings -lut 21600 "$keychain_path"
+            security unlock-keychain -p runtime-build "$keychain_path"
+            security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+            security list-keychains -d user -s "$keychain_path"
+            security set-key-partition-list -S apple-tool:,apple: -s -k runtime-build "$keychain_path"
+            find "$RUNNER_TEMP/runtime" -type f -name '*.dylib' -exec codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY_SECRET" {} \;
+            key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+            node -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_API_PRIVATE_KEY, 'base64'))" "$key_path"
+            echo "MACOS_NOTARIZE=1" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          else
+            find "$RUNNER_TEMP/runtime" -type f -name '*.dylib' -exec codesign --force --sign - {} \;
+            echo "MACOS_NOTARIZE=0" >> "$GITHUB_ENV"
+          fi
+      - name: Smoke-test desktop ABI
+        if: matrix.platform != 'android'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ctypes, os
+          root = os.environ['RUNNER_TEMP'] + '/runtime'
+          if os.name == 'nt':
+              os.add_dll_directory(root)
+          name = 'sherpa-onnx-c-api.dll' if os.name == 'nt' else 'libsherpa-onnx-c-api.dylib'
+          library = ctypes.CDLL(os.path.join(root, name))
+          library.SherpaOnnxGetVersionStr.restype = ctypes.c_char_p
+          version = library.SherpaOnnxGetVersionStr().decode()
+          assert version.startswith('1.13.4'), version
+          PY
+      - name: Create manifest and archive
+        shell: bash
+        run: |
+          node scripts/create-runtime-manifest.mjs "$RUNNER_TEMP/runtime" '${{ matrix.target }}' 1.13.4-1
+          cd "$RUNNER_TEMP/runtime"
+          zip -9 -r "$RUNNER_TEMP/mutsuna-local-ai-runtime-v1.13.4-1-${{ matrix.target }}.zip" .
+      - name: Notarize macOS runtime pack
+        if: matrix.platform == 'macos' && env.MACOS_NOTARIZE == '1'
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          xcrun notarytool submit \
+            "$RUNNER_TEMP/mutsuna-local-ai-runtime-v1.13.4-1-${{ matrix.target }}.zip" \
+            --issuer "$APPLE_API_ISSUER" \
+            --key-id "$APPLE_API_KEY" \
+            --key "$APPLE_API_KEY_PATH" \
+            --wait
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-${{ matrix.target }}
+          path: ${{ runner.temp }}/mutsuna-local-ai-runtime-v1.13.4-1-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    environment: release-runtime
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { pattern: runtime-*, merge-multiple: true, path: distribution }
+      - name: Install Minisign
+        run: sudo apt-get update -qq && sudo apt-get install -y minisign
+      - name: Sign runtime packs
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          node -e "const fs=require('fs');const v=process.env.TAURI_SIGNING_PRIVATE_KEY;fs.writeFileSync(process.argv[1],v.startsWith('untrusted comment:')?v:Buffer.from(v,'base64'))" "$RUNNER_TEMP/minisign.key"
+          export MINISIGN_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          for pack in distribution/*.zip; do
+            minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$pack"
+          done
+      - name: Publish dedicated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" distribution/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "On-demand local AI runtime. Protocol version 1." --latest=false

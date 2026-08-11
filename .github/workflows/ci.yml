@@ -49,8 +49,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      # Runtime DLLs are release bundle resources. CI compiles and tests the
-      # application but does not create an installer, so do not require them.
+      # The base application intentionally has no native local-AI resources.
       TAURI_CONFIG: '{"bundle":{"resources":null}}'
     steps:
       - name: Check out repository
@@ -71,10 +70,6 @@ jobs:
           shared-key: ci-windows
           cache-on-failure: true
 
-      - name: Prepare native test libraries
-        shell: pwsh
-        run: ./scripts/prepare-desktop-runtime.ps1 -Platform windows
-
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -94,15 +89,11 @@ jobs:
             platform: windows-latest
             target: ""
             cache-key: release-windows
-            runtime-platform: windows
-            runtime-args: ""
             build-args: --no-bundle
           - name: macOS Apple Silicon
             platform: macos-latest
             target: aarch64-apple-darwin
             cache-key: release-macos
-            runtime-platform: macos
-            runtime-args: -Target aarch64-apple-darwin
             build-args: --no-bundle --target aarch64-apple-darwin
     steps:
       - name: Check out repository
@@ -137,14 +128,6 @@ jobs:
       - name: Install frontend dependencies
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile
-
-      - name: Prepare desktop runtime libraries
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: >-
-          ./scripts/prepare-desktop-runtime.ps1
-          -Platform ${{ matrix.runtime-platform }}
-          ${{ matrix.runtime-args }}
 
       - name: Warm release build cache
         if: steps.rust-cache.outputs.cache-hit != 'true'

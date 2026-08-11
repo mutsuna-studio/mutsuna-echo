@@ -28,7 +28,7 @@ pub(crate) struct SonoraBackend {
 
 impl SonoraBackend {
     pub(crate) fn new(sample_rate: u32) -> Result<Self, String> {
-        if sample_rate == 0 || sample_rate % 100 != 0 {
+        if sample_rate == 0 || !sample_rate.is_multiple_of(100) {
             return Err("音声強調のサンプルレートでは10msフレームを構成できません。".into());
         }
         let stream = StreamConfig::new(sample_rate, CHANNELS);
@@ -85,7 +85,7 @@ impl StreamingAudioEnhancer {
 
     fn new(backend: Box<dyn AudioEnhancer>) -> Result<Self, String> {
         let sample_rate = backend.sample_rate();
-        if sample_rate == 0 || sample_rate % 100 != 0 {
+        if sample_rate == 0 || !sample_rate.is_multiple_of(100) {
             return Err("音声強調のサンプルレートでは10msフレームを構成できません。".into());
         }
         Ok(Self {

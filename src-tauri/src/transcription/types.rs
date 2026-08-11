@@ -6,17 +6,25 @@ pub enum TranscriptionProvider {
     ElevenLabs,
     #[serde(rename = "soniox")]
     Soniox,
+    #[serde(rename = "cloudflare")]
+    Cloudflare,
     #[serde(rename = "local")]
     Local,
 }
 
 impl TranscriptionProvider {
-    pub const ALL: [Self; 3] = [Self::ElevenLabs, Self::Soniox, Self::Local];
+    pub const ALL: [Self; 4] = [
+        Self::ElevenLabs,
+        Self::Soniox,
+        Self::Cloudflare,
+        Self::Local,
+    ];
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::ElevenLabs => "elevenlabs",
             Self::Soniox => "soniox",
+            Self::Cloudflare => "cloudflare",
             Self::Local => "local",
         }
     }

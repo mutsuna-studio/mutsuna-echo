@@ -16,7 +16,7 @@ object RecordingBridge {
   @Volatile internal var activity: MainActivity? = null
   private val lock = Any()
   private var status = JSONObject(defaultStatus())
-  @Volatile private var monitorRequested = false
+  @Volatile private var microphoneMonitorRequested = false
 
   @JvmStatic fun capabilities(@Suppress("UNUSED_PARAMETER") context: Context): String = JSONObject().apply {
     put("platform", "android")
@@ -189,7 +189,7 @@ object RecordingBridge {
 
   @JvmStatic fun startMonitor(context: Context, config: String): String {
     val parsed = JSONObject(config)
-    monitorRequested = parsed.optBoolean("microphone")
+    microphoneMonitorRequested = parsed.optBoolean("microphone")
     synchronized(lock) {
       if (status.optString("phase") in setOf("starting", "recording", "finalizing")) {
         return status.toString()
@@ -198,19 +198,20 @@ object RecordingBridge {
       status.put("systemAudio", parsed.optBoolean("systemAudio"))
       status.put("microphoneLevel", 0.0)
       status.put("systemLevel", 0.0)
-      status.put("warning", if (parsed.optBoolean("systemAudio")) "Androidのシステム音声は録音開始後に確認できます。" else JSONObject.NULL)
+      status.put("warning", JSONObject.NULL)
       status.put("error", JSONObject.NULL)
     }
-    if (parsed.optBoolean("microphone")) {
+    if (parsed.optBoolean("microphone") || parsed.optBoolean("systemAudio")) {
       val current = activity ?: throw IllegalStateException("入力を確認するにはMutsuna Echoを前面に表示してください。")
-      current.requestInputMonitor()
+      current.requestInputMonitor(parsed.optBoolean("microphone"), parsed.optBoolean("systemAudio"))
     }
     return getStatus(context)
   }
 
-  @JvmStatic fun stopMonitor(@Suppress("UNUSED_PARAMETER") context: Context) {
-    monitorRequested = false
+  @JvmStatic fun stopMonitor(context: Context) {
+    microphoneMonitorRequested = false
     EchoInputMonitor.stop()
+    EchoRecordingService.stopMonitor(context)
     update { put("microphoneLevel", 0.0); put("systemLevel", 0.0) }
   }
 
@@ -327,6 +328,10 @@ object RecordingBridge {
     if (optString("phase") == "idle") put("microphoneLevel", level)
   }
 
+  internal fun updateSystemMonitorLevel(level: Double) = update {
+    if (optString("phase") == "idle") put("systemLevel", level)
+  }
+
   internal fun failMonitor(message: String) = update {
     if (optString("phase") == "idle") put("warning", message)
   }
@@ -334,7 +339,7 @@ object RecordingBridge {
   internal fun pauseInputMonitor() = EchoInputMonitor.stop()
 
   internal fun resumeInputMonitor() {
-    if (monitorRequested) EchoInputMonitor.start()
+    if (microphoneMonitorRequested) EchoInputMonitor.start()
   }
 
   internal fun failStart(message: String) = update {

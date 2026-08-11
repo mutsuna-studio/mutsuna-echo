@@ -49,6 +49,7 @@ pub(crate) fn transcribe(
     model_id: &str,
     context: Option<&TranscriptionContext>,
 ) -> Result<Transcript, String> {
+    let _runtime = crate::local_ai_runtime::begin_use(app)?;
     let total_timer = crate::processing_metrics::StageTimer::start(
         "local_transcription",
         "total",
@@ -110,6 +111,7 @@ pub(crate) fn transcribe(
     Ok(transcript)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transcribe_speech_regions(
     app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,
@@ -403,6 +405,7 @@ fn assign_vad_utterances(tokens: &mut [TranscriptToken], utterance_starts_ms: &[
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recover_sparse_utterances(
     app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,
@@ -514,7 +517,7 @@ fn sparse_utterance_candidates(
                     *midpoint >= utterance.speech_start_ms && *midpoint < utterance.speech_end_ms
                 });
             let first = midpoints.next();
-            let last = midpoints.last().or(first);
+            let last = midpoints.next_back().or(first);
             first.is_none()
                 || first.is_some_and(|value| {
                     value.saturating_sub(utterance.speech_start_ms) >= RECOVERY_EDGE_GAP_MS
@@ -527,6 +530,7 @@ fn sparse_utterance_candidates(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flush_recovery_batch(
     app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,

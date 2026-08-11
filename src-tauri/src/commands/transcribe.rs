@@ -772,7 +772,9 @@ pub(crate) async fn transcribe_selected_audio(
 
     if matches!(
         request.provider,
-        TranscriptionProvider::ElevenLabs | TranscriptionProvider::Soniox
+        TranscriptionProvider::ElevenLabs
+            | TranscriptionProvider::Soniox
+            | TranscriptionProvider::Cloudflare
     ) {
         publish_transcription_progress(
             &app,

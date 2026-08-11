@@ -175,6 +175,9 @@
   }: Props = $props();
 
   let detailTab = $state<"summary" | "transcript" | "info">("transcript");
+  const detailTabs = ["summary", "transcript", "info"] as const;
+  let workspaceElement = $state<HTMLElement | null>(null);
+  let tabSwipe = $state<{ x: number; y: number } | null>(null);
   let playbackPositionMs = $state(0);
   let playbackPlaying = $state(false);
   let timelineFollowRequestId = $state(0);
@@ -200,6 +203,52 @@
     LOCAL_RECOGNITION_MODE_OPTIONS.find((option) => option.value === localRecognitionMode)?.label
       ?? "高速"
   );
+
+  function startTabSwipe(event: TouchEvent) {
+    if (!window.matchMedia("(max-width: 780px)").matches) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("button, input, textarea, select, [role='slider'], [contenteditable='true'], [data-swipe-ignore]")) return;
+    const touch = event.touches[0];
+    if (touch) tabSwipe = { x: touch.clientX, y: touch.clientY };
+  }
+
+  function updateTabSwipe(event: TouchEvent) {
+    if (!tabSwipe) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const horizontalDistance = touch.clientX - tabSwipe.x;
+    const verticalDistance = touch.clientY - tabSwipe.y;
+    if (Math.abs(horizontalDistance) < 56 || Math.abs(horizontalDistance) <= Math.abs(verticalDistance) * 1.25) return;
+    event.preventDefault();
+    const currentIndex = detailTabs.indexOf(detailTab);
+    const nextIndex = horizontalDistance < 0
+      ? Math.min(detailTabs.length - 1, currentIndex + 1)
+      : Math.max(0, currentIndex - 1);
+    if (nextIndex !== currentIndex) {
+      detailTab = detailTabs[nextIndex];
+      detailContentElement?.scrollTo({ top: 0 });
+    }
+    tabSwipe = null;
+  }
+
+  function endTabSwipe() {
+    tabSwipe = null;
+  }
+
+  $effect(() => {
+    const element = workspaceElement;
+    if (!element) return;
+    element.addEventListener("touchstart", startTabSwipe, { passive: true });
+    element.addEventListener("touchmove", updateTabSwipe, { passive: false });
+    element.addEventListener("touchend", endTabSwipe, { passive: true });
+    element.addEventListener("touchcancel", endTabSwipe, { passive: true });
+    return () => {
+      element.removeEventListener("touchstart", startTabSwipe);
+      element.removeEventListener("touchmove", updateTabSwipe);
+      element.removeEventListener("touchend", endTabSwipe);
+      element.removeEventListener("touchcancel", endTabSwipe);
+    };
+  });
 
   $effect(() => {
     const currentMeetingId = meeting?.meetingId ?? null;
@@ -409,7 +458,7 @@
   }
 </script>
 
-<section class="meeting-workspace">
+<section class="meeting-workspace" bind:this={workspaceElement}>
   {#if meeting || selectedAudio}
     {#if selectedAudio}
       <div class="audio-player-wrap">

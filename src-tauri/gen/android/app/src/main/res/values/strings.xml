@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">"mutsuna-echo"</string>
     <string name="main_activity_title">"mutsuna-echo"</string>
+    <string name="local_ai_runtime_title">ローカルAI実行環境</string>
 </resources>

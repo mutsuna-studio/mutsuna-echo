@@ -168,6 +168,23 @@ export type SonioxUsage = {
   fetchedAt: string;
 };
 
+export type CloudflareUsage = {
+  estimatedCostUsd: string;
+  usedDurationMs: number;
+  estimatedNeurons: number;
+  transcriptionCount: number;
+  periodStart: string;
+  dailyUsedDurationMs: number;
+  dailyEstimatedNeurons: number;
+  dailyTranscriptionCount: number;
+  dailyFreeAllocationNeurons: number;
+  dailyRemainingNeurons: number;
+  dailyUsagePercent: number;
+  dailyPeriodStart: string;
+  dailyResetsAt: string;
+  fetchedAt: string;
+};
+
 export type TranscriptionContext = {
   background: string;
   terms: string[];

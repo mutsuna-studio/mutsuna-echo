@@ -533,8 +533,12 @@ fn create_live_vad(
             return None;
         }
     };
-    match crate::transcription::vad::LiveVoiceActivityDetector::create(&model, SAMPLE_RATE, preset)
-    {
+    match crate::transcription::vad::LiveVoiceActivityDetector::create(
+        app,
+        &model,
+        SAMPLE_RATE,
+        preset,
+    ) {
         Ok(detector) => Some(detector),
         Err(error) => {
             eprintln!("Could not initialize live VAD: {error}");

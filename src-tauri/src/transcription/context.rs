@@ -538,7 +538,7 @@ fn prepare_for_provider(
                 value.background.clear();
             }
         }
-        TranscriptionProvider::Soniox => {}
+        TranscriptionProvider::Soniox | TranscriptionProvider::Cloudflare => {}
     }
     if context.as_ref().is_some_and(TranscriptionContext::is_empty) {
         context = None;
@@ -586,6 +586,20 @@ pub(crate) fn validate_for_provider(
                 return Err(format!(
                     "Sonioxへ送る背景情報と重要用語は合計{MAX_SONIOX_CONTEXT_CHARS}文字以内にしてください。"
                 ));
+            }
+        }
+        TranscriptionProvider::Cloudflare => {
+            let total_chars = context.background.chars().count()
+                + context
+                    .terms
+                    .iter()
+                    .map(|term| term.chars().count())
+                    .sum::<usize>();
+            if total_chars > 4_000 {
+                return Err(
+                    "Cloudflare Workers AIへ送る認識ヒントは合計4000文字以内にしてください。"
+                        .into(),
+                );
             }
         }
         TranscriptionProvider::Local => {

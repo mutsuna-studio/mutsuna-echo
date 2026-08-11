@@ -12,6 +12,8 @@ mod windows_dpapi;
 pub(crate) enum CredentialId {
     ElevenLabs,
     Soniox,
+    CloudflareApiToken,
+    CloudflareAccountId,
 }
 
 impl CredentialId {
@@ -19,6 +21,8 @@ impl CredentialId {
         match self {
             Self::ElevenLabs => "elevenlabs",
             Self::Soniox => "soniox",
+            Self::CloudflareApiToken => "cloudflare-api-token",
+            Self::CloudflareAccountId => "cloudflare-account-id",
         }
     }
 
@@ -26,6 +30,8 @@ impl CredentialId {
         match self {
             Self::ElevenLabs => "ElevenLabs",
             Self::Soniox => "Soniox",
+            Self::CloudflareApiToken => "Cloudflare APIトークン",
+            Self::CloudflareAccountId => "Cloudflare Account ID",
         }
     }
 
@@ -33,6 +39,7 @@ impl CredentialId {
         match provider_id {
             "elevenlabs" => Ok(Self::ElevenLabs),
             "soniox" => Ok(Self::Soniox),
+            "cloudflare" => Ok(Self::CloudflareApiToken),
             _ => Err("APIキーを保存できないプロバイダーです。".into()),
         }
     }

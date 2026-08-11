@@ -1,3 +1,4 @@
 include ':app'
+include ':local_ai_runtime'
 
 apply from: 'tauri.settings.gradle'
