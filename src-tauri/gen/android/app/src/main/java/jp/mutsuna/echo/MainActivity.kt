@@ -43,10 +43,13 @@ class MainActivity : TauriActivity() {
       isAppearanceLightNavigationBars = true
     }
     RecordingBridge.activity = this
+    AppUpdateBridge.attach(this)
+    AppUpdateBridge.check(applicationContext)
   }
 
   override fun onDestroy() {
     if (RecordingBridge.activity === this) RecordingBridge.activity = null
+    AppUpdateBridge.detach(this)
     EchoInputMonitor.stop()
     AudioPlaybackBridge.release(applicationContext)
     super.onDestroy()
@@ -55,6 +58,11 @@ class MainActivity : TauriActivity() {
   override fun onStart() {
     super.onStart()
     RecordingBridge.resumeInputMonitor()
+  }
+
+  override fun onResume() {
+    super.onResume()
+    AppUpdateBridge.check(applicationContext)
   }
 
   override fun onStop() {

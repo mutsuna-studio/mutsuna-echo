@@ -39,20 +39,20 @@
 <div class="cloud-model-row" aria-busy={loading || saving || deleting}>
   <div class="cloud-model-copy">
     <div class="cloud-model-title">
-      <strong>{provider.modelLabel}</strong>
+      <strong>{provider.label}</strong>
       {#if loading}
-        <span class="cloud-status">{provider.label} · 確認中</span>
+        <span class="cloud-status">確認中</span>
       {:else if hasApiKey}
-        <span class="cloud-status ready"><CircleCheck aria-hidden="true" />{provider.label} · 利用可能</span>
+        <span class="cloud-status ready"><CircleCheck aria-hidden="true" />接続済み</span>
       {:else}
-        <span class="cloud-status">{provider.label} · 未設定</span>
+        <span class="cloud-status">未接続</span>
       {/if}
     </div>
-    <small>音声を{provider.label}へ送って文字にします。利用するには、サービスから発行される専用キー（APIキー）が必要です。</small>
+    <small>音声を{provider.label}へ送って文字起こしします。</small>
     {#if provider.id === "elevenlabs"}
-      <small>APIキーを作るときは、文字起こし・ユーザー情報・利用状況の確認に必要な権限だけを許可してください。</small>
+      <small>APIキーには文字起こし・ユーザー情報・利用状況の権限が必要です。</small>
     {:else}
-      <small>APIキーを作るときは、文字起こしに必要な権限だけを許可してください。</small>
+      <small>APIキーには文字起こし権限が必要です。</small>
     {/if}
   </div>
 
@@ -83,9 +83,9 @@
 <AlertDialog bind:open={deleteDialogOpen}>
   <AlertDialogContent>
     <AlertDialogHeader>
-      <AlertDialogTitle>{provider.label}を使えない状態にしますか？</AlertDialogTitle>
+      <AlertDialogTitle>{provider.label}の接続を解除しますか？</AlertDialogTitle>
       <AlertDialogDescription>
-        保存したAPIキーをこの端末から削除します。これまでの文字起こしは消えません。もう一度使うには、APIキーの入力が必要です。
+        APIキーをこの端末から削除します。これまでの文字起こしは残ります。
       </AlertDialogDescription>
     </AlertDialogHeader>
     <AlertDialogFooter>

@@ -84,6 +84,7 @@ fn normalize(response: ElevenLabsTranscript) -> Transcript {
             speaker: Some(speaker_label(&speaker_id, &mut speakers).to_string()),
             speaker_source: Some(TokenSpeakerSource::Provider),
             confidence: None,
+            utterance_id: None,
         });
     }
 

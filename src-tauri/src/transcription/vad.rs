@@ -17,6 +17,7 @@ const REGION_PADDING_SAMPLES: u64 = REGION_PADDING_MS * SAMPLE_RATE as u64 / 1_0
 // window prevents those samples from being discarded outright.
 pub(crate) const MISSED_SPEECH_RECOVERY_GAP_MS: u64 = 2_500;
 const FORCED_SPLIT_MAX_GAP_MS: u64 = 100;
+const START_OF_AUDIO_RECOVERY_MS: u64 = 5_000;
 // Keep recognition bounded on mobile while allowing normal continuous speech
 // to pass through several detector-level safety cuts as one context window.
 const MAX_RECOGNITION_REGION_MS: u64 = 180_000;
@@ -46,7 +47,7 @@ pub(crate) fn visit_speech_regions(
     preset: VadPreset,
     mut on_progress: impl FnMut(u64) -> Result<(), String>,
     mut on_resampled_audio: impl FnMut(&[f32]) -> Result<(), String>,
-) -> Result<(u64, Vec<SpeechRegion>), String> {
+) -> Result<(u64, Vec<SpeechRegion>, Vec<u64>, Vec<SpeechRegion>), String> {
     let parameters = preset.parameters();
     let detector = create_detector(model_path, parameters)?;
     let mut resampler: Option<StreamingAreaResampler> = None;
@@ -69,7 +70,7 @@ pub(crate) fn visit_speech_regions(
     })?;
     detector.flush();
     collect_detected(&detector, &mut detected);
-    let regions = detected
+    let mut regions: Vec<SpeechRegion> = detected
         .into_iter()
         .map(|region| SpeechRegion {
             start_ms: samples_to_ms(region.start_sample.saturating_sub(REGION_PADDING_SAMPLES)),
@@ -83,9 +84,50 @@ pub(crate) fn visit_speech_regions(
             ),
         })
         .collect();
+    if let Some(first) = regions
+        .first_mut()
+        .filter(|first| first.speech_start_ms <= START_OF_AUDIO_RECOVERY_MS)
+    {
+        first.start_ms = 0;
+        first.speech_start_ms = 0;
+    }
+    let utterances = coalesce_display_forced_splits(regions.clone());
+    let utterance_starts_ms = display_utterance_starts(&utterances);
     let regions =
         coalesce_short_detector_gaps(regions, seconds_to_ms(parameters.max_speech_duration));
-    Ok((duration_ms, regions))
+    Ok((duration_ms, regions, utterance_starts_ms, utterances))
+}
+
+fn coalesce_display_forced_splits(regions: Vec<SpeechRegion>) -> Vec<SpeechRegion> {
+    let mut utterances: Vec<SpeechRegion> = Vec::with_capacity(regions.len());
+    for next in regions {
+        let should_merge = utterances.last().is_some_and(|current| {
+            next.speech_start_ms.saturating_sub(current.speech_end_ms) <= FORCED_SPLIT_MAX_GAP_MS
+                && next.speech_end_ms.saturating_sub(current.speech_start_ms)
+                    <= MAX_RECOGNITION_REGION_MS
+        });
+        if should_merge {
+            let current = utterances.last_mut().expect("a previous utterance exists");
+            current.speech_end_ms = current.speech_end_ms.max(next.speech_end_ms);
+            current.end_ms = current.end_ms.max(next.end_ms);
+        } else {
+            utterances.push(next);
+        }
+    }
+    utterances
+}
+
+fn display_utterance_starts(regions: &[SpeechRegion]) -> Vec<u64> {
+    regions
+        .windows(2)
+        .filter_map(|pair| {
+            (pair[1]
+                .speech_start_ms
+                .saturating_sub(pair[0].speech_end_ms)
+                > FORCED_SPLIT_MAX_GAP_MS)
+                .then_some(pair[1].speech_start_ms)
+        })
+        .collect()
 }
 
 fn coalesce_short_detector_gaps(
@@ -209,7 +251,7 @@ fn seconds_to_ms(seconds: f32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{coalesce_short_detector_gaps, SpeechRegion};
+    use super::{coalesce_short_detector_gaps, display_utterance_starts, SpeechRegion};
 
     fn region(speech_start_ms: u64, speech_end_ms: u64) -> SpeechRegion {
         SpeechRegion {
@@ -275,5 +317,15 @@ mod tests {
         );
         assert_eq!(regions.len(), 2);
         assert!(regions.iter().all(|region| region.duration_ms() <= 60_600));
+    }
+
+    #[test]
+    fn display_boundaries_keep_real_pauses_but_ignore_forced_splits() {
+        let regions = vec![
+            region(0, 30_000),
+            region(30_032, 60_032),
+            region(61_000, 90_000),
+        ];
+        assert_eq!(display_utterance_starts(&regions), vec![61_000]);
     }
 }

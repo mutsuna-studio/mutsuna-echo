@@ -13,6 +13,7 @@
     meetings: readonly RecentMeetingSummary[];
     loading: boolean;
     busy: boolean;
+    allowMeetingNavigation?: boolean;
     selecting: boolean;
     onSelectMeeting: (meeting: RecentMeetingSummary) => void;
     onRefresh: () => void;
@@ -20,7 +21,7 @@
     onSelectFile: () => void;
   };
 
-  let { meetings, loading, busy, selecting, onSelectMeeting, onRefresh, onRecord, onSelectFile }: Props = $props();
+  let { meetings, loading, busy, allowMeetingNavigation = false, selecting, onSelectMeeting, onRefresh, onRecord, onSelectFile }: Props = $props();
 
   const groups = $derived.by<MeetingGroup[]>(() => {
     const today = new Date();
@@ -65,7 +66,7 @@
           <h2 id={`mobile-meeting-group-${group.label}`}>{group.label}</h2>
           <div class="mobile-meeting-cards">
             {#each group.meetings as meeting (meeting.meetingId)}
-              <button class="mobile-meeting-card" type="button" onclick={() => onSelectMeeting(meeting)} disabled={busy} title={meeting.audioAvailable ? meeting.fileName : `${meeting.title}（音声なし）`}>
+              <button class="mobile-meeting-card" type="button" onclick={() => onSelectMeeting(meeting)} disabled={busy && !allowMeetingNavigation} title={meeting.audioAvailable ? meeting.fileName : `${meeting.title}（音声なし）`}>
                 <span class:imported={meeting.source === "imported"} class="mobile-meeting-icon" aria-hidden="true">{#if meeting.source === "recording"}<Mic />{:else}<FileUp />{/if}</span>
                 <span class="mobile-meeting-copy">
                   <strong>{meeting.title}</strong>

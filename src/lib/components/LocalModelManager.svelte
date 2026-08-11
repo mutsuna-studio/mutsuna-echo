@@ -249,7 +249,7 @@
       });
       recognitionMode = saved.mode;
       onMessage(recognitionMode === "accurate"
-        ? "高精度モードを有効にしました。次回から複数候補と重要用語を使います。"
+        ? "高精度モードを有効にしました。次回から複数候補と短い発話の補完認識を使います。"
         : "高速モードを有効にしました。重要用語がある場合だけ複数候補を使います。");
     } catch (error) {
       recognitionMode = previous;
@@ -313,11 +313,11 @@
 <div class="local-model-manager model-row" aria-busy={loading || working}>
   <div class="local-model-copy">
     <div class="local-model-title">
-      <strong>{model?.displayName ?? "ReazonSpeech K2 int8-fp32"}</strong>
+      <strong>端末内文字起こし</strong>
       <span class:ready={model?.installed} class="model-status">{#if model?.installed}<CircleCheck aria-hidden="true" />{/if}{model?.installed ? "利用可能" : "未追加"}</span>
     </div>
     <small>
-      日本語向け · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 音声はこの端末だけで処理します
+      日本語向け · 約{model ? formatFileSize(model.sizeBytes) : "169 MB"} · 端末内で処理
     </small>
     {#if model?.installed}
       <Select
@@ -327,7 +327,6 @@
         disabled={disabled || working || recognitionWorking}
         ariaLabel="ローカル文字起こしの精度"
       />
-      <small>重要用語が設定されている場合は、高速モードでも用語を優先する探索を使用します。</small>
     {/if}
     {#if model && !model.runtimeSupported}
       <small>この端末ではまだ使用できません。</small>
@@ -353,11 +352,11 @@
 <div class="local-model-manager model-row" aria-busy={loading || diarizationWorking}>
   <div class="local-model-copy">
     <div class="local-model-title">
-      <strong>{diarizationModel?.displayName ?? "pyannote 3.0 INT8 + 3D-Speaker ERes2Net Base"}</strong>
+      <strong>話者分離</strong>
       <span class:ready={diarizationModel?.installed} class="model-status">{#if diarizationModel?.installed}<CircleCheck aria-hidden="true" />{/if}{diarizationModel?.installed ? "利用可能" : "未追加"}</span>
     </div>
-    <small>長時間音声対応 · 約{diarizationModel ? formatFileSize(diarizationModel.sizeBytes) : "39 MB"} · 音声は端末外へ送信しません</small>
-    <small>文字起こし後に話者を分けます。人物本人を識別する機能ではありません。</small>
+    <small>話者ごとに発話を分けます · 約{diarizationModel ? formatFileSize(diarizationModel.sizeBytes) : "39 MB"} · 端末内で処理</small>
+    <small>声から人物を特定する機能ではありません。</small>
     {#if diarizationModel && !diarizationModel.runtimeSupported}<small>この端末ではまだ使用できません。</small>{/if}
     {#if diarizationWorking && diarizationProgress}
       <progress max="100" value={diarizationProgressPercent} aria-label="話者分離モデルを追加しています"></progress>
@@ -376,13 +375,12 @@
 <div class="local-model-manager model-row" aria-busy={loading || vadWorking}>
   <div class="local-model-copy">
     <div class="local-model-title">
-      <strong>{vadModel?.displayName ?? "Silero VAD"}</strong>
+      <strong>文字起こしの高速化</strong>
       <span class:ready={vadModel?.installed} class="model-status">{#if vadModel?.installed}<CircleCheck aria-hidden="true" />{/if}{vadModel?.installed ? "使用中" : "未追加"}</span>
     </div>
     <small>
-      音声のある部分を自動で見つけます · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"}
+      無音部分を除いて文字起こしを高速化します · 約{vadModel ? formatFileSize(vadModel.sizeBytes) : "2.2 MB"}
     </small>
-    <small>音声のない部分を飛ばして、端末での文字起こしを速くします。録音が自動で止まることはありません。</small>
     {#if vadModel?.installed}
       <Select
         value={vadPreset}

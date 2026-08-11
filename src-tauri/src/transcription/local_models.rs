@@ -400,7 +400,8 @@ fn verify_file(path: &Path, expected: CatalogFile) -> Result<(), String> {
     let mut file = fs::File::open(path)
         .map_err(|error| format!("モデルファイルを読み込めませんでした: {error}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Model discovery can run through Android's small JavaBridge stack.
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let count = file
             .read(&mut buffer)

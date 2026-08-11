@@ -138,7 +138,7 @@
           <strong>{agent.label}</strong>
           <span class:ready={agent.installed} class="agent-status">{#if agent.installed}<CircleCheck aria-hidden="true" />{/if}{agent.installed ? "利用可能" : "未追加"}</span>
         </div>
-        <small>{agent.installed ? "会議ノートの作成に使えます" : "追加すると会議ノートの作成に使えます"}{agent.external ? "・このアプリの外で管理されています" : ""}</small>
+        {#if agent.external}<small>このアプリの外で管理されています</small>{/if}
       </div>
       <div class="agent-actions">
         {#if agent.installed && provider}
@@ -167,7 +167,7 @@
     </div>
   {/each}
   {#if !loading && agents.length === 0}<p>この端末で追加できるAIはありません。</p>{/if}
-  <p class="note">AIを動かすために必要なものは、このアプリが自動で用意します。CodexやClaude Codeのログイン情報をこのアプリへコピーすることはありません。</p>
+  <p class="note">CodexやClaude Codeのログイン情報は、このアプリにコピーされません。</p>
 </div>
 
 <style>

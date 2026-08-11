@@ -332,12 +332,13 @@ pub(crate) fn history(
     })
 }
 
-pub(crate) fn create_run(
+pub(crate) fn create_run_with_diarization(
     app: &AppHandle,
     meeting_id: &str,
     audio_path: &Path,
     transcript: &Transcript,
     cost_usd: Option<String>,
+    diarization: Option<DiarizationMetadata>,
 ) -> Result<TranscriptionRunDetail, String> {
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     if !directory.join("index.json").exists() {
@@ -359,7 +360,7 @@ pub(crate) fn create_run(
         language: transcript.language.clone(),
         settings: settings_snapshot(app, transcript),
         cost_usd,
-        diarization: None,
+        diarization,
         source: transcript.clone(),
         document: document_from_transcript(transcript, now),
     };
@@ -1361,6 +1362,7 @@ mod tests {
                 speaker: Some("Speaker 1".into()),
                 speaker_source: Some(TokenSpeakerSource::Diarization),
                 confidence: None,
+                utterance_id: None,
             },
             TranscriptToken {
                 text: "後半".into(),
@@ -1371,6 +1373,7 @@ mod tests {
                 speaker: Some("Speaker 2".into()),
                 speaker_source: Some(TokenSpeakerSource::Diarization),
                 confidence: None,
+                utterance_id: None,
             },
         ];
         let turns = vec![
@@ -1417,6 +1420,7 @@ mod tests {
                 speaker: Some("Speaker 1".into()),
                 speaker_source: Some(TokenSpeakerSource::Provider),
                 confidence: None,
+                utterance_id: None,
             }],
             segments: vec![TranscriptSegment {
                 speaker: "Speaker 1".into(),

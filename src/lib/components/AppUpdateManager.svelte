@@ -9,6 +9,15 @@
   import { relaunch } from "@tauri-apps/plugin-process";
   import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
   import { onDestroy, onMount } from "svelte";
+  import {
+    checkAndroidUpdate,
+    completeAndroidUpdate,
+    getAndroidUpdateStatus,
+    isAndroid,
+    startAndroidUpdate,
+    waitForAndroidUpdateCheck,
+    type AndroidUpdateStatus
+  } from "../androidUpdate";
 
   interface Props {
     disabled: boolean;
@@ -25,10 +34,35 @@
   let error = $state("");
   let downloadedBytes = $state(0);
   let totalBytes = $state<number | null>(null);
+  let androidUpdate = $state<AndroidUpdateStatus | null>(null);
+  let androidPollTimer: number | null = null;
   const desktopSupported = !/Android|iPhone|iPad/i.test(navigator.userAgent);
   const progress = $derived(
-    totalBytes && totalBytes > 0 ? Math.min(100, Math.round(downloadedBytes / totalBytes * 100)) : null
+    isAndroid && androidUpdate?.totalBytes
+      ? Math.min(100, Math.round(androidUpdate.bytesDownloaded / androidUpdate.totalBytes * 100))
+      : totalBytes && totalBytes > 0
+        ? Math.min(100, Math.round(downloadedBytes / totalBytes * 100))
+        : null
   );
+  const androidBusy = $derived(androidUpdate?.phase === "starting" || androidUpdate?.phase === "installing");
+  const displayError = $derived(isAndroid ? androidUpdate?.error ?? error : error);
+
+  function androidStatusText(value: AndroidUpdateStatus | null): string {
+    if (!value) return "Google Playで更新情報を確認します。";
+    if (value.checking) return "更新情報を確認しています…";
+    switch (value.phase) {
+      case "available": return value.updatePriority >= 4 && value.immediateAllowed
+        ? "重要な新しいバージョンがあります。"
+        : "新しいバージョンがあります。";
+      case "starting": return "Google Playの更新画面を開いています…";
+      case "downloading": return "更新をダウンロードしています…";
+      case "downloaded": return "更新の準備ができました。再起動すると適用されます。";
+      case "installing": return "更新を適用しています…";
+      case "latest": return "最新バージョンを使用しています。";
+      case "failed": return "更新情報を確認できませんでした。";
+      default: return "Google Playで更新情報を確認します。";
+    }
+  }
 
   function errorText(value: unknown): string {
     if (typeof value === "string") return value;
@@ -48,11 +82,15 @@
   }
 
   async function checkForUpdates() {
-    if (!desktopSupported || checking || installing) return;
+    if ((!desktopSupported && !isAndroid) || checking || installing) return;
     checking = true;
     error = "";
     status = "更新情報を確認しています…";
     try {
+      if (isAndroid) {
+        androidUpdate = await waitForAndroidUpdateCheck(await checkAndroidUpdate());
+        return;
+      }
       await releaseUpdate();
       const update = await check({ timeout: 15_000 });
       availableUpdate = update;
@@ -80,6 +118,21 @@
   }
 
   async function installUpdate() {
+    if (isAndroid) {
+      if (installing || disabled || androidUpdate?.phase !== "available") return;
+      if (!await onBeforeInstall()) return;
+      installing = true;
+      onBusyChange(true);
+      try {
+        androidUpdate = await startAndroidUpdate();
+      } catch (cause) {
+        error = errorText(cause);
+      } finally {
+        installing = false;
+        onBusyChange(false);
+      }
+      return;
+    }
     const update = availableUpdate;
     if (!update || installing || disabled) return;
     if (!await onBeforeInstall()) return;
@@ -101,20 +154,48 @@
     }
   }
 
+  async function completeMobileUpdate() {
+    if (!isAndroid || disabled || androidUpdate?.phase !== "downloaded") return;
+    if (!await onBeforeInstall()) return;
+    installing = true;
+    onBusyChange(true);
+    try {
+      androidUpdate = await completeAndroidUpdate();
+    } catch (cause) {
+      error = errorText(cause);
+      installing = false;
+      onBusyChange(false);
+    }
+  }
+
+  async function refreshAndroidStatus() {
+    try {
+      androidUpdate = await getAndroidUpdateStatus();
+      if (androidUpdate.phase !== "installing") {
+        installing = false;
+        onBusyChange(false);
+      }
+    } catch {
+      // Play Store外の開発版では状態取得に失敗する場合がある。手動確認時だけエラーを表示する。
+    }
+  }
+
   onMount(() => {
     void getVersion().then((version) => currentVersion = version).catch(() => undefined);
-    if (desktopSupported) void checkForUpdates();
+    if (desktopSupported || isAndroid) void checkForUpdates();
+    if (isAndroid) androidPollTimer = window.setInterval(() => void refreshAndroidStatus(), 1_000);
   });
 
   onDestroy(() => {
     onBusyChange(false);
+    if (androidPollTimer !== null) window.clearInterval(androidPollTimer);
     const update = availableUpdate;
     availableUpdate = null;
     if (update) void update.close().catch(() => undefined);
   });
 </script>
 
-<div class="update-card" aria-busy={checking || installing}>
+<div class="update-card" aria-busy={checking || installing || androidBusy}>
   <div class="update-main">
     <div class="update-heading">
       <div class="update-icon" aria-hidden="true"><ShieldCheck /></div>
@@ -123,10 +204,27 @@
           <h3>アプリの更新</h3>
           <span>バージョン {currentVersion}</span>
         </div>
-        <p>{desktopSupported ? status : "モバイル版の更新はアプリストアから行います。"}</p>
+        <p>{isAndroid ? androidStatusText(androidUpdate) : desktopSupported ? status : "モバイル版の更新はアプリストアから行います。"}</p>
       </div>
     </div>
-    {#if desktopSupported}
+    {#if isAndroid}
+      <div class="update-actions">
+        {#if androidUpdate?.phase === "available"}
+          <Button type="button" icon={Download} onclick={installUpdate} disabled={disabled || installing} loading={installing}>
+            更新する
+          </Button>
+        {:else if androidUpdate?.phase === "downloaded"}
+          <Button type="button" icon={RefreshCw} onclick={completeMobileUpdate} disabled={disabled || installing} loading={installing}>
+            再起動して更新
+          </Button>
+        {:else if androidUpdate?.phase === "latest" && !checking}
+          <span class="up-to-date"><CircleCheck aria-hidden="true" /> 最新です</span>
+        {/if}
+        <Button variant="outline" type="button" icon={RefreshCw} onclick={checkForUpdates} disabled={disabled || checking || installing || androidBusy} loading={checking}>
+          更新を確認
+        </Button>
+      </div>
+    {:else if desktopSupported}
       <div class="update-actions">
         {#if availableUpdate}
           <Button type="button" icon={Download} onclick={installUpdate} disabled={disabled || installing} loading={installing}>
@@ -142,12 +240,14 @@
     {/if}
   </div>
 
-  {#if installing}
+  {#if installing || androidUpdate?.phase === "downloading"}
     <div class="download-progress" aria-live="polite">
       <progress max="100" value={progress ?? undefined} aria-label="更新のダウンロード進捗"></progress>
       <span>
         {progress !== null ? `${progress}%` : "ダウンロード中"}
-        {totalBytes ? ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}` : ""}
+        {isAndroid && androidUpdate?.totalBytes
+          ? ` · ${formatBytes(androidUpdate.bytesDownloaded)} / ${formatBytes(androidUpdate.totalBytes)}`
+          : totalBytes ? ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}` : ""}
       </span>
     </div>
   {/if}
@@ -156,8 +256,8 @@
     <p class="release-notes">{availableUpdate.body}</p>
   {/if}
 
-  {#if error}
-    <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>
+  {#if displayError}
+    <Alert variant="destructive" role="alert"><AlertDescription>{displayError}</AlertDescription></Alert>
   {/if}
 
 </div>

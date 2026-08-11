@@ -1,5 +1,6 @@
 #[cfg(any(target_os = "android", test))]
 mod android_context;
+mod android_update;
 mod audio_enhancement;
 mod audio_playback;
 mod audio_waveform;
@@ -47,6 +48,10 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            android_update::get_android_update_status,
+            android_update::check_android_update,
+            android_update::start_android_update,
+            android_update::complete_android_update,
             commands::api_key::save_api_key,
             commands::api_key::has_api_key,
             commands::api_key::delete_api_key,

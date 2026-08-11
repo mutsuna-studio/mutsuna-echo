@@ -352,7 +352,10 @@ fn verify_file(path: &Path, expected_size: u64, expected_hash: &str) -> Result<(
     let mut file = fs::File::open(path)
         .map_err(|error| format!("話者分離モデルを開けませんでした: {error}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Tauri invokes this command on Android's JavaBridge thread, whose stack is
+    // much smaller than a desktop main thread. Keep the 1 MiB hashing buffer on
+    // the heap so model status checks cannot overflow that thread's stack.
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let count = file
             .read(&mut buffer)

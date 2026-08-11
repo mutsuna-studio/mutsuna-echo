@@ -57,6 +57,7 @@ impl SelectedAudioFile {
 pub(crate) struct TranscriptionSession {
     selected_audio: Option<SelectedAudioFile>,
     transcribing: bool,
+    diarizing: bool,
     progress: Option<TranscriptionProgress>,
 }
 
@@ -107,6 +108,7 @@ pub(crate) struct TranscriptionResult {
     transcript: Transcript,
     run: Option<crate::transcript_store::TranscriptionRunDetail>,
     persistence_warning: Option<String>,
+    diarization_warning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +116,14 @@ pub(crate) struct TranscriptionResult {
 pub(crate) struct TranscriptionRequest {
     provider: TranscriptionProvider,
     model_id: Option<String>,
+    diarization: Option<TranscriptionDiarizationRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptionDiarizationRequest {
+    enabled: bool,
+    speaker_count: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +345,7 @@ pub(crate) fn get_transcription_session(
     Ok(TranscriptionSession {
         selected_audio,
         transcribing: state.transcribing.load(Ordering::Acquire),
+        diarizing: state.diarizing.load(Ordering::Acquire),
         progress: state
             .progress
             .lock()
@@ -352,6 +363,7 @@ struct TranscriptionGuard<'a>(&'a AudioSelectionState);
 impl Drop for TranscriptionGuard<'_> {
     fn drop(&mut self) {
         self.0.transcribing.store(false, Ordering::Release);
+        self.0.diarizing.store(false, Ordering::Release);
         self.0.inference_active.store(false, Ordering::Release);
         *self
             .0
@@ -715,6 +727,17 @@ pub(crate) async fn transcribe_selected_audio(
     state: State<'_, AudioSelectionState>,
     request: TranscriptionRequest,
 ) -> Result<TranscriptionResult, String> {
+    let diarization_speaker_count = request
+        .diarization
+        .as_ref()
+        .filter(|options| options.enabled)
+        .map(|options| options.speaker_count);
+    if diarization_speaker_count
+        .flatten()
+        .is_some_and(|count| !(2..=10).contains(&count))
+    {
+        return Err("話者数は2〜10人で指定してください。".into());
+    }
     if state
         .inference_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -723,7 +746,14 @@ pub(crate) async fn transcribe_selected_audio(
         return Err("文字起こしまたは話者分離を実行中です。".to_string());
     }
     state.transcribing.store(true, Ordering::Release);
+    state
+        .diarizing
+        .store(diarization_speaker_count.is_some(), Ordering::Release);
+    state.diarization_cancelled.store(false, Ordering::Release);
     let _guard = TranscriptionGuard(&state);
+    let _combined_inference = diarization_speaker_count
+        .filter(|_| cfg!(desktop))
+        .map(|_| crate::compute_tuning::CombinedInferenceGuard::enter());
     publish_transcription_progress(
         &app,
         TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None),
@@ -754,7 +784,24 @@ pub(crate) async fn transcribe_selected_audio(
         &selected.descriptor.meeting_id,
         request.provider,
     )?;
-    let outcome = crate::transcription::transcribe(
+    #[cfg(desktop)]
+    let diarization_worker = diarization_speaker_count.map(|speaker_count| {
+        let worker_app = app.clone();
+        let audio_path = selected.path.clone();
+        let total_ms = selected.descriptor.duration_ms;
+        tauri::async_runtime::spawn_blocking(move || {
+            let worker_state = worker_app.state::<AudioSelectionState>();
+            run_local_diarization(
+                &worker_app,
+                &audio_path,
+                total_ms,
+                speaker_count,
+                &worker_state,
+            )
+        })
+    });
+
+    let outcome_result = crate::transcription::transcribe(
         &app,
         &selected.descriptor.meeting_id,
         &selected.path,
@@ -763,13 +810,77 @@ pub(crate) async fn transcribe_selected_audio(
         request.model_id.as_deref(),
         context.as_ref(),
     )
-    .await?;
-    let (run, persistence_warning) = match crate::transcript_store::create_run(
+    .await;
+
+    #[cfg(desktop)]
+    let diarization_result = match diarization_worker {
+        Some(worker) => Some(
+            {
+                if outcome_result.is_err() {
+                    state.diarization_cancelled.store(true, Ordering::Release);
+                }
+                worker.await
+            }
+            .map_err(|error| format!("話者分離処理を完了できませんでした: {error}"))
+            .and_then(|result| result),
+        ),
+        None => None,
+    };
+
+    let mut outcome = outcome_result?;
+
+    #[cfg(target_os = "android")]
+    let diarization_result = if let Some(speaker_count) = diarization_speaker_count {
+        let worker_app = app.clone();
+        let audio_path = selected.path.clone();
+        let total_ms = selected.descriptor.duration_ms;
+        Some(
+            tauri::async_runtime::spawn_blocking(move || {
+                let worker_state = worker_app.state::<AudioSelectionState>();
+                run_local_diarization(
+                    &worker_app,
+                    &audio_path,
+                    total_ms,
+                    speaker_count,
+                    &worker_state,
+                )
+            })
+            .await
+            .map_err(|error| format!("話者分離処理を完了できませんでした: {error}"))
+            .and_then(|result| result),
+        )
+    } else {
+        None
+    };
+
+    #[cfg(not(any(desktop, target_os = "android")))]
+    let diarization_result: Option<
+        Result<crate::transcription::local_diarization::LocalDiarizationOutput, String>,
+    > = None;
+
+    let (diarization_metadata, diarization_warning) = match diarization_result {
+        Some(Ok(output)) => {
+            let metadata = diarization_metadata(&output);
+            match crate::transcription::diarization::merge_speaker_turns(
+                &mut outcome.transcript,
+                &output.turns,
+                crate::transcription::diarization::SpeakerMergePolicy::ReplaceAutomatic,
+            ) {
+                Ok(_) => (Some(metadata), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        Some(Err(error)) => (None, Some(error)),
+        None => (None, None),
+    };
+
+    let (run, persistence_warning) = match crate::transcript_store::create_run_with_diarization(
         &app,
         &selected.descriptor.meeting_id,
         &selected.path,
         &outcome.transcript,
         outcome.cost_usd,
+        diarization_metadata,
     ) {
         Ok(run) => (
             Some(run),
@@ -781,7 +892,49 @@ pub(crate) async fn transcribe_selected_audio(
         transcript: outcome.transcript,
         run,
         persistence_warning,
+        diarization_warning,
     })
+}
+
+#[cfg(any(desktop, target_os = "android"))]
+fn run_local_diarization(
+    app: &AppHandle,
+    audio_path: &Path,
+    total_ms: u64,
+    speaker_count: Option<u8>,
+    state: &AudioSelectionState,
+) -> Result<crate::transcription::local_diarization::LocalDiarizationOutput, String> {
+    crate::transcription::local_diarization::diarize(
+        app,
+        audio_path,
+        crate::transcription::local_diarization::LocalDiarizationOptions {
+            speaker_count,
+            total_ms: Some(total_ms),
+        },
+        &state.diarization_cancelled,
+        |progress| {
+            if let Err(error) = app.emit("local-diarization-progress", progress) {
+                eprintln!("Could not emit diarization progress: {error:?}");
+            }
+        },
+    )
+}
+
+#[cfg(any(desktop, target_os = "android"))]
+fn diarization_metadata(
+    output: &crate::transcription::local_diarization::LocalDiarizationOutput,
+) -> crate::transcript_store::DiarizationMetadata {
+    crate::transcript_store::DiarizationMetadata {
+        model_id: output.metadata.model_id.clone(),
+        model_version: output.metadata.model_version.clone(),
+        completed_at: output.metadata.completed_at.clone(),
+        requested_speaker_count: output.metadata.requested_speaker_count,
+        estimated_speaker_count: output.metadata.estimated_speaker_count,
+        chunk_duration_ms: output.metadata.chunk_duration_ms,
+        chunk_overlap_ms: output.metadata.chunk_overlap_ms,
+        local_cluster_threshold: output.metadata.local_cluster_threshold,
+        global_embedding_threshold: output.metadata.global_embedding_threshold,
+    }
 }
 
 #[tauri::command]

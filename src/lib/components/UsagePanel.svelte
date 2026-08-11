@@ -18,7 +18,7 @@
 <Card class="card usage-card" aria-busy={loading}>
   <div class="section-heading">
     <div>
-      <h2>ElevenLabsで使える時間</h2>
+      <h2>ElevenLabs</h2>
     </div>
     <Button variant="outline" size="sm" type="button" onclick={onRefresh} disabled={loading} loading={loading}>
       {loading ? "更新中…" : "更新"}
@@ -30,11 +30,11 @@
   {:else}
     <div class="usage-grid">
       <div>
-        <span>今月あと使える時間</span>
+        <span>残り時間</span>
         <strong>{formatOptionalDuration(usage?.availableDurationMs)}</strong>
       </div>
       <div>
-        <span>今月使った時間の目安</span>
+        <span>使用時間（目安）</span>
         <strong>{formatOptionalDuration(usage?.usedDurationMs)}</strong>
       </div>
     </div>
@@ -54,6 +54,6 @@
     <Alert class="usage-warning" variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>
   {/if}
   <p class="usage-note">
-    表示時間はElevenLabsの利用状況から計算した目安です。ほかのElevenLabs機能も使っている場合は、実際に文字起こしできる時間と異なることがあります。
+    ほかのElevenLabs機能の利用分も含まれるため、表示時間は目安です。
   </p>
 </Card>

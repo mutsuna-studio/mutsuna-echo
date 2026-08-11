@@ -241,6 +241,7 @@ fn normalize(response: SonioxTranscript) -> Transcript {
             speaker_source: speaker.as_ref().map(|_| TokenSpeakerSource::Provider),
             speaker,
             confidence: token.confidence,
+            utterance_id: None,
         });
     }
     let mut segments = segments_from_tokens(&tokens);

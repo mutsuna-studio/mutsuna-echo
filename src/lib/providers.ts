@@ -88,7 +88,7 @@ export type LocalRecognitionSettings = { mode: LocalRecognitionMode };
 
 export const LOCAL_RECOGNITION_MODE_OPTIONS = [
   { value: "fast", label: "高速", description: "Greedy Searchで処理時間を優先します" },
-  { value: "accurate", label: "高精度", description: "Beam Searchで複数候補を比較します" }
+  { value: "accurate", label: "高精度", description: "Beam Searchと短い発話の補完認識を使います" }
 ] as const;
 
 export const VAD_PRESET_OPTIONS = [

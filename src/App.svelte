@@ -11,9 +11,11 @@
   } from "@mutsuna/ui/sonner";
   import { AdminShellFrame } from "@mutsuna/ui/admin-shell-frame";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
+  import { checkAndroidUpdate, isAndroid, waitForAndroidUpdateCheck } from "./lib/androidUpdate";
   import AppSidebar from "./lib/components/AppSidebar.svelte";
   import LocalModelManager from "./lib/components/LocalModelManager.svelte";
   import MeetingHome from "./lib/components/MeetingHome.svelte";
@@ -168,6 +170,7 @@
 
   let loading = $state(!summarySettingsPreview);
   let toasterPosition = $state<"top-right" | "bottom-center">("top-right");
+  let lastUpdateNotification = "";
   let section = $state<AppSection>(summarySettingsPreview ? "settings" : "meetings");
   let settingsPane = $state<SettingsPane>(summarySettingsPreview ? "summary" : "general");
   let meetings = $state.raw<RecentMeetingSummary[]>([]);
@@ -178,6 +181,7 @@
   let selecting = $state(false);
   let transcribing = $state(false);
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
+  let transcriptionSessionSyncing = false;
   let diarizing = $state(false);
   let diarizationProgress = $state<LocalDiarizationProgress | null>(null);
   let diarizationModelStatus = $state.raw<LocalDiarizationModelStatus | null>(null);
@@ -267,8 +271,9 @@
     const handlePopState = () => {
       hasAppHistoryEntry = false;
       if (recordingBusy) {
+        section = "recording";
         pushAppHistoryEntry();
-        showWarningToast("録音処理中です。", "録音を停止してから会議一覧へ戻ってください。");
+        showWarningToast("録音を続けています。", "録音画面へ戻りました。");
         return;
       }
       section = "meetings";
@@ -641,7 +646,33 @@
   }
 
   async function checkForAvailableUpdate() {
-    if (import.meta.env.DEV || /Android|iPhone|iPad/i.test(navigator.userAgent)) return;
+    if (import.meta.env.DEV) return;
+    if (isAndroid) {
+      try {
+        const update = await waitForAndroidUpdateCheck(await checkAndroidUpdate());
+        if (update.phase === "available") {
+          const notificationKey = `available:${update.availableVersionCode ?? "unknown"}`;
+          if (lastUpdateNotification === notificationKey) return;
+          lastUpdateNotification = notificationKey;
+          showSuccessToast(
+            "新しいバージョンがあります。",
+            "設定の「アプリの更新」から更新できます。"
+          );
+        } else if (update.phase === "downloaded") {
+          const notificationKey = `downloaded:${update.availableVersionCode ?? "unknown"}`;
+          if (lastUpdateNotification === notificationKey) return;
+          lastUpdateNotification = notificationKey;
+          showSuccessToast(
+            "更新の準備ができました。",
+            "設定の「アプリの更新」から再起動して適用できます。"
+          );
+        }
+      } catch {
+        // Play Store外から入れた開発版など、更新対象外の環境では通知しない。
+      }
+      return;
+    }
+    if (/iPhone|iPad/i.test(navigator.userAgent)) return;
     try {
       const update = await checkForAppUpdate({ timeout: 15_000 });
       if (!update) return;
@@ -950,6 +981,7 @@
         selectedAudio = session.selectedAudio;
         selectedMeetingId = session.selectedAudio?.meetingId ?? null;
         transcribing = session.transcribing;
+        diarizing = session.diarizing;
         transcriptionProgress = session.progress;
         diarizationModelStatus = await invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status");
         if (pendingResult.error) {
@@ -978,38 +1010,43 @@
     };
   });
 
+  async function syncTranscriptionSession(reportError = false) {
+    if (transcriptionSessionSyncing) return;
+    transcriptionSessionSyncing = true;
+    try {
+      const session = await invoke<TranscriptionSession>("get_transcription_session");
+      const wasTranscribing = transcribing;
+      transcriptionProgress = session.progress;
+      diarizing = session.diarizing;
+      if (session.transcribing) {
+        transcribing = true;
+        return;
+      }
+      selectedAudio = session.selectedAudio;
+      selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
+      transcribing = false;
+      diarizing = false;
+      transcriptionProgress = null;
+      diarizationProgress = null;
+      if (wasTranscribing && selectedAudio) {
+        await restoreTranscriptionHistory();
+        await refreshMeetings();
+        await refreshUsage();
+      }
+    } catch (error) {
+      if (reportError) showError(errorText(error));
+      else console.warn("Could not synchronize transcription state", error);
+    } finally {
+      transcriptionSessionSyncing = false;
+    }
+  }
+
   // WebViewを閉じている間に進んだ文字起こしを、再生成後に再同期する。
   $effect(() => {
     if (!transcribing || loading) return;
-    let cancelled = false;
-    let polling = false;
-    const poll = async () => {
-      if (polling) return;
-      polling = true;
-      try {
-        const session = await invoke<TranscriptionSession>("get_transcription_session");
-        if (cancelled) return;
-        transcriptionProgress = session.progress;
-        if (session.transcribing) return;
-        selectedAudio = session.selectedAudio;
-        selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
-        transcribing = false;
-        if (selectedAudio) {
-          await restoreTranscriptionHistory();
-          await refreshMeetings();
-        }
-        await refreshUsage();
-      } catch (error) {
-        if (!cancelled) showError(errorText(error));
-      } finally {
-        polling = false;
-      }
-    };
-    const timer = window.setInterval(() => void poll(), 1_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+    void syncTranscriptionSession();
+    const timer = window.setInterval(() => void syncTranscriptionSession(), 1_000);
+    return () => window.clearInterval(timer);
   });
 
   $effect(() => {
@@ -1020,11 +1057,20 @@
     };
     const flushWhenHidden = () => {
       if (document.visibilityState === "hidden") flushBeforeLeaving();
+      else {
+        void syncTranscriptionSession(true);
+        void checkForAvailableUpdate();
+      }
     };
+    const syncWhenFocused = () => void syncTranscriptionSession(true);
     window.addEventListener("beforeunload", flushBeforeLeaving);
+    window.addEventListener("focus", syncWhenFocused);
+    window.addEventListener("pageshow", syncWhenFocused);
     document.addEventListener("visibilitychange", flushWhenHidden);
     return () => {
       window.removeEventListener("beforeunload", flushBeforeLeaving);
+      window.removeEventListener("focus", syncWhenFocused);
+      window.removeEventListener("pageshow", syncWhenFocused);
       document.removeEventListener("visibilitychange", flushWhenHidden);
     };
   });
@@ -1100,8 +1146,9 @@
     }
   }
 
-  async function transcribeAudio() {
+  async function transcribeAudio(diarizationSpeakerCount?: number | null) {
     if (!canTranscribe) return;
+    const transcriptionMeetingId = selectedAudio?.meetingId ?? null;
 
     await flushTranscriptEdits();
     const [globalContextSaved, meetingContextSaved] = await Promise.all([
@@ -1113,31 +1160,42 @@
       return;
     }
     transcribing = true;
+    const diarizationEnabled = diarizationSpeakerCount !== undefined && transcriptionProvider === "local";
+    diarizing = diarizationEnabled;
     transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
+    diarizationProgress = diarizationEnabled && selectedAudio
+      ? { stage: "loadingModel", completedChunks: 0, totalChunks: null, processedMs: 0, totalMs: selectedAudio.durationMs }
+      : null;
     try {
       const result = await invoke<TranscriptionResult>("transcribe_selected_audio", {
         request: {
           provider: transcriptionProvider,
-          modelId: currentProvider?.modelId ?? null
+          modelId: currentProvider?.modelId ?? null,
+          diarization: {
+            enabled: diarizationEnabled,
+            speakerCount: diarizationSpeakerCount ?? null
+          }
         }
       });
-      if (result.run) {
-        setSelectedTranscriptionRun(result.run);
-        await refreshTranscriptionHistoryList();
-      } else {
-        selectedTranscriptionRun = null;
-        selectedTranscriptionId = null;
-        transcript = {
-          ...result.transcript,
-          speakerLabels: [...new Set(result.transcript.segments.map((segment) => segment.speaker))]
-            .sort()
-            .map((speaker) => ({ speaker, label: speaker, edited: false })),
-          segments: result.transcript.segments.map((segment) => ({
-            ...segment,
-            segmentId: "",
-            edited: false
-          }))
-        };
+      if (selectedMeetingId === transcriptionMeetingId) {
+        if (result.run) {
+          setSelectedTranscriptionRun(result.run);
+          await refreshTranscriptionHistoryList();
+        } else {
+          selectedTranscriptionRun = null;
+          selectedTranscriptionId = null;
+          transcript = {
+            ...result.transcript,
+            speakerLabels: [...new Set(result.transcript.segments.map((segment) => segment.speaker))]
+              .sort()
+              .map((speaker) => ({ speaker, label: speaker, edited: false })),
+            segments: result.transcript.segments.map((segment) => ({
+              ...segment,
+              segmentId: "",
+              edited: false
+            }))
+          };
+        }
       }
       if (result.transcript.segments.length > 0) {
         showSuccessToast("文字起こしが完了しました。");
@@ -1147,6 +1205,9 @@
       if (result.persistenceWarning) {
         showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
       }
+      if (result.diarizationWarning) {
+        showWarningToast("文字起こしは完了しました。", `話者分離のみ失敗しました: ${result.diarizationWarning}`);
+      }
       await refreshMeetings();
       if (transcriptionProvider === "elevenlabs") await refreshUsage();
       section = "meetings";
@@ -1154,7 +1215,9 @@
       showError(errorText(error));
     } finally {
       transcribing = false;
+      diarizing = false;
       transcriptionProgress = null;
+      diarizationProgress = null;
     }
   }
 
@@ -1658,6 +1721,8 @@
         settingsPreview={summarySettingsPreview}
         loading={meetingsLoading}
         busy={meetingBusy || busy}
+        allowMeetingNavigation={transcribing || diarizing}
+        {recordingBusy}
         onNavigate={navigate}
         onSelectSettingsPane={selectSettingsPane}
         onSelectMeeting={selectMeeting}
@@ -1683,6 +1748,7 @@
             {meetings}
             loading={meetingsLoading}
             busy={meetingBusy || busy}
+            allowMeetingNavigation={transcribing || diarizing}
             {selecting}
             onSelectMeeting={selectMeeting}
             onRefresh={refreshMeetings}
@@ -1761,12 +1827,24 @@
         />
       {:else}
         <section class="settings-view">
+          {#if recordingBusy}
+            <button class="mobile-recording-return" type="button" onclick={() => navigate("recording")}>
+              <ArrowLeft aria-hidden="true" /><span>録音画面へ戻る</span>
+            </button>
+          {/if}
+          {#if !summarySettingsPreview}
+            <nav class="mobile-settings-nav" aria-label="設定カテゴリ">
+              <button class:active={settingsPane === "general"} type="button" aria-current={settingsPane === "general" ? "page" : undefined} onclick={() => selectSettingsPane("general")}>一般</button>
+              <button class:active={settingsPane === "transcription"} type="button" aria-current={settingsPane === "transcription" ? "page" : undefined} onclick={() => selectSettingsPane("transcription")}>文字起こし</button>
+              <button class:active={settingsPane === "summary"} type="button" aria-current={settingsPane === "summary" ? "page" : undefined} onclick={() => selectSettingsPane("summary")}>AI会議ノート</button>
+              <button class:active={settingsPane === "usage"} type="button" aria-current={settingsPane === "usage" ? "page" : undefined} onclick={() => selectSettingsPane("usage")}>利用状況</button>
+            </nav>
+          {/if}
           <div class="settings-detail-scroll">
             <div class="settings-detail">
               {#if settingsPane === "general" && !summarySettingsPreview}
                 <header class="settings-detail-heading">
                   <h1>一般</h1>
-                  <span>Mutsuna Echoのバージョンと更新を管理します。</span>
                 </header>
                 <div class="settings-section native-settings-group">
                   <AppUpdateManager
@@ -1778,11 +1856,10 @@
               {:else if settingsPane === "transcription" && !summarySettingsPreview}
                 <header class="settings-detail-heading">
                   <h1>文字起こし</h1>
-                  <span>端末内モデル、クラウドサービス、認識に使う共通情報を設定します。</span>
                 </header>
                 <section class="settings-section">
                   <div class="settings-section-heading">
-                    <h2>モデルとサービス</h2>
+                    <h2>文字起こし方法</h2>
                   </div>
                   <div class="transcription-model-manager">
                     <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshLocalModels} onMessage={showMessage} onError={showError} />
@@ -1802,12 +1879,12 @@
                 </section>
                 <section class="settings-section">
                   <div class="settings-section-heading">
-                    <h2>共通コンテキスト</h2>
+                    <h2>認識のヒント</h2>
                   </div>
                   <div class="context-settings-wrap">
                     <TranscriptionContextEditor
-                      title="全会議で使う内容"
-                      description="会社名、製品名、よく扱う議題などを登録できます。"
+                      title="すべての会議で使うヒント"
+                      description="会社名や製品名など、よく使う言葉を登録します。"
                       contextEnabled={globalContextSettings.contextEnabled}
                       showMasterToggle
                       background={globalContextDraft.background}
@@ -1826,11 +1903,10 @@
               {:else if settingsPane === "summary"}
                 <header class="settings-detail-heading">
                   <h1>AI会議ノート</h1>
-                  <span>会議ノートを作るAIと、最初に選ばれるモデルを設定します。</span>
                 </header>
                 <section class="settings-section">
                   <div class="settings-section-heading">
-                    <h2>既定のAI</h2>
+                    <h2>最初に使うAI</h2>
                   </div>
                   <SummaryDefaultsSettings
                     providers={summaryProviders}
@@ -1844,7 +1920,7 @@
                 </section>
                 <section class="settings-section">
                   <div class="settings-section-heading">
-                    <h2>利用できるAI</h2>
+                    <h2>AIを追加・管理</h2>
                   </div>
                   <div class="summary-agent-wrap">
                     <SummaryAgentManager
@@ -1863,7 +1939,6 @@
               {:else if settingsPane === "usage" && !summarySettingsPreview}
                 <header class="settings-detail-heading">
                   <h1>利用状況</h1>
-                  <span>接続中の文字起こしサービスの利用量を確認します。</span>
                 </header>
                 <div class="usage-settings-stack">
                   {#if hasApiKey}
@@ -1875,9 +1950,9 @@
                   {#if !hasApiKey && !hasSonioxApiKey}
                     <section class="settings-empty-state">
                       <ChartNoAxesColumn aria-hidden="true" />
-                      <h2>表示できる利用状況はありません</h2>
-                      <p>「文字起こし」でElevenLabsまたはSonioxのAPIキーを接続すると、ここで利用量を確認できます。</p>
-                      <button type="button" onclick={() => selectSettingsPane("transcription")}>文字起こし設定を開く</button>
+                      <h2>利用状況はまだありません</h2>
+                      <p>ElevenLabsまたはSonioxを接続すると表示されます。</p>
+                      <button type="button" onclick={() => selectSettingsPane("transcription")}>サービスを接続</button>
                     </section>
                   {/if}
                 </div>

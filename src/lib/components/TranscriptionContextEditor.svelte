@@ -55,11 +55,11 @@
     return "保存済み";
   });
   const providerMessage = $derived.by(() => {
-    if (!provider) return "Sonioxでは背景情報と重要用語、ElevenLabsとローカルSTTでは重要用語だけを使用します。表記補正はクラウドへ送信せず、端末内の整形時だけ適用します。";
-    if (!contextEnabled) return "コンテキストは全体設定でオフになっているため、この内容は送信されません。";
-    if (!provider.capabilities.contextText && !provider.capabilities.contextTerms) return `${provider.modelLabel}はコンテキストに対応していません。入力内容は保存されます。`;
-    if (!provider.capabilities.contextText) return `${provider.modelLabel}では重要用語だけを使用します。背景情報は保存されますが送信されません。`;
-    return `${provider.modelLabel}では背景情報と重要用語を使用します。`;
+    if (!provider) return "選んだサービスに対応する情報だけを文字起こしに使います。";
+    if (!contextEnabled) return "オフのため、入力内容は文字起こしに使われません。";
+    if (!provider.capabilities.contextText && !provider.capabilities.contextTerms) return "選択中のモデルでは認識のヒントを使用できません。";
+    if (!provider.capabilities.contextText) return "選択中のモデルでは重要用語だけを使用します。";
+    return "背景情報と重要用語を使用します。";
   });
 
   function changeEnabled(value: boolean) {
@@ -82,8 +82,8 @@
 
   {#if showMasterToggle}
     <label class="toggle-row">
-      <span><strong>文字起こしでコンテキストを使用</strong><small>オフにしても入力内容は削除されません。</small></span>
-      <Switch checked={contextEnabled} onCheckedChange={changeEnabled} {disabled} aria-label="文字起こしでコンテキストを使用" />
+      <span><strong>認識のヒントを使う</strong><small>オフにしても内容は残ります。</small></span>
+      <Switch checked={contextEnabled} onCheckedChange={changeEnabled} {disabled} aria-label="認識のヒントを使う" />
     </label>
   {/if}
 
@@ -98,7 +98,7 @@
 
   <div class="context-fields">
     <label>
-      <span>背景情報 <small>{background.length.toLocaleString()} / 10,000文字</small></span>
+      <span>会議の背景 <small>{background.length.toLocaleString()} / 10,000文字</small></span>
       <Textarea
         value={background}
         oninput={(event) => onBackgroundChange(event.currentTarget.value)}
@@ -119,7 +119,7 @@
         aria-label={`${title}の表記補正`}
         {disabled}
       />
-      <small>端末内の機械整形時だけ適用します。発話欄で直した短い誤表記も端末内へ自動学習されます。認識原文は保持され、取り消せます。</small>
+      <small>端末内で表記を整えるときに使用します。</small>
     </label>
     <label>
       <span>重要用語 <small>{termCount.toLocaleString()} / 1,000件・1行に1用語</small></span>

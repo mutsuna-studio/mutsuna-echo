@@ -316,6 +316,7 @@ mod tests {
             speaker: speaker.map(|(label, _)| label.into()),
             speaker_source: speaker.map(|(_, source)| source),
             confidence: None,
+            utterance_id: None,
         }
     }
 

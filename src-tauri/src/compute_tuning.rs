@@ -1,4 +1,7 @@
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ComputeProfile {
@@ -10,9 +13,25 @@ pub(crate) struct ComputeProfile {
 }
 
 static PROFILE: OnceLock<ComputeProfile> = OnceLock::new();
+static COMBINED_INFERENCE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct CombinedInferenceGuard;
+
+impl CombinedInferenceGuard {
+    pub(crate) fn enter() -> Self {
+        COMBINED_INFERENCE.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for CombinedInferenceGuard {
+    fn drop(&mut self) {
+        COMBINED_INFERENCE.store(false, Ordering::Release);
+    }
+}
 
 pub(crate) fn profile() -> ComputeProfile {
-    *PROFILE.get_or_init(|| {
+    let mut profile = *PROFILE.get_or_init(|| {
         let cores = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(2);
@@ -27,7 +46,17 @@ pub(crate) fn profile() -> ComputeProfile {
             profile.stt_batch_memory_bytes
         );
         profile
-    })
+    });
+    if !cfg!(mobile) && COMBINED_INFERENCE.load(Ordering::Acquire) {
+        let cores = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(2);
+        let workers_per_model = (cores.saturating_sub(4) / 2).clamp(1, 8) as i32;
+        profile.stt_threads = workers_per_model;
+        profile.diarization_threads = workers_per_model;
+        profile.max_stt_batch = profile.max_stt_batch.min(4);
+    }
+    profile
 }
 
 pub(crate) fn stt_batch_size(max_region_ms: u64) -> usize {
@@ -62,19 +91,31 @@ fn profile_for(cores: usize, mobile: bool) -> ComputeProfile {
             stt_batch_memory_bytes: 48 * 1024 * 1024,
         }
     } else {
-        let workers = cores.saturating_sub(1).clamp(1, 8) as i32;
+        let workers = cores.saturating_sub(2).clamp(1, 12) as i32;
         ComputeProfile {
             stt_threads: workers,
             diarization_threads: workers,
-            vad_threads: if cores >= 6 { 2 } else { 1 },
-            max_stt_batch: if cores >= 12 {
+            vad_threads: if cores >= 12 {
+                4
+            } else if cores >= 6 {
+                2
+            } else {
+                1
+            },
+            max_stt_batch: if cores >= 16 {
+                6
+            } else if cores >= 12 {
                 4
             } else if cores >= 6 {
                 3
             } else {
                 2
             },
-            stt_batch_memory_bytes: 192 * 1024 * 1024,
+            stt_batch_memory_bytes: if cores >= 16 {
+                384 * 1024 * 1024
+            } else {
+                192 * 1024 * 1024
+            },
         }
     }
 }
@@ -96,8 +137,9 @@ mod tests {
     #[test]
     fn desktop_profile_leaves_capacity_for_io_and_ui() {
         let profile = profile_for(16, false);
-        assert_eq!(profile.stt_threads, 8);
-        assert_eq!(profile.diarization_threads, 8);
-        assert_eq!(profile.max_stt_batch, 4);
+        assert_eq!(profile.stt_threads, 12);
+        assert_eq!(profile.diarization_threads, 12);
+        assert_eq!(profile.vad_threads, 4);
+        assert_eq!(profile.max_stt_batch, 6);
     }
 }

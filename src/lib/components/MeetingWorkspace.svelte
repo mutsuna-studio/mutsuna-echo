@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import Check from "@lucide/svelte/icons/check";
   import FileAudio from "@lucide/svelte/icons/file-audio";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
@@ -29,7 +30,10 @@
   import { formatActualCost, formatEstimatedCost, formatFileSize, formatTimestamp } from "../format";
   import {
     isTranscriptionProviderId,
+    LOCAL_RECOGNITION_MODE_OPTIONS,
     transcriptionProviderOptions,
+    type LocalRecognitionMode,
+    type LocalRecognitionSettings,
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId
   } from "../providers";
@@ -84,7 +88,7 @@
     contextDraft: MeetingContextDraft | null;
     contextSaveState: ContextSaveState;
     contextLoading: boolean;
-    onTranscribe: () => void;
+    onTranscribe: (diarizationSpeakerCount?: number | null) => void;
     onDiarize: (speakerCount: number | null) => void;
     onCancelDiarization: () => void;
     onOpenDiarizationSettings: () => void;
@@ -180,7 +184,9 @@
   let fileNameDraft = $state("");
   let fileNameInput = $state<HTMLInputElement | null>(null);
   let deleteDialogOpen = $state(false);
-  let diarizationSpeakerCount = $state("auto");
+  let diarizationSpeakerCount = $state("off");
+  let localRecognitionMode = $state<LocalRecognitionMode>("fast");
+  let localRecognitionModeWorking = $state(false);
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
   const selectedProviderOption = $derived(providerOptions.find((option) => option.value === provider));
@@ -189,6 +195,40 @@
       ? providers.find((candidate) => candidate.id === selectedProviderOption.value) ?? null
       : null
   );
+  const localRecognitionModeLabel = $derived(
+    LOCAL_RECOGNITION_MODE_OPTIONS.find((option) => option.value === localRecognitionMode)?.label
+      ?? "高速"
+  );
+
+  $effect(() => {
+    let cancelled = false;
+    void invoke<LocalRecognitionSettings>("get_local_recognition_settings")
+      .then((settings) => {
+        if (!cancelled) localRecognitionMode = settings.mode;
+      })
+      .catch((error) => {
+        if (!cancelled) onError(typeof error === "string" ? error : "ローカル文字起こし設定を取得できませんでした。");
+      });
+    return () => { cancelled = true; };
+  });
+
+  async function changeLocalRecognitionMode(value: string | undefined) {
+    if (value !== "fast" && value !== "accurate") return;
+    const previous = localRecognitionMode;
+    localRecognitionMode = value;
+    localRecognitionModeWorking = true;
+    try {
+      const saved = await invoke<LocalRecognitionSettings>("set_local_recognition_settings", {
+        settings: { mode: localRecognitionMode }
+      });
+      localRecognitionMode = saved.mode;
+    } catch (error) {
+      localRecognitionMode = previous;
+      onError(typeof error === "string" ? error : "ローカル文字起こし設定を変更できませんでした。");
+    } finally {
+      localRecognitionModeWorking = false;
+    }
+  }
   const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
   const saveStatus = $derived.by(() => {
     if (!selectedRun) return "";
@@ -208,13 +248,17 @@
       : `${diarizationProgress.completedChunks} チャンク完了`;
   });
 
-  function startDiarization() {
-    if (!diarizationModelReady) {
-      onOpenDiarizationSettings();
+  $effect(() => {
+    if (provider !== "local" || !diarizationModelReady) diarizationSpeakerCount = "off";
+  });
+
+  function startTranscription() {
+    if (provider !== "local" || diarizationSpeakerCount === "off") {
+      onTranscribe(undefined);
       return;
     }
     const count = diarizationSpeakerCount === "auto" ? null : Number(diarizationSpeakerCount);
-    onDiarize(count);
+    onTranscribe(count);
   }
 
   const recordedAt = $derived(
@@ -450,36 +494,52 @@
                   {/each}
                 </SelectContent>
               </Select>
-              <span class="transcription-action" data-transcription-action>
-                <Button size="sm" variant="outline" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
-              </span>
-            </div>
-            <div class="diarization-controls">
-              <Select
-                type="single"
-                value={diarizationSpeakerCount}
-                onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }}
-                disabled={diarizing || transcribing || transcriptFormatting}
-              >
-                <SelectTrigger aria-label="話者数" class="speaker-count-select">
-                  <span>{diarizationSpeakerCount === "auto" ? "話者数: 自動" : `話者数: ${diarizationSpeakerCount}人`}</span>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">話者数: 自動</SelectItem>
-                  {#each Array.from({ length: 10 }, (_, index) => index + 1) as count}
-                    <SelectItem value={String(count)}>話者数: {count}人</SelectItem>
-                  {/each}
-                </SelectContent>
-              </Select>
-              {#if diarizing}
-                <Button size="sm" variant="outline" type="button" onclick={onCancelDiarization}>キャンセル</Button>
-              {:else}
-                <Button size="sm" variant="outline" type="button" onclick={startDiarization} disabled={!canDiarize}>
-                  {diarizationModelReady ? "話者分離" : "話者分離モデルを追加"}
-                </Button>
+              {#if provider === "local"}
+                <Select
+                  type="single"
+                  value={localRecognitionMode}
+                  onValueChange={changeLocalRecognitionMode}
+                  disabled={transcribing || diarizing || transcriptFormatting || localRecognitionModeWorking}
+                >
+                  <SelectTrigger aria-label="ローカル文字起こしの精度" class="transcription-model-select">
+                    <span>精度: {localRecognitionModeLabel}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {#each LOCAL_RECOGNITION_MODE_OPTIONS as option (option.value)}
+                      <SelectItem value={option.value}>{option.label} — {option.description}</SelectItem>
+                    {/each}
+                  </SelectContent>
+                </Select>
               {/if}
-              {#if diarizationProgressLabel}<small aria-live="polite">{diarizationProgressLabel}</small>{/if}
+              <span class="transcription-action" data-transcription-action>
+                <Button size="sm" variant="outline" type="button" onclick={startTranscription} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
+              </span>
+              {#if provider === "local"}
+                <Select
+                  type="single"
+                  value={diarizationSpeakerCount}
+                  onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }}
+                  disabled={diarizing || transcribing || transcriptFormatting || !diarizationModelReady}
+                >
+                  <SelectTrigger aria-label="話者分離" class="speaker-count-select">
+                    <span>{diarizationSpeakerCount === "off" ? "話者分離: オフ" : diarizationSpeakerCount === "auto" ? "話者分離: 自動" : `話者分離: ${diarizationSpeakerCount}人`}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">話者分離: オフ</SelectItem>
+                    <SelectItem value="auto">話者分離: 人数自動</SelectItem>
+                    {#each Array.from({ length: 9 }, (_, index) => index + 2) as count}
+                      <SelectItem value={String(count)}>話者分離: {count}人</SelectItem>
+                    {/each}
+                  </SelectContent>
+                </Select>
+                {#if !diarizationModelReady}
+                  <Button size="sm" variant="outline" type="button" onclick={onOpenDiarizationSettings}>話者分離モデルを追加</Button>
+                {/if}
+              {/if}
             </div>
+            {#if transcribing && diarizing && diarizationProgressLabel}
+              <div class="diarization-controls"><small aria-live="polite">話者分離: {diarizationProgressLabel}</small></div>
+            {/if}
           </section>
           <p class:surcharge={contextSurchargeActive} class="context-status">{contextStatus}</p>
           <TranscriptView
@@ -526,9 +586,47 @@
                     {/each}
                   </SelectContent>
                 </Select>
+                {#if provider === "local"}
+                  <Select
+                    type="single"
+                    value={localRecognitionMode}
+                    onValueChange={changeLocalRecognitionMode}
+                    disabled={transcribing || localRecognitionModeWorking}
+                  >
+                    <SelectTrigger aria-label="ローカル文字起こしの精度" class="transcription-model-select">
+                      <span>精度: {localRecognitionModeLabel}</span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {#each LOCAL_RECOGNITION_MODE_OPTIONS as option (option.value)}
+                        <SelectItem value={option.value}>{option.label} — {option.description}</SelectItem>
+                      {/each}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    type="single"
+                    value={diarizationSpeakerCount}
+                    onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }}
+                    disabled={transcribing || localRecognitionModeWorking || !diarizationModelReady}
+                  >
+                    <SelectTrigger aria-label="話者分離" class="speaker-count-select">
+                      <span>{diarizationSpeakerCount === "off" ? "話者分離: オフ" : diarizationSpeakerCount === "auto" ? "話者分離: 自動" : `話者分離: ${diarizationSpeakerCount}人`}</span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">話者分離: オフ</SelectItem>
+                      <SelectItem value="auto">話者分離: 人数自動</SelectItem>
+                      {#each Array.from({ length: 9 }, (_, index) => index + 2) as count}
+                        <SelectItem value={String(count)}>話者分離: {count}人</SelectItem>
+                      {/each}
+                    </SelectContent>
+                  </Select>
+                  {#if !diarizationModelReady}
+                    <Button size="sm" variant="outline" type="button" onclick={onOpenDiarizationSettings}>話者分離モデルを追加</Button>
+                  {/if}
+                {/if}
                 <span class="transcription-action" data-transcription-action>
-                  <Button size="lg" type="button" onclick={onTranscribe} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
+                  <Button size="lg" type="button" onclick={startTranscription} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
                 </span>
+                {#if transcribing && diarizing && diarizationProgressLabel}<small aria-live="polite">話者分離: {diarizationProgressLabel}</small>{/if}
                 <small class:surcharge={contextSurchargeActive} class="context-start-status">{contextStatus}</small>
               </div>
             {/if}

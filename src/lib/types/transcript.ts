@@ -28,6 +28,7 @@ export type TranscriptToken = {
   speaker: string | null;
   speakerSource: TokenSpeakerSource | null;
   confidence: number | null;
+  utteranceId?: number | null;
 };
 
 export type Transcript = {
@@ -77,6 +78,7 @@ export type TranscriptionResult = {
   transcript: Transcript;
   run: TranscriptionRunDetail | null;
   persistenceWarning: string | null;
+  diarizationWarning: string | null;
 };
 
 export type SelectedAudioFile = {
@@ -125,6 +127,7 @@ export type TranscriptFormattingResult = {
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
   transcribing: boolean;
+  diarizing: boolean;
   progress: TranscriptionProgress | null;
 };
 

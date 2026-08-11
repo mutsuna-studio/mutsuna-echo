@@ -25,6 +25,8 @@
     settingsPreview?: boolean;
     loading: boolean;
     busy: boolean;
+    allowMeetingNavigation?: boolean;
+    recordingBusy: boolean;
     onNavigate: (section: AppSection) => void;
     onSelectSettingsPane: (pane: SettingsPane) => void;
     onSelectMeeting: (meeting: RecentMeetingSummary) => void;
@@ -39,6 +41,8 @@
     settingsPreview = false,
     loading,
     busy,
+    allowMeetingNavigation = false,
+    recordingBusy,
     onNavigate,
     onSelectSettingsPane,
     onSelectMeeting,
@@ -97,8 +101,8 @@
 
     {#if section === "settings"}
       {#if !settingsPreview}
-        <button class="settings-back" type="button" onclick={() => navigateTo("meetings")}>
-          <ArrowLeft aria-hidden="true" /><span>会議へ戻る</span>
+        <button class="settings-back" type="button" onclick={() => navigateTo(recordingBusy ? "recording" : "meetings")}>
+          <ArrowLeft aria-hidden="true" /><span>{recordingBusy ? "録音画面へ戻る" : "会議へ戻る"}</span>
         </button>
       {/if}
 
@@ -156,7 +160,7 @@
                     class="meeting-row"
                     type="button"
                     onclick={() => selectMeeting(meeting)}
-                    disabled={busy}
+                    disabled={busy && !allowMeetingNavigation}
                     title={meeting.audioAvailable ? meeting.fileName : `${meeting.title}（音声なし）`}
                   >
                     <strong>{meeting.title}</strong>

@@ -248,6 +248,7 @@ mod tests {
             speaker: Some("Speaker 1".into()),
             speaker_source: Some(TokenSpeakerSource::Provider),
             confidence: None,
+            utterance_id: None,
         };
         TranscriptionOutcome {
             transcript: Transcript {

@@ -70,6 +70,10 @@ pub struct TranscriptToken {
     pub speaker: Option<String>,
     pub speaker_source: Option<TokenSpeakerSource>,
     pub confidence: Option<f32>,
+    /// Original VAD utterance index. Recognition windows may contain several
+    /// utterances, but display segmentation must preserve these boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utterance_id: Option<u32>,
 }
 
 /// A contiguous utterance made by one speaker.
@@ -90,6 +94,7 @@ struct SegmentBuilder {
     last_start_ms: Option<u64>,
     end_time_source: Option<TokenTimeSource>,
     text: String,
+    utterance_id: Option<u32>,
 }
 
 // Provider-authored timestamps are precise enough to retain natural pauses,
@@ -108,7 +113,7 @@ const MAX_CONTINUATION_MERGE_GAP_MS: u64 = 3_000;
 
 // Increment when display segmentation changes so unedited stored transcripts
 // are rebuilt from their provider tokens on the next load.
-pub(crate) const DISPLAY_SEGMENTATION_VERSION: u32 = 7;
+pub(crate) const DISPLAY_SEGMENTATION_VERSION: u32 = 8;
 
 type AdjacentSegmentMergeRule = fn(&TranscriptSegment, &TranscriptSegment) -> bool;
 
@@ -208,6 +213,7 @@ pub(crate) fn normalize_transcript_for_display(transcript: &mut Transcript) -> b
 pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<TranscriptSegment> {
     let mut segments = Vec::new();
     let mut current = SegmentBuilder::default();
+    let mut protected_boundaries = std::collections::BTreeSet::new();
 
     for token in tokens {
         if token.text.is_empty() {
@@ -217,6 +223,10 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
             .speaker
             .as_deref()
             .is_some_and(|speaker| !current.speaker.is_empty() && current.speaker != speaker);
+        let utterance_changed = token
+            .utterance_id
+            .zip(current.utterance_id)
+            .is_some_and(|(next, current)| next != current);
         let inferred_end = current.end_time_source == Some(TokenTimeSource::Inferred);
         let gap_anchor = if inferred_end {
             current.last_start_ms
@@ -228,22 +238,30 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         } else {
             SEGMENT_GAP_MS
         };
-        let gap_boundary = gap_anchor
-            .zip(token.start_ms)
-            .is_some_and(|(end, start)| start.saturating_sub(end) >= gap_threshold);
-        if speaker_changed || gap_boundary {
+        let has_vad_utterance = token.utterance_id.is_some() && current.utterance_id.is_some();
+        let gap_boundary = !has_vad_utterance
+            && gap_anchor
+                .zip(token.start_ms)
+                .is_some_and(|(end, start)| start.saturating_sub(end) >= gap_threshold);
+        if speaker_changed || utterance_changed || gap_boundary {
             let next_speaker = token
                 .speaker
                 .clone()
                 .or_else(|| (!current.speaker.is_empty()).then(|| current.speaker.clone()))
                 .unwrap_or_else(|| "Speaker 1".into());
             finish_segment(&mut current, &mut segments);
+            if utterance_changed {
+                if let Some(start_ms) = token.start_ms {
+                    protected_boundaries.insert(start_ms);
+                }
+            }
             current.speaker = next_speaker;
         }
 
         if current.speaker.is_empty() {
             current.speaker = token.speaker.clone().unwrap_or_else(|| "Speaker 1".into());
         }
+        current.utterance_id = token.utterance_id.or(current.utterance_id);
         if let Some(start) = token.start_ms {
             current.start_ms.get_or_insert(start);
             current.last_start_ms = Some(start);
@@ -263,23 +281,29 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         }
     }
     finish_segment(&mut current, &mut segments);
-    refine_segments(segments)
+    refine_segments(segments, &protected_boundaries)
 }
 
-fn refine_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+fn refine_segments(
+    mut segments: Vec<TranscriptSegment>,
+    protected_boundaries: &std::collections::BTreeSet<u64>,
+) -> Vec<TranscriptSegment> {
     for rule in ADJACENT_SEGMENT_MERGE_RULES {
-        segments = merge_adjacent_segments(segments, *rule);
+        segments = merge_adjacent_segments(segments, protected_boundaries, *rule);
     }
-    merge_orphan_segments(segments)
+    merge_orphan_segments(segments, protected_boundaries)
 }
 
 fn merge_adjacent_segments(
     mut segments: Vec<TranscriptSegment>,
+    protected_boundaries: &std::collections::BTreeSet<u64>,
     should_merge: AdjacentSegmentMergeRule,
 ) -> Vec<TranscriptSegment> {
     let mut index = 0;
     while index + 1 < segments.len() {
-        if should_merge(&segments[index], &segments[index + 1]) {
+        if !protected_boundaries.contains(&segments[index + 1].start_ms)
+            && should_merge(&segments[index], &segments[index + 1])
+        {
             let right = segments.remove(index + 1);
             let left = &mut segments[index];
             left.end_ms = left.end_ms.max(right.end_ms);
@@ -357,7 +381,10 @@ fn combined_character_count(left: &TranscriptSegment, right: &TranscriptSegment)
     left.text.chars().count() + right.text.chars().count()
 }
 
-fn merge_orphan_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+fn merge_orphan_segments(
+    mut segments: Vec<TranscriptSegment>,
+    protected_boundaries: &std::collections::BTreeSet<u64>,
+) -> Vec<TranscriptSegment> {
     let mut index = 0;
     while index < segments.len() {
         if !is_orphan_segment(&segments[index]) {
@@ -376,6 +403,7 @@ fn merge_orphan_segments(mut segments: Vec<TranscriptSegment>) -> Vec<Transcript
                 .then(|| next.start_ms.saturating_sub(segments[index].end_ms))
         });
         let merge_previous = previous_gap
+            .filter(|_| !protected_boundaries.contains(&segments[index].start_ms))
             .filter(|gap| *gap <= MAX_ORPHAN_MERGE_GAP_MS)
             .filter(|gap| next_gap.is_none_or(|next| *gap <= next));
         if merge_previous.is_some() {
@@ -386,7 +414,11 @@ fn merge_orphan_segments(mut segments: Vec<TranscriptSegment>) -> Vec<Transcript
             index = index.saturating_sub(1);
             continue;
         }
-        if next_gap.is_some_and(|gap| gap <= MAX_ORPHAN_MERGE_GAP_MS) {
+        if !segments
+            .get(index + 1)
+            .is_some_and(|next| protected_boundaries.contains(&next.start_ms))
+            && next_gap.is_some_and(|gap| gap <= MAX_ORPHAN_MERGE_GAP_MS)
+        {
             let orphan = segments.remove(index);
             let next = &mut segments[index];
             next.start_ms = next.start_ms.min(orphan.start_ms);
@@ -454,6 +486,7 @@ mod tests {
             speaker: speaker.map(str::to_string),
             speaker_source: speaker.map(|_| TokenSpeakerSource::Provider),
             confidence: None,
+            utterance_id: None,
         }
     }
 
@@ -642,6 +675,26 @@ mod tests {
             token("次に料金を確認します。", 3_000, 3_600, Some("Speaker 1")),
         ];
         assert_eq!(segments_from_tokens(&tokens).len(), 2);
+    }
+
+    #[test]
+    fn vad_utterance_boundary_is_preserved_without_splitting_a_following_word() {
+        let mut tokens = vec![
+            token("ください", 343_410, 344_850, None),
+            token("結", 346_546, 347_546, None),
+            token("構会社数", 349_786, 351_106, None),
+        ];
+        for token in &mut tokens {
+            token.end_time_source = Some(TokenTimeSource::Inferred);
+        }
+        tokens[0].utterance_id = Some(0);
+        tokens[1].utterance_id = Some(1);
+        tokens[2].utterance_id = Some(1);
+
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "ください");
+        assert_eq!(segments[1].text, "結構会社数");
     }
 
     #[test]

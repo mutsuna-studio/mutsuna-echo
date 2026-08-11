@@ -21,7 +21,11 @@ const JOINER: &str = "joiner-epoch-99-avg-1.int8.onnx";
 const TOKENS: &str = "tokens.txt";
 const VAD_PROGRESS_UNIT_MS: u64 = 1_000;
 const MAX_VAD_PROGRESS_UNITS: u32 = 100;
-const VAD_CACHE_SCHEMA: u8 = 3;
+const VAD_CACHE_SCHEMA: u8 = 5;
+const DISPLAY_WORD_CONTINUATION_GAP_MS: u64 = 160;
+const RECOVERY_EDGE_GAP_MS: u64 = 1_200;
+const RECOVERY_MIN_UTTERANCE_MS: u64 = 200;
+const RECOVERY_MAX_UTTERANCE_MS: u64 = 15_000;
 
 struct PendingRecognition {
     region_index: usize,
@@ -34,6 +38,8 @@ struct VadCacheDocument {
     schema_version: u8,
     duration_ms: u64,
     regions: Vec<vad::SpeechRegion>,
+    utterance_starts_ms: Vec<u64>,
+    utterances: Vec<vad::SpeechRegion>,
 }
 
 pub(crate) fn transcribe(
@@ -91,6 +97,7 @@ pub(crate) fn transcribe(
         &vad_model,
         preset,
         hotwords.as_deref(),
+        accurate,
     )?;
     let transcript = Transcript {
         provider: "local".into(),
@@ -111,6 +118,7 @@ fn transcribe_speech_regions(
     vad_model: &Path,
     preset: vad_settings::VadPreset,
     hotwords: Option<&str>,
+    accurate: bool,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
     let total_vad_units = vad_total_units(audio_duration_ms);
     publish_transcription_progress(
@@ -152,9 +160,19 @@ fn transcribe_speech_regions(
             Ok(Some(document))
                 if document.schema_version == VAD_CACHE_SCHEMA
                     && document.duration_ms > 0
-                    && valid_cached_regions(&document.regions, document.duration_ms) =>
+                    && valid_cached_regions(&document.regions, document.duration_ms)
+                    && valid_utterance_starts(
+                        &document.utterance_starts_ms,
+                        document.duration_ms,
+                    )
+                    && valid_cached_regions(&document.utterances, document.duration_ms) =>
             {
-                Some((document.duration_ms, document.regions))
+                Some((
+                    document.duration_ms,
+                    document.regions,
+                    document.utterance_starts_ms,
+                    document.utterances,
+                ))
             }
             Ok(_) => None,
             Err(error) => {
@@ -164,7 +182,9 @@ fn transcribe_speech_regions(
         }
     });
     let mut pcm_cache = None;
-    let (decoded_duration_ms, regions) = if let Some(cached) = cached {
+    let (decoded_duration_ms, regions, utterance_starts_ms, utterances) = if let Some(cached) =
+        cached
+    {
         eprintln!("processing_cache pipeline=local_transcription stage=vad hit=true");
         cached
     } else {
@@ -221,6 +241,8 @@ fn transcribe_speech_regions(
                 schema_version: VAD_CACHE_SCHEMA,
                 duration_ms: detected.0,
                 regions: detected.1.clone(),
+                utterance_starts_ms: detected.2.clone(),
+                utterances: detected.3.clone(),
             };
             if let Err(error) = crate::inference_cache::store_json(app, "vad", key, &document) {
                 eprintln!("Could not store VAD cache: {error}");
@@ -229,6 +251,11 @@ fn transcribe_speech_regions(
         detected
     };
     vad_timer.finish();
+    eprintln!(
+        "processing_vad recognition_regions={} display_utterances={}",
+        regions.len(),
+        utterance_starts_ms.len().saturating_add(1)
+    );
     let total_chunks = u32::try_from(regions.len()).unwrap_or(u32::MAX);
     if published_vad_units < total_vad_units {
         publish_transcription_progress(
@@ -308,8 +335,22 @@ fn transcribe_speech_regions(
         &mut completed_chunks,
         total_chunks,
     )?;
+    if accurate {
+        recover_sparse_utterances(
+            app,
+            recognizer,
+            audio_path,
+            pcm_cache.as_ref(),
+            &utterances,
+            hotwords,
+            &mut tokens,
+            &mut completed_chunks,
+            total_chunks,
+        )?;
+    }
     recognition_timer.finish();
     repair_inferred_token_ends(&mut tokens, Some(decoded_duration_ms));
+    assign_vad_utterances(&mut tokens, &utterance_starts_ms);
     let segments = segments_from_tokens(&tokens);
     Ok((tokens, segments))
 }
@@ -325,6 +366,258 @@ fn valid_cached_regions(regions: &[vad::SpeechRegion], duration_ms: u64) -> bool
         && regions
             .windows(2)
             .all(|pair| pair[0].start_ms <= pair[1].start_ms)
+}
+
+fn valid_utterance_starts(starts: &[u64], duration_ms: u64) -> bool {
+    starts.len() <= 1_000_000
+        && starts.iter().all(|start| *start <= duration_ms)
+        && starts.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn assign_vad_utterances(tokens: &mut [TranscriptToken], utterance_starts_ms: &[u64]) {
+    let mut previous_utterance_id = None;
+    let mut previous_end_ms = None;
+    for token in tokens {
+        let Some(start_ms) = token.start_ms else {
+            continue;
+        };
+        let end_ms = token.end_ms.unwrap_or(start_ms);
+        let midpoint_ms = start_ms.saturating_add(end_ms.saturating_sub(start_ms) / 2);
+        let detected_utterance_id =
+            u32::try_from(utterance_starts_ms.partition_point(|start| *start <= midpoint_ms))
+                .unwrap_or(u32::MAX);
+        let continues_previous_word = previous_utterance_id.zip(previous_end_ms).is_some_and(
+            |(previous_id, previous_end)| {
+                previous_id != detected_utterance_id
+                    && start_ms.saturating_sub(previous_end) <= DISPLAY_WORD_CONTINUATION_GAP_MS
+            },
+        );
+        let utterance_id = if continues_previous_word {
+            previous_utterance_id.unwrap_or(detected_utterance_id)
+        } else {
+            detected_utterance_id
+        };
+        token.utterance_id = Some(utterance_id);
+        previous_utterance_id = Some(utterance_id);
+        previous_end_ms = Some(end_ms);
+    }
+}
+
+fn recover_sparse_utterances(
+    app: &tauri::AppHandle,
+    recognizer: &OfflineRecognizer,
+    audio_path: &Path,
+    pcm_cache: Option<&crate::pcm_cache::PcmCacheFile>,
+    utterances: &[vad::SpeechRegion],
+    hotwords: Option<&str>,
+    tokens: &mut Vec<TranscriptToken>,
+    completed_chunks: &mut u32,
+    primary_chunks: u32,
+) -> Result<(), String> {
+    let candidates = sparse_utterance_candidates(tokens, utterances);
+    if candidates.is_empty() {
+        eprintln!("processing_recovery candidates=0 augmented=0 added_tokens=0");
+        return Ok(());
+    }
+    let recovery_chunks = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+    let total_chunks = primary_chunks.saturating_add(recovery_chunks);
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(
+            TranscriptionStage::Transcribing,
+            *completed_chunks,
+            Some(total_chunks),
+        ),
+    );
+    let batch_size = crate::compute_tuning::stt_batch_size(
+        candidates
+            .iter()
+            .map(vad::SpeechRegion::duration_ms)
+            .max()
+            .unwrap_or(1),
+    );
+    let windows = candidates
+        .iter()
+        .map(|region| (region.start_ms, region.duration_ms()))
+        .collect::<Vec<_>>();
+    let mut pending = Vec::with_capacity(batch_size);
+    let mut augmented = 0usize;
+    let mut added_tokens = 0usize;
+    let mut accept = |region_index: usize, sample_rate: u32, samples: &[f32]| {
+        let stream = create_stream(recognizer, hotwords);
+        stream.accept_waveform(sample_rate as i32, samples);
+        pending.push(PendingRecognition {
+            region_index,
+            stream,
+        });
+        if pending.len() >= batch_size {
+            flush_recovery_batch(
+                app,
+                recognizer,
+                &candidates,
+                &mut pending,
+                tokens,
+                completed_chunks,
+                total_chunks,
+                &mut augmented,
+                &mut added_tokens,
+            )?;
+        }
+        Ok(())
+    };
+    if let Some(cache) = pcm_cache {
+        cache.read_regions(&windows, &mut accept)?;
+    } else {
+        audio_decode::decode_mono_regions_resampled(
+            audio_path,
+            vad::SAMPLE_RATE,
+            &windows,
+            &mut accept,
+        )?;
+    }
+    flush_recovery_batch(
+        app,
+        recognizer,
+        &candidates,
+        &mut pending,
+        tokens,
+        completed_chunks,
+        total_chunks,
+        &mut augmented,
+        &mut added_tokens,
+    )?;
+    tokens.sort_by_key(|token| token.start_ms.unwrap_or(u64::MAX));
+    eprintln!(
+        "processing_recovery candidates={} augmented={augmented} added_tokens={added_tokens}",
+        candidates.len(),
+    );
+    Ok(())
+}
+
+fn sparse_utterance_candidates(
+    tokens: &[TranscriptToken],
+    utterances: &[vad::SpeechRegion],
+) -> Vec<vad::SpeechRegion> {
+    utterances
+        .iter()
+        .filter(|utterance| {
+            let duration_ms = utterance
+                .speech_end_ms
+                .saturating_sub(utterance.speech_start_ms);
+            if !(RECOVERY_MIN_UTTERANCE_MS..=RECOVERY_MAX_UTTERANCE_MS).contains(&duration_ms) {
+                return false;
+            }
+            let mut midpoints = tokens
+                .iter()
+                .filter_map(token_midpoint_ms)
+                .filter(|midpoint| {
+                    *midpoint >= utterance.speech_start_ms && *midpoint < utterance.speech_end_ms
+                });
+            let first = midpoints.next();
+            let last = midpoints.last().or(first);
+            first.is_none()
+                || first.is_some_and(|value| {
+                    value.saturating_sub(utterance.speech_start_ms) >= RECOVERY_EDGE_GAP_MS
+                })
+                || last.is_some_and(|value| {
+                    utterance.speech_end_ms.saturating_sub(value) >= RECOVERY_EDGE_GAP_MS
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn flush_recovery_batch(
+    app: &tauri::AppHandle,
+    recognizer: &OfflineRecognizer,
+    candidates: &[vad::SpeechRegion],
+    pending: &mut Vec<PendingRecognition>,
+    tokens: &mut Vec<TranscriptToken>,
+    completed_chunks: &mut u32,
+    total_chunks: u32,
+    augmented: &mut usize,
+    added_tokens: &mut usize,
+) -> Result<(), String> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let streams = pending.iter().map(|item| &item.stream).collect::<Vec<_>>();
+    recognizer.decode_multiple_streams(&streams);
+    for item in pending.drain(..) {
+        let utterance = candidates
+            .get(item.region_index)
+            .ok_or_else(|| "補完認識区間の対応関係が不正です。".to_string())?;
+        let result = item
+            .stream
+            .get_result()
+            .ok_or_else(|| "ReazonSpeechから補完認識結果を取得できませんでした。".to_string())?;
+        let (mut recovered, _) =
+            normalize_result(&result, utterance.duration_ms(), utterance.start_ms);
+        recovered.retain(|token| {
+            token_midpoint_ms(token).is_some_and(|midpoint| {
+                midpoint >= utterance.speech_start_ms && midpoint < utterance.speech_end_ms
+            })
+        });
+        let added = augment_uncovered_utterance_edges(tokens, &mut recovered, utterance);
+        if added > 0 {
+            *augmented = augmented.saturating_add(1);
+            *added_tokens = added_tokens.saturating_add(added);
+        }
+        *completed_chunks = completed_chunks.saturating_add(1);
+    }
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(
+            TranscriptionStage::Transcribing,
+            *completed_chunks,
+            Some(total_chunks),
+        ),
+    );
+    Ok(())
+}
+
+fn augment_uncovered_utterance_edges(
+    tokens: &mut Vec<TranscriptToken>,
+    recovered: &mut Vec<TranscriptToken>,
+    utterance: &vad::SpeechRegion,
+) -> usize {
+    let existing_coverage = tokens
+        .iter()
+        .filter_map(token_time_range)
+        .filter(|(start, end)| *end > utterance.speech_start_ms && *start < utterance.speech_end_ms)
+        .fold(None::<(u64, u64)>, |coverage, (start, end)| {
+            Some(match coverage {
+                Some((first, last)) => (first.min(start), last.max(end)),
+                None => (start, end),
+            })
+        });
+    recovered.retain(|token| {
+        let Some((start, end)) = token_time_range(token) else {
+            return false;
+        };
+        if end <= utterance.speech_start_ms || start >= utterance.speech_end_ms {
+            return false;
+        }
+        match existing_coverage {
+            None => true,
+            Some((existing_start, existing_end)) => end <= existing_start || start >= existing_end,
+        }
+    });
+    let added = recovered.len();
+    tokens.append(recovered);
+    added
+}
+
+fn token_time_range(token: &TranscriptToken) -> Option<(u64, u64)> {
+    let start = token.start_ms?;
+    let end = token.end_ms.unwrap_or(start).max(start);
+    Some((start, end))
+}
+
+fn token_midpoint_ms(token: &TranscriptToken) -> Option<u64> {
+    let start_ms = token.start_ms?;
+    let end_ms = token.end_ms.unwrap_or(start_ms);
+    Some(start_ms.saturating_add(end_ms.saturating_sub(start_ms) / 2))
 }
 
 fn flush_recognition_batch(
@@ -517,6 +810,7 @@ fn normalize_result(
                 speaker: None,
                 speaker_source: None,
                 confidence: None,
+                utterance_id: None,
             })
         })
         .collect();
@@ -531,6 +825,7 @@ fn normalize_result(
             speaker: None,
             speaker_source: None,
             confidence: None,
+            utterance_id: None,
         });
     }
     repair_inferred_token_ends(
@@ -555,7 +850,12 @@ fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_result, tokenize_hotword, vad_completed_units, vad_total_units};
+    use super::{
+        assign_vad_utterances, augment_uncovered_utterance_edges, normalize_result,
+        sparse_utterance_candidates, tokenize_hotword, vad_completed_units, vad_total_units,
+    };
+    use crate::transcription::vad;
+    use crate::transcription::{TokenTimeSource, TranscriptToken};
     use sherpa_onnx::OfflineRecognizerResult;
 
     #[test]
@@ -604,6 +904,139 @@ mod tests {
         assert_eq!(
             (tokens[0].start_ms, tokens[0].end_ms),
             (Some(12_200), Some(12_600))
+        );
+    }
+
+    #[test]
+    fn assigns_tokens_to_original_vad_utterances_after_recognition_coalescing() {
+        let result = OfflineRecognizerResult {
+            text: "前中後".into(),
+            tokens: vec!["前".into(), "中".into(), "後".into()],
+            timestamps: Some(vec![1.0, 3.0, 5.0]),
+            durations: Some(vec![0.2, 0.2, 0.2]),
+        };
+        let (mut tokens, _) = normalize_result(&result, 6_000, 0);
+        assign_vad_utterances(&mut tokens, &[2_500, 4_500]);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.utterance_id)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn keeps_contiguous_japanese_characters_together_across_noisy_vad_boundaries() {
+        let result = OfflineRecognizerResult {
+            text: "連携手続".into(),
+            tokens: vec!["連".into(), "携".into(), "手".into(), "続".into()],
+            timestamps: Some(vec![19.354, 19.634, 26.194, 26.514]),
+            durations: Some(vec![0.280, 0.280, 0.320, 0.200]),
+        };
+        let (mut tokens, _) = normalize_result(&result, 30_000, 0);
+        assign_vad_utterances(&mut tokens, &[19_614, 26_558]);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.utterance_id)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1), Some(1)]
+        );
+    }
+
+    #[test]
+    fn accurate_recovery_targets_uncovered_utterance_edges_only() {
+        let result = OfflineRecognizerResult {
+            text: "途中まで短い".into(),
+            tokens: vec!["途中まで".into(), "短い".into()],
+            timestamps: Some(vec![1.0, 20.1]),
+            durations: Some(vec![5.0, 1.5]),
+        };
+        let (tokens, _) = normalize_result(&result, 22_000, 0);
+        let utterances = vec![
+            vad::SpeechRegion {
+                start_ms: 0,
+                speech_start_ms: 0,
+                speech_end_ms: 10_000,
+                end_ms: 10_300,
+            },
+            vad::SpeechRegion {
+                start_ms: 19_800,
+                speech_start_ms: 20_000,
+                speech_end_ms: 22_000,
+                end_ms: 22_000,
+            },
+        ];
+        let candidates = sparse_utterance_candidates(&tokens, &utterances);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].speech_start_ms, 0);
+    }
+
+    fn timed_token(text: &str, start_ms: u64, end_ms: u64) -> TranscriptToken {
+        TranscriptToken {
+            text: text.into(),
+            start_ms: Some(start_ms),
+            end_ms: Some(end_ms),
+            start_time_source: Some(TokenTimeSource::Provider),
+            end_time_source: Some(TokenTimeSource::Provider),
+            speaker: None,
+            speaker_source: None,
+            confidence: None,
+            utterance_id: None,
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_a_boundary_character_that_overlaps_the_utterance() {
+        let utterance = vad::SpeechRegion {
+            start_ms: 19_314,
+            speech_start_ms: 19_614,
+            speech_end_ms: 23_518,
+            end_ms: 23_818,
+        };
+        let mut existing = vec![
+            timed_token("連", 19_354, 19_634),
+            timed_token("携", 19_634, 19_914),
+        ];
+        let mut recovered = vec![
+            timed_token("連", 19_414, 19_674),
+            timed_token("携", 19_674, 19_954),
+        ];
+        let added = augment_uncovered_utterance_edges(&mut existing, &mut recovered, &utterance);
+        assert_eq!(added, 0);
+        assert_eq!(
+            existing
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<String>(),
+            "連携"
+        );
+    }
+
+    #[test]
+    fn recovery_adds_only_a_missing_utterance_tail() {
+        let utterance = vad::SpeechRegion {
+            start_ms: 3_314,
+            speech_start_ms: 3_614,
+            speech_end_ms: 13_234,
+            end_ms: 13_534,
+        };
+        let mut existing = vec![timed_token("上から", 9_000, 10_034)];
+        let mut recovered = vec![
+            timed_token("上から", 9_100, 10_000),
+            timed_token("えっと", 10_400, 11_100),
+            timed_token("あれですね", 11_100, 13_000),
+        ];
+        let added = augment_uncovered_utterance_edges(&mut existing, &mut recovered, &utterance);
+        assert_eq!(added, 2);
+        existing.sort_by_key(|token| token.start_ms);
+        assert_eq!(
+            existing
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<String>(),
+            "上からえっとあれですね"
         );
     }
 

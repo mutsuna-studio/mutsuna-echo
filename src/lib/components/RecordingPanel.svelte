@@ -15,6 +15,8 @@
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Select } from "@mutsuna/ui/select";
+  import Info from "@lucide/svelte/icons/info";
+  import Mic from "@lucide/svelte/icons/mic";
   import { VAD_PRESET_OPTIONS, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
@@ -187,7 +189,8 @@
         capabilities = nextCapabilities;
         recoverable = nextRecoverable;
         microphone = nextCapabilities.microphoneSupported;
-        systemAudio = nextCapabilities.systemAudioSupported;
+        // Androidでは画面共有の確認が録音開始時に必要になるため、初期値はオフにする。
+        systemAudio = nextCapabilities.platform === "android" ? false : nextCapabilities.systemAudioSupported;
         microphoneDeviceId = nextCapabilities.microphoneDevices.find((device) => device.isDefault)?.id ?? "";
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
         vadPreset = nextVadPreset;
@@ -356,7 +359,10 @@
   <p class="placeholder" role="status">録音デバイスを確認しています…</p>
 {:else if capabilities}
   {#if capabilities.limitation}
-    <p class="limitation" role="note">{capabilities.limitation}</p>
+    <p class="limitation" role="note">
+      <Info aria-hidden="true" />
+      <span>{capabilities.platform === "android" ? "一部の通話・保護された音声は録音できません" : capabilities.limitation}</span>
+    </p>
   {/if}
 
   {#if recoverable.length > 0 && !active}
@@ -375,6 +381,14 @@
       </AlertDescription>
     </Alert>
   {/if}
+
+  <div class:active class="recorder mobile-recorder" role="status">
+    <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
+    <span class="mobile-recording-state">
+      <span class="record-dot" aria-hidden="true"></span>
+      {active ? (status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中") : "録音待機中"}
+    </span>
+  </div>
 
   <div class="sources" aria-disabled={active || disabled}>
     <div class="source">
@@ -430,7 +444,7 @@
     />
   </div>
 
-  <div class:active class="recorder">
+  <div class:active class="recorder desktop-recorder">
     <span class="record-dot" aria-hidden="true"></span>
     <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
     <small>48 kHz · mono · AAC-LC · 64 kbps</small>
@@ -452,9 +466,14 @@
       </Button>
       <Button variant="outline" size="lg" type="button" onclick={() => cancelDialogOpen = true} disabled={actionBusy || status?.phase === "finalizing"}>破棄</Button>
     {:else}
-      <Button size="lg" type="button" onclick={start} disabled={!canStart}>録音を開始</Button>
+      <span class="desktop-start"><Button size="lg" type="button" onclick={start} disabled={!canStart}>録音を開始</Button></span>
     {/if}
   </div>
+  {#if !active}
+    <button class="mobile-record-button" type="button" onclick={start} disabled={!canStart} aria-label="録音を開始">
+      <Mic aria-hidden="true" />
+    </button>
+  {/if}
 {/if}
 
 <AlertDialog bind:open={cancelDialogOpen}>
@@ -490,7 +509,8 @@
 <style>
   .placeholder,
   .limitation { margin: 18px 0 0; color: #647068; font-size: 0.86rem; }
-  .limitation { padding: 11px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; }
+  .limitation { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; }
+  .limitation :global(svg) { width: 17px; height: 17px; flex: 0 0 auto; }
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
   .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
@@ -512,12 +532,34 @@
   .voice-activity.speaking { color: #256b4a; font-weight: 700; }
   .voice-activity.speaking span { background: #2c8058; box-shadow: 0 0 0 4px rgb(44 128 88 / 12%); }
   .record-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
+  .mobile-recorder,
+  .mobile-record-button { display: none; }
   @media (max-width: 600px) {
-    .sources { grid-template-columns: 1fr; }
-    .vad-setting { grid-template-columns: 1fr; justify-content: stretch; }
-    .recorder { flex-wrap: wrap; }
-    .recorder small { width: 100%; margin-left: 20px; }
+    .limitation { margin-top: 4px; padding: 8px 0; border-radius: 0; color: #68746c; background: transparent; font-size: 0.76rem; }
+    .mobile-recorder { display: flex; min-height: 132px; flex-direction: column; justify-content: center; gap: 9px; margin: 0; padding: 4px 0 10px; background: transparent; }
+    .mobile-recorder strong { font-size: clamp(2.55rem, 13vw, 3.35rem); font-weight: 760; line-height: 1; letter-spacing: 0.025em; }
+    .mobile-recording-state { display: flex; align-items: center; gap: 7px; color: #4f5c54; font-size: 0.82rem; }
+    .mobile-recording-state .record-dot { width: 8px; height: 8px; background: #2c8058; }
+    .mobile-recorder.active .record-dot { background: #dc4438; }
+    .desktop-recorder { display: none; }
+    .sources { grid-template-columns: 1fr; gap: 0; margin-top: 0; border-top: 1px solid #e4e9e5; }
+    .source { display: grid; grid-template-columns: 1fr; gap: 10px; min-height: 94px; padding: 16px 2px 14px; border: 0; border-bottom: 1px solid #e4e9e5; border-radius: 0; background: transparent; }
+    .source-toggle { gap: 13px; font-size: 1.02rem; }
+    .source-toggle :global(button) { width: 46px; height: 46px; border-radius: 10px; }
+    .source-toggle :global(svg) { width: 27px; height: 27px; }
+    :global(.source-select) { margin-left: 59px; }
+    .meter { height: 7px; margin-left: 59px; background: repeating-linear-gradient(90deg, #e0e5e1 0 18px, transparent 18px 23px); }
+    .meter.live { background: repeating-linear-gradient(90deg, #d8e7de 0 18px, transparent 18px 23px); }
+    .meter span { background: repeating-linear-gradient(90deg, #2c8058 0 18px, transparent 18px 23px); }
+    .monitor-note { margin-left: 59px; }
+    .vad-setting { grid-template-columns: 1fr minmax(116px, 145px); justify-content: stretch; min-height: 68px; margin: 0; padding: 9px 2px; border-bottom: 1px solid #e4e9e5; color: #243129; font-size: 0.98rem; font-weight: 720; }
     .record-actions :global(button) { flex: 1; }
+    .record-actions:has(.desktop-start) { display: none; }
+    .desktop-start { display: none; }
+    .mobile-record-button { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); border: 0; border-radius: 50vw 50vw 0 0; color: white; background: #2c8058; box-shadow: 0 -8px 28px rgb(44 128 88 / 18%); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .mobile-record-button:active:not(:disabled) { background: #236a49; }
+    .mobile-record-button:disabled { opacity: 0.52; }
+    .mobile-record-button :global(svg) { width: clamp(68px, 22vw, 92px); height: clamp(68px, 22vw, 92px); stroke-width: 2.2; }
     .recovery-row { align-items: flex-start; flex-direction: column; }
   }
 </style>

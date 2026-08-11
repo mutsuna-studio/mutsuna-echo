@@ -76,7 +76,7 @@
         </span>
       </label>
       <label class="setting-row">
-        <span class="setting-copy"><strong>モデル</strong><small>新しい会議で最初に選ばれるモデル</small></span>
+        <span class="setting-copy"><strong>モデル</strong><small>最初に選ぶモデル</small></span>
         <span class="setting-control">
           <Select type="single" value={defaultModel?.id ?? ""} onValueChange={onDefaultModelChange} disabled={disabled || isLoading(defaultProvider.id) || defaultProvider.models.length === 0}>
             <SelectTrigger aria-label="最初に使うAIモデル" class="settings-select">
