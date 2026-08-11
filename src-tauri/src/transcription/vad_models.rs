@@ -13,7 +13,7 @@ use tokio::time::{Duration, Instant};
 
 pub(crate) const SILERO_VAD_MODEL_ID: &str = "silero-vad";
 const MODEL_FILE: &str = "silero_vad.onnx";
-const MODEL_VERSION: &str = "5.0";
+pub(crate) const MODEL_VERSION: &str = "5.0";
 const MODEL_URL: &str =
     "https://github.com/snakers4/silero-vad/raw/refs/tags/v5.0/files/silero_vad.onnx";
 const MODEL_SIZE: u64 = 2_313_101;

@@ -12,6 +12,7 @@ use super::{segments_from_tokens, TokenSpeakerSource, Transcript, TranscriptToke
 
 const MAX_SPEAKER_TURNS: usize = 1_000_000;
 const MAX_SPEAKER_LABEL_BYTES: usize = 128;
+const MIN_CONCURRENT_OVERLAP_MS: u64 = 40;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,21 +170,48 @@ pub fn merge_speaker_turns(
             turn_cursor += 1;
         }
         active_turns.retain(|turn| turn.end_ms >= token_start);
-        let best = active_turns
+        let mut overlaps = active_turns
             .iter()
             .copied()
             .filter_map(|turn| {
                 overlap_score(token_start, token_end, turn).map(|score| (turn, score))
             })
-            .max_by(|(left_turn, left_overlap), (right_turn, right_overlap)| {
-                left_overlap.cmp(right_overlap).then_with(|| {
-                    left_turn
-                        .confidence
-                        .unwrap_or(0.0)
-                        .total_cmp(&right_turn.confidence.unwrap_or(0.0))
-                })
-            });
-        if let Some((turn, _)) = best {
+            .collect::<Vec<_>>();
+        overlaps.sort_by(|(left_turn, left_overlap), (right_turn, right_overlap)| {
+            right_overlap.cmp(left_overlap).then_with(|| {
+                right_turn
+                    .confidence
+                    .unwrap_or(0.0)
+                    .total_cmp(&left_turn.confidence.unwrap_or(0.0))
+            })
+        });
+        let mut concurrent_speakers = std::collections::BTreeSet::new();
+        for left in 0..overlaps.len() {
+            for right in left + 1..overlaps.len() {
+                let first = overlaps[left].0;
+                let second = overlaps[right].0;
+                if first.speaker.trim() == second.speaker.trim() {
+                    continue;
+                }
+                let concurrent_start = token_start.max(first.start_ms).max(second.start_ms);
+                let concurrent_end = token_end.min(first.end_ms).min(second.end_ms);
+                if concurrent_end.saturating_sub(concurrent_start) >= MIN_CONCURRENT_OVERLAP_MS {
+                    concurrent_speakers.insert(first.speaker.trim());
+                    concurrent_speakers.insert(second.speaker.trim());
+                }
+            }
+        }
+        if concurrent_speakers.len() > 1 {
+            let token = &mut transcript.tokens[token_index];
+            token.speaker = Some(
+                concurrent_speakers
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+            );
+            token.speaker_source = Some(TokenSpeakerSource::Diarization);
+            summary.assigned_tokens += 1;
+        } else if let Some((turn, _)) = overlaps.first() {
             let token = &mut transcript.tokens[token_index];
             token.speaker = Some(turn.speaker.trim().to_string());
             token.speaker_source = Some(TokenSpeakerSource::Diarization);
@@ -332,6 +360,32 @@ mod tests {
             Some(TokenSpeakerSource::Diarization)
         );
         assert_eq!(transcript.segments[0].speaker, "Speaker 2");
+    }
+
+    #[test]
+    fn marks_tokens_inside_overlapping_turns_as_concurrent_speech() {
+        let mut transcript = transcript(vec![token("混在", 1_100, 1_300, None)]);
+        let turns = vec![
+            SpeakerTurn {
+                speaker: "Speaker 1".into(),
+                start_ms: 900,
+                end_ms: 1_500,
+                confidence: None,
+            },
+            SpeakerTurn {
+                speaker: "Speaker 2".into(),
+                start_ms: 1_000,
+                end_ms: 1_400,
+                confidence: None,
+            },
+        ];
+        merge_speaker_turns(&mut transcript, &turns, SpeakerMergePolicy::FillMissing)
+            .expect("merge overlapping turns");
+        assert_eq!(
+            transcript.tokens[0].speaker.as_deref(),
+            Some("Speaker 1 + Speaker 2")
+        );
+        assert_eq!(transcript.segments[0].speaker, "Speaker 1 + Speaker 2");
     }
 
     #[test]

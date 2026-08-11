@@ -316,6 +316,7 @@ fn run_desktop_recording(
     let mut stop_reason = StopReason::User;
     let mut microphone_stalled = false;
     let mut system_stalled = false;
+    let mut audio_processing_cpu = Duration::ZERO;
     while !stop.load(Ordering::Acquire) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         if elapsed_ms >= MAX_DURATION_MS {
@@ -330,10 +331,12 @@ fn run_desktop_recording(
             }
             while let Some(chunk) = stream.poll_chunk() {
                 accumulate_meter_samples(&mut microphone_level, &chunk.data);
+                let enhancement_started = Instant::now();
                 let enhanced = microphone_enhancer
                     .as_mut()
                     .expect("microphone enhancer exists when microphone capture is enabled")
                     .accept(&chunk.data)?;
+                audio_processing_cpu += enhancement_started.elapsed();
                 if !enhanced.is_empty() {
                     if let Some(writer) = microphone_writer.as_mut() {
                         writer.write(&enhanced)?;
@@ -357,6 +360,7 @@ fn run_desktop_recording(
             }
         }
 
+        let mixing_started = Instant::now();
         drain_mix(
             &mut mixed_writer,
             &mut mic_queue,
@@ -375,6 +379,7 @@ fn run_desktop_recording(
                 }
             },
         )?;
+        audio_processing_cpu += mixing_started.elapsed();
         if last_status.elapsed() >= STATUS_INTERVAL {
             let (published_microphone_level, published_system_level) =
                 take_meter_levels(&mut microphone_level, &mut system_level);
@@ -402,6 +407,7 @@ fn run_desktop_recording(
     if let Some(stream) = system.as_mut() {
         stream.stop();
     }
+    let mixing_started = Instant::now();
     drain_mix(
         &mut mixed_writer,
         &mut mic_queue,
@@ -416,6 +422,7 @@ fn run_desktop_recording(
             }
         },
     )?;
+    audio_processing_cpu += mixing_started.elapsed();
     let enhanced_tail = microphone_enhancer
         .take()
         .map(|mut enhancer| enhancer.finish())
@@ -447,6 +454,11 @@ fn run_desktop_recording(
         current.phase = RecordingPhase::Finalizing;
         current.stop_reason = Some(stop_reason);
     });
+    let finalization_timer = crate::processing_metrics::StageTimer::start(
+        "recording",
+        "finalize_files",
+        Some(started.elapsed().as_millis() as u64),
+    );
     if let Some(writer) = microphone_writer {
         writer
             .finish()
@@ -481,6 +493,13 @@ fn run_desktop_recording(
     {
         eprintln!("Could not cache recorded waveform: {error}");
     }
+    finalization_timer.finish();
+    crate::processing_metrics::log_timing(
+        "recording",
+        "realtime_audio_processing_cpu",
+        audio_processing_cpu,
+        Some(manifest.duration_ms),
+    );
     remove_session(&paths.directory)?;
     publish_status(app, status, |current| {
         current.phase = RecordingPhase::Completed;

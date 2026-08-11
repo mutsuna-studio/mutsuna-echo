@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fs, path::Path};
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     audio_decode, context::TranscriptionContext, local_models, local_settings,
     repair_inferred_token_ends, segments_from_tokens, vad, vad_models, vad_settings,
@@ -9,7 +11,7 @@ use crate::commands::transcribe::{
     publish_transcription_progress, TranscriptionProgress, TranscriptionStage,
 };
 use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult,
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineRecognizerResult, OfflineStream,
     OfflineTransducerModelConfig,
 };
 
@@ -19,6 +21,20 @@ const JOINER: &str = "joiner-epoch-99-avg-1.int8.onnx";
 const TOKENS: &str = "tokens.txt";
 const VAD_PROGRESS_UNIT_MS: u64 = 1_000;
 const MAX_VAD_PROGRESS_UNITS: u32 = 100;
+const VAD_CACHE_SCHEMA: u8 = 3;
+
+struct PendingRecognition {
+    region_index: usize,
+    stream: OfflineStream,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VadCacheDocument {
+    schema_version: u8,
+    duration_ms: u64,
+    regions: Vec<vad::SpeechRegion>,
+}
 
 pub(crate) fn transcribe(
     app: &tauri::AppHandle,
@@ -27,9 +43,16 @@ pub(crate) fn transcribe(
     model_id: &str,
     context: Option<&TranscriptionContext>,
 ) -> Result<Transcript, String> {
+    let total_timer = crate::processing_metrics::StageTimer::start(
+        "local_transcription",
+        "total",
+        Some(audio_duration_ms),
+    );
     if model_id != local_models::REAZONSPEECH_MODEL_ID {
         return Err("選択したローカルSTTモデルには対応していません。".into());
     }
+    let model_timer =
+        crate::processing_metrics::StageTimer::start("local_transcription", "load_models", None);
     let model = local_models::verify_reazonspeech_installation(app)?;
     let path_string = |name: &str| model.join(name).to_string_lossy().into_owned();
     let mut config = OfflineRecognizerConfig::default();
@@ -39,7 +62,7 @@ pub(crate) fn transcribe(
         joiner: Some(path_string(JOINER)),
     };
     config.model_config.tokens = Some(path_string(TOKENS));
-    config.model_config.num_threads = available_threads();
+    config.model_config.num_threads = crate::compute_tuning::profile().stt_threads;
     config.model_config.provider = Some("cpu".into());
     let settings = local_settings::current(app)?;
     let hotwords = encode_hotwords(&model.join(TOKENS), context)?;
@@ -59,6 +82,7 @@ pub(crate) fn transcribe(
         "文字起こしに必要なVADモデルがありません。設定から再インストールしてください。".to_string()
     })?;
     let preset = vad_settings::current_preset(app)?;
+    model_timer.finish();
     let (tokens, segments) = transcribe_speech_regions(
         app,
         &recognizer,
@@ -68,13 +92,15 @@ pub(crate) fn transcribe(
         preset,
         hotwords.as_deref(),
     )?;
-    Ok(Transcript {
+    let transcript = Transcript {
         provider: "local".into(),
         model: local_models::REAZONSPEECH_MODEL_ID.into(),
         language: "ja".into(),
         tokens,
         segments,
-    })
+    };
+    total_timer.finish();
+    Ok(transcript)
 }
 
 fn transcribe_speech_regions(
@@ -96,22 +122,113 @@ fn transcribe_speech_regions(
         ),
     );
     let mut published_vad_units = 0u32;
-    let (decoded_duration_ms, regions) =
-        vad::visit_speech_regions(audio_path, vad_model, preset, |processed_ms| {
-            let completed = vad_completed_units(processed_ms, audio_duration_ms, total_vad_units);
-            if completed > published_vad_units {
-                published_vad_units = completed;
-                publish_transcription_progress(
-                    app,
-                    TranscriptionProgress::new(
-                        TranscriptionStage::DetectingSpeech,
-                        completed,
-                        Some(total_vad_units),
-                    ),
-                );
+    let fingerprint_timer = crate::processing_metrics::StageTimer::start(
+        "local_transcription",
+        "fingerprint_audio",
+        Some(audio_duration_ms),
+    );
+    let cache_key = match crate::inference_cache::audio_fingerprint(audio_path) {
+        Ok(fingerprint) => Some(crate::inference_cache::cache_key(
+            &fingerprint,
+            &format!(
+                "vad-schema={VAD_CACHE_SCHEMA};model={};preset={preset:?};recovery-gap-ms={}",
+                vad_models::MODEL_VERSION,
+                vad::MISSED_SPEECH_RECOVERY_GAP_MS
+            ),
+        )),
+        Err(error) => {
+            eprintln!("Could not fingerprint audio for VAD cache: {error}");
+            None
+        }
+    };
+    fingerprint_timer.finish();
+    let vad_timer = crate::processing_metrics::StageTimer::start(
+        "local_transcription",
+        "vad",
+        Some(audio_duration_ms),
+    );
+    let cached = cache_key.as_deref().and_then(|key| {
+        match crate::inference_cache::load_json::<VadCacheDocument>(app, "vad", key) {
+            Ok(Some(document))
+                if document.schema_version == VAD_CACHE_SCHEMA
+                    && document.duration_ms > 0
+                    && valid_cached_regions(&document.regions, document.duration_ms) =>
+            {
+                Some((document.duration_ms, document.regions))
             }
-            Ok(())
-        })?;
+            Ok(_) => None,
+            Err(error) => {
+                eprintln!("Could not load VAD cache: {error}");
+                None
+            }
+        }
+    });
+    let mut pcm_cache = None;
+    let (decoded_duration_ms, regions) = if let Some(cached) = cached {
+        eprintln!("processing_cache pipeline=local_transcription stage=vad hit=true");
+        cached
+    } else {
+        eprintln!("processing_cache pipeline=local_transcription stage=vad hit=false");
+        let mut pcm_writer = match crate::pcm_cache::PcmCacheWriter::create(app, vad::SAMPLE_RATE) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                eprintln!("Could not create temporary PCM cache: {error}");
+                None
+            }
+        };
+        let detected = vad::visit_speech_regions(
+            audio_path,
+            vad_model,
+            preset,
+            |processed_ms| {
+                let completed =
+                    vad_completed_units(processed_ms, audio_duration_ms, total_vad_units);
+                if completed > published_vad_units {
+                    published_vad_units = completed;
+                    publish_transcription_progress(
+                        app,
+                        TranscriptionProgress::new(
+                            TranscriptionStage::DetectingSpeech,
+                            completed,
+                            Some(total_vad_units),
+                        ),
+                    );
+                }
+                Ok(())
+            },
+            |samples| {
+                let write_error = pcm_writer
+                    .as_mut()
+                    .and_then(|writer| writer.write(samples).err());
+                if let Some(error) = write_error {
+                    eprintln!(
+                        "temporary PCM cache disabled after write failure; falling back to decode: {error:#}"
+                    );
+                    pcm_writer = None;
+                }
+                Ok(())
+            },
+        )?;
+        pcm_cache = pcm_writer.and_then(|writer| match writer.finish() {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                eprintln!("Could not finalize temporary PCM cache: {error}");
+                None
+            }
+        });
+        if let Some(key) = cache_key.as_deref() {
+            let document = VadCacheDocument {
+                schema_version: VAD_CACHE_SCHEMA,
+                duration_ms: detected.0,
+                regions: detected.1.clone(),
+            };
+            if let Err(error) = crate::inference_cache::store_json(app, "vad", key, &document) {
+                eprintln!("Could not store VAD cache: {error}");
+            }
+        }
+        detected
+    };
+    vad_timer.finish();
     let total_chunks = u32::try_from(regions.len()).unwrap_or(u32::MAX);
     if published_vad_units < total_vad_units {
         publish_transcription_progress(
@@ -133,51 +250,128 @@ fn transcribe_speech_regions(
 
     let mut tokens = Vec::new();
     let mut completed_chunks = 0u32;
+    let batch_size = crate::compute_tuning::stt_batch_size(
+        regions
+            .iter()
+            .map(vad::SpeechRegion::duration_ms)
+            .max()
+            .unwrap_or(1),
+    );
+    let mut pending = Vec::with_capacity(batch_size);
     let windows = regions
         .iter()
         .map(|region| (region.start_ms, region.duration_ms()))
         .collect::<Vec<_>>();
-    audio_decode::decode_mono_regions(
-        audio_path,
-        &windows,
-        |region_index, sample_rate, samples| {
-            let region = regions
-                .get(region_index)
-                .ok_or_else(|| "VAD区間の対応関係が不正です。".to_string())?;
-            let region_samples = vad::resample_mono(sample_rate, samples);
-            let stream = create_stream(recognizer, hotwords);
-            stream.accept_waveform(vad::SAMPLE_RATE as i32, &region_samples);
-            recognizer.decode(&stream);
-            let result = stream.get_result().ok_or_else(|| {
-                "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string()
-            })?;
-            let (mut region_tokens, _) =
-                normalize_result(&result, region.duration_ms(), region.start_ms);
-            // Padded windows overlap by design. Keep only tokens whose midpoint
-            // belongs to the original VAD region, retaining boundary context for
-            // recognition without duplicating transcript text.
-            region_tokens.retain(|token| {
-                let start = token.start_ms.unwrap_or(region.speech_start_ms);
-                let end = token.end_ms.unwrap_or(start);
-                let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
-                midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
-            });
-            tokens.append(&mut region_tokens);
-            completed_chunks = completed_chunks.saturating_add(1);
-            publish_transcription_progress(
+    let recognition_timer = crate::processing_metrics::StageTimer::start(
+        "local_transcription",
+        "recognition",
+        Some(audio_duration_ms),
+    );
+    let mut accept_region = |region_index, sample_rate, region_samples: &[f32]| {
+        let stream = create_stream(recognizer, hotwords);
+        stream.accept_waveform(sample_rate as i32, region_samples);
+        pending.push(PendingRecognition {
+            region_index,
+            stream,
+        });
+        if pending.len() >= batch_size {
+            flush_recognition_batch(
                 app,
-                TranscriptionProgress::new(
-                    TranscriptionStage::Transcribing,
-                    completed_chunks,
-                    Some(total_chunks),
-                ),
-            );
-            Ok(())
-        },
+                recognizer,
+                &regions,
+                &mut pending,
+                &mut tokens,
+                &mut completed_chunks,
+                total_chunks,
+            )?;
+        }
+        Ok(())
+    };
+    if let Some(cache) = pcm_cache.as_ref() {
+        eprintln!("processing_cache pipeline=local_transcription stage=decoded_pcm hit=true");
+        cache.read_regions(&windows, &mut accept_region)?;
+    } else {
+        eprintln!("processing_cache pipeline=local_transcription stage=decoded_pcm hit=false");
+        audio_decode::decode_mono_regions_resampled(
+            audio_path,
+            vad::SAMPLE_RATE,
+            &windows,
+            &mut accept_region,
+        )?;
+    }
+    flush_recognition_batch(
+        app,
+        recognizer,
+        &regions,
+        &mut pending,
+        &mut tokens,
+        &mut completed_chunks,
+        total_chunks,
     )?;
+    recognition_timer.finish();
     repair_inferred_token_ends(&mut tokens, Some(decoded_duration_ms));
     let segments = segments_from_tokens(&tokens);
     Ok((tokens, segments))
+}
+
+fn valid_cached_regions(regions: &[vad::SpeechRegion], duration_ms: u64) -> bool {
+    regions.len() <= 1_000_000
+        && regions.iter().all(|region| {
+            region.start_ms <= region.speech_start_ms
+                && region.speech_start_ms < region.speech_end_ms
+                && region.speech_end_ms <= region.end_ms
+                && region.end_ms <= duration_ms.saturating_add(1_000)
+        })
+        && regions
+            .windows(2)
+            .all(|pair| pair[0].start_ms <= pair[1].start_ms)
+}
+
+fn flush_recognition_batch(
+    app: &tauri::AppHandle,
+    recognizer: &OfflineRecognizer,
+    regions: &[vad::SpeechRegion],
+    pending: &mut Vec<PendingRecognition>,
+    tokens: &mut Vec<TranscriptToken>,
+    completed_chunks: &mut u32,
+    total_chunks: u32,
+) -> Result<(), String> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let streams = pending.iter().map(|item| &item.stream).collect::<Vec<_>>();
+    recognizer.decode_multiple_streams(&streams);
+    for item in pending.drain(..) {
+        let region = regions
+            .get(item.region_index)
+            .ok_or_else(|| "VAD区間の対応関係が不正です。".to_string())?;
+        let result = item
+            .stream
+            .get_result()
+            .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
+        let (mut region_tokens, _) =
+            normalize_result(&result, region.duration_ms(), region.start_ms);
+        // Padded windows overlap by design. Keep only tokens whose midpoint
+        // belongs to the original VAD region, retaining boundary context for
+        // recognition without duplicating transcript text.
+        region_tokens.retain(|token| {
+            let start = token.start_ms.unwrap_or(region.speech_start_ms);
+            let end = token.end_ms.unwrap_or(start);
+            let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
+            midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
+        });
+        tokens.append(&mut region_tokens);
+        *completed_chunks = completed_chunks.saturating_add(1);
+    }
+    publish_transcription_progress(
+        app,
+        TranscriptionProgress::new(
+            TranscriptionStage::Transcribing,
+            *completed_chunks,
+            Some(total_chunks),
+        ),
+    );
+    Ok(())
 }
 
 fn vad_total_units(duration_ms: u64) -> u32 {
@@ -353,13 +547,6 @@ fn normalize_result(
         });
     }
     (tokens, segments)
-}
-
-fn available_threads() -> i32 {
-    let maximum = if cfg!(mobile) { 4 } else { 8 };
-    std::thread::available_parallelism()
-        .map(|value| value.get().clamp(1, maximum) as i32)
-        .unwrap_or(2)
 }
 
 fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {

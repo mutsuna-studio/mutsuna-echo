@@ -24,6 +24,8 @@ const MAX_EMBEDDING_AUDIO_SAMPLES: usize = 30 * SAMPLE_RATE;
 const MIN_EXCLUSIVE_SEGMENT_SAMPLES: usize = SAMPLE_RATE / 2;
 const LOCAL_CLUSTER_THRESHOLD: f32 = 0.9;
 const GLOBAL_EMBEDDING_THRESHOLD: f32 = 0.5;
+const MIN_REQUESTED_SPEAKER_ACTIVITY_MS: u64 = 1_000;
+const DIARIZATION_CACHE_SCHEMA: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -65,9 +67,18 @@ pub(crate) struct DiarizationRunMetadata {
     pub(crate) global_embedding_threshold: f32,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct LocalDiarizationOutput {
     pub(crate) turns: Vec<SpeakerTurn>,
     pub(crate) metadata: DiarizationRunMetadata,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiarizationCacheDocument {
+    schema_version: u8,
+    output: LocalDiarizationOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +110,11 @@ pub(crate) fn diarize(
     cancelled: &AtomicBool,
     mut report: impl FnMut(LocalDiarizationProgress),
 ) -> Result<LocalDiarizationOutput, String> {
+    let total_timer = crate::processing_metrics::StageTimer::start(
+        "local_diarization",
+        "total",
+        options.total_ms,
+    );
     if options
         .speaker_count
         .is_some_and(|count| !(1..=10).contains(&count))
@@ -106,7 +122,57 @@ pub(crate) fn diarize(
         return Err("話者数は1〜10人で指定してください。".into());
     }
     check_cancelled(cancelled)?;
+    let fingerprint_timer = crate::processing_metrics::StageTimer::start(
+        "local_diarization",
+        "fingerprint_audio",
+        options.total_ms,
+    );
+    let cache_key = match crate::inference_cache::audio_fingerprint(audio_path) {
+        Ok(fingerprint) => Some(crate::inference_cache::cache_key(
+            &fingerprint,
+            &format!(
+                "diarization-schema={DIARIZATION_CACHE_SCHEMA};model={}:{};speakers={:?};window={WINDOW_SAMPLES};overlap={OVERLAP_SAMPLES};local={LOCAL_CLUSTER_THRESHOLD};global={GLOBAL_EMBEDDING_THRESHOLD};same-chunk-cannot-link=true",
+                diarization_models::MODEL_PACK_ID,
+                diarization_models::MODEL_PACK_VERSION,
+                options.speaker_count
+            ),
+        )),
+        Err(error) => {
+            eprintln!("Could not fingerprint audio for diarization cache: {error}");
+            None
+        }
+    };
+    fingerprint_timer.finish();
+    if let Some(key) = cache_key.as_deref() {
+        match crate::inference_cache::load_json::<DiarizationCacheDocument>(app, "diarization", key)
+        {
+            Ok(Some(document))
+                if document.schema_version == DIARIZATION_CACHE_SCHEMA
+                    && valid_cached_turns(&document.output.turns, options.total_ms)
+                    && valid_speaker_distribution(
+                        &document.output.turns,
+                        options.speaker_count,
+                    ) =>
+            {
+                eprintln!("processing_cache pipeline=local_diarization stage=diarization hit=true");
+                report(LocalDiarizationProgress {
+                    stage: LocalDiarizationStage::Finalizing,
+                    completed_chunks: total_chunk_count(options.total_ms.unwrap_or(0)),
+                    total_chunks: options.total_ms.map(total_chunk_count),
+                    processed_ms: options.total_ms.unwrap_or(0),
+                    total_ms: options.total_ms,
+                });
+                total_timer.finish();
+                return Ok(document.output);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Could not load diarization cache: {error}"),
+        }
+    }
+    eprintln!("processing_cache pipeline=local_diarization stage=diarization hit=false");
     report(progress(LocalDiarizationStage::LoadingModel, 0, options, 0));
+    let model_timer =
+        crate::processing_metrics::StageTimer::start("local_diarization", "load_models", None);
     let model_directory = diarization_models::installed_model_directory(app)?;
     let segmentation_path = model_directory
         .join(diarization_models::SEGMENTATION_FILE)
@@ -116,7 +182,7 @@ pub(crate) fn diarize(
         .join(diarization_models::EMBEDDING_FILE)
         .to_string_lossy()
         .into_owned();
-    let threads = available_threads();
+    let threads = crate::compute_tuning::profile().diarization_threads;
     let embedding_config = SpeakerEmbeddingExtractorConfig {
         model: Some(embedding_path),
         num_threads: threads,
@@ -134,7 +200,7 @@ pub(crate) fn diarize(
         },
         embedding: embedding_config.clone(),
         clustering: FastClusteringConfig {
-            num_clusters: -1,
+            num_clusters: options.speaker_count.map(i32::from).unwrap_or(-1),
             threshold: LOCAL_CLUSTER_THRESHOLD,
         },
         min_duration_on: 0.3,
@@ -148,6 +214,7 @@ pub(crate) fn diarize(
     }
     let extractor = SpeakerEmbeddingExtractor::create(&embedding_config)
         .ok_or_else(|| "話者埋め込みモデルを読み込めませんでした。".to_string())?;
+    model_timer.finish();
     check_cancelled(cancelled)?;
     report(progress(
         LocalDiarizationStage::DecodingAudio,
@@ -161,6 +228,11 @@ pub(crate) fn diarize(
     let mut pending_start = 0u64;
     let mut resampler: Option<LinearResampler> = None;
     let total_chunks = options.total_ms.map(total_chunk_count);
+    let inference_timer = crate::processing_metrics::StageTimer::start(
+        "local_diarization",
+        "decode_and_infer",
+        options.total_ms,
+    );
     decode_mono(audio_path, |input_rate, samples| {
         check_cancelled(cancelled)?;
         let output = if input_rate == SAMPLE_RATE as u32 {
@@ -228,6 +300,7 @@ pub(crate) fn diarize(
             total_ms: options.total_ms,
         });
     }
+    inference_timer.finish();
     check_cancelled(cancelled)?;
     report(LocalDiarizationProgress {
         stage: LocalDiarizationStage::StitchingSpeakers,
@@ -236,7 +309,19 @@ pub(crate) fn diarize(
         processed_ms: options.total_ms.unwrap_or(0),
         total_ms: options.total_ms,
     });
+    let stitching_timer = crate::processing_metrics::StageTimer::start(
+        "local_diarization",
+        "stitch_speakers",
+        options.total_ms,
+    );
     let turns = stitch_chunks(&chunks, options.speaker_count)?;
+    stitching_timer.finish();
+    if !valid_speaker_distribution(&turns, options.speaker_count) {
+        return Err(
+            "指定した話者数に対して話者分離結果が極端に偏りました。話者数を自動にするか、別の話者数で再実行してください。"
+                .into(),
+        );
+    }
     check_cancelled(cancelled)?;
     report(LocalDiarizationProgress {
         stage: LocalDiarizationStage::Finalizing,
@@ -250,7 +335,7 @@ pub(crate) fn diarize(
         .map(|turn| turn.speaker.as_str())
         .collect::<BTreeSet<_>>()
         .len() as u32;
-    Ok(LocalDiarizationOutput {
+    let output = LocalDiarizationOutput {
         turns,
         metadata: DiarizationRunMetadata {
             model_id: diarization_models::MODEL_PACK_ID.into(),
@@ -263,7 +348,53 @@ pub(crate) fn diarize(
             local_cluster_threshold: LOCAL_CLUSTER_THRESHOLD,
             global_embedding_threshold: GLOBAL_EMBEDDING_THRESHOLD,
         },
-    })
+    };
+    if let Some(key) = cache_key.as_deref() {
+        let document = DiarizationCacheDocument {
+            schema_version: DIARIZATION_CACHE_SCHEMA,
+            output: LocalDiarizationOutput {
+                turns: output.turns.clone(),
+                metadata: output.metadata.clone(),
+            },
+        };
+        if let Err(error) = crate::inference_cache::store_json(app, "diarization", key, &document) {
+            eprintln!("Could not store diarization cache: {error}");
+        }
+    }
+    total_timer.finish();
+    Ok(output)
+}
+
+fn valid_cached_turns(turns: &[SpeakerTurn], total_ms: Option<u64>) -> bool {
+    turns.len() <= 1_000_000
+        && turns.iter().all(|turn| {
+            !turn.speaker.trim().is_empty()
+                && turn.end_ms > turn.start_ms
+                && total_ms.is_none_or(|total| turn.end_ms <= total.saturating_add(1_000))
+        })
+        && turns
+            .windows(2)
+            .all(|pair| pair[0].start_ms <= pair[1].start_ms)
+}
+
+fn valid_speaker_distribution(turns: &[SpeakerTurn], requested_speakers: Option<u8>) -> bool {
+    let Some(requested_speakers) = requested_speakers.map(usize::from) else {
+        return true;
+    };
+    if turns.is_empty() {
+        return true;
+    }
+    let mut activity = HashMap::<&str, u64>::new();
+    for turn in turns {
+        let duration = turn.end_ms.saturating_sub(turn.start_ms);
+        let total = activity.entry(turn.speaker.as_str()).or_default();
+        *total = total.saturating_add(duration);
+    }
+    activity.len() == requested_speakers
+        && (requested_speakers <= 1
+            || activity
+                .values()
+                .all(|duration| *duration >= MIN_REQUESTED_SPEAKER_ACTIVITY_MS))
 }
 
 fn process_chunk(
@@ -551,9 +682,7 @@ fn agglomerate_embeddings(
         let mut best: Option<(usize, usize, f32)> = None;
         for left in 0..clusters.len() {
             for right in left + 1..clusters.len() {
-                if requested_speakers.is_none()
-                    && clusters_share_chunk(&clusters[left], &clusters[right], nodes)
-                {
+                if clusters_share_chunk(&clusters[left], &clusters[right], nodes) {
                     continue;
                 }
                 let score = average_similarity(&clusters[left], &clusters[right], nodes, chunks);
@@ -617,13 +746,6 @@ fn normalize_embedding(embedding: &mut [f32]) {
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     left.iter().zip(right).map(|(a, b)| a * b).sum()
-}
-
-fn available_threads() -> i32 {
-    let maximum = if cfg!(mobile) { 4 } else { 8 };
-    std::thread::available_parallelism()
-        .map(|value| value.get().clamp(1, maximum) as i32)
-        .unwrap_or(2)
 }
 
 fn progress(
@@ -791,5 +913,51 @@ mod tests {
         ];
         let turns = stitch_chunks(&chunks, Some(1)).expect("stitch chunks");
         assert!(turns.iter().all(|turn| turn.speaker == "Speaker 1"));
+    }
+
+    #[test]
+    fn requested_count_never_merges_speakers_that_coexist_in_one_chunk() {
+        let chunks = vec![chunk(
+            0,
+            0,
+            &[
+                (0, 0, SAMPLE_RATE as u64, vec![1.0, 0.0]),
+                (
+                    1,
+                    SAMPLE_RATE as u64,
+                    2 * SAMPLE_RATE as u64,
+                    vec![1.0, 0.0],
+                ),
+            ],
+        )];
+        let turns = stitch_chunks(&chunks, Some(1)).expect("stitch chunks");
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| &turn.speaker)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn requested_speakers_rejects_a_tiny_artifact_cluster() {
+        let turns = vec![
+            SpeakerTurn {
+                speaker: "Speaker 1".into(),
+                start_ms: 0,
+                end_ms: 60_000,
+                confidence: None,
+            },
+            SpeakerTurn {
+                speaker: "Speaker 2".into(),
+                start_ms: 60_000,
+                end_ms: 60_338,
+                confidence: None,
+            },
+        ];
+        assert!(!valid_speaker_distribution(&turns, Some(2)));
+        assert!(valid_speaker_distribution(&turns, None));
     }
 }

@@ -216,6 +216,7 @@ pub(crate) fn decode_mono_windows(
 /// Decodes sorted time windows in one sequential pass. Only currently active
 /// windows are retained, so memory is bounded by the largest region even when
 /// processing a long recording with hundreds of VAD segments.
+#[cfg(test)]
 pub(crate) fn decode_mono_regions(
     path: &Path,
     windows: &[(u64, u64)],
@@ -301,11 +302,156 @@ pub(crate) fn decode_mono_regions(
     Ok(())
 }
 
+/// Decodes and continuously resamples the source before collecting sorted
+/// regions. A single resampler preserves phase across region boundaries and
+/// avoids rebuilding filter state for every VAD window.
+pub(crate) fn decode_mono_regions_resampled(
+    path: &Path,
+    target_rate: u32,
+    windows: &[(u64, u64)],
+    mut on_region: impl FnMut(usize, u32, &[f32]) -> Result<(), String>,
+) -> Result<(), String> {
+    if windows.is_empty() {
+        return Ok(());
+    }
+    if target_rate == 0 {
+        return Err("変換先のサンプルレートが不正です。".into());
+    }
+    if windows.windows(2).any(|pair| pair[0].0 > pair[1].0) {
+        return Err("音声区間が時系列順に並んでいません。".into());
+    }
+
+    struct ActiveRegion {
+        index: usize,
+        start_frame: u64,
+        end_frame: u64,
+        samples: Vec<f32>,
+    }
+
+    let mut next_window = 0usize;
+    let mut active = VecDeque::<ActiveRegion>::new();
+    let mut completed = 0usize;
+    let mut output_frames = 0u64;
+    let mut resampler: Option<StreamingAreaResampler> = None;
+    decode_mono_sampled(path, 1, |sample_rate, _, samples| {
+        let resampler =
+            resampler.get_or_insert_with(|| StreamingAreaResampler::new(sample_rate, target_rate));
+        if resampler.source_rate != sample_rate {
+            return Err("途中でサンプルレートが変わる音声には対応していません。".into());
+        }
+        let output = resampler.process(samples);
+        if output.is_empty() {
+            return Ok(());
+        }
+        let packet_start = output_frames;
+        let packet_end = packet_start.saturating_add(output.len() as u64);
+        output_frames = packet_end;
+        while let Some(&(start_ms, duration_ms)) = windows.get(next_window) {
+            let start_frame = start_ms.saturating_mul(target_rate as u64) / 1_000;
+            if start_frame >= packet_end {
+                break;
+            }
+            let end_ms = start_ms.saturating_add(duration_ms);
+            let end_frame = end_ms
+                .saturating_mul(target_rate as u64)
+                .saturating_add(999)
+                / 1_000;
+            active.push_back(ActiveRegion {
+                index: next_window,
+                start_frame,
+                end_frame: end_frame.max(start_frame.saturating_add(1)),
+                samples: Vec::new(),
+            });
+            next_window += 1;
+        }
+        for region in &mut active {
+            let overlap_start = packet_start.max(region.start_frame);
+            let overlap_end = packet_end.min(region.end_frame);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let start = usize::try_from(overlap_start - packet_start)
+                .map_err(|_| "音声区間の開始位置が大きすぎます。".to_string())?;
+            let end = usize::try_from(overlap_end - packet_start)
+                .map_err(|_| "音声区間の終了位置が大きすぎます。".to_string())?;
+            region.samples.extend_from_slice(&output[start..end]);
+        }
+        while active
+            .front()
+            .is_some_and(|region| region.end_frame <= packet_end)
+        {
+            let region = active.pop_front().expect("front was checked");
+            if region.samples.is_empty() {
+                return Err("VADが検出した音声区間を読み取れませんでした。".into());
+            }
+            on_region(region.index, target_rate, &region.samples)?;
+            completed += 1;
+        }
+        Ok(())
+    })?;
+    while let Some(region) = active.pop_front() {
+        if region.samples.is_empty() {
+            return Err("VADが検出した末尾の音声区間を読み取れませんでした。".into());
+        }
+        on_region(region.index, target_rate, &region.samples)?;
+        completed += 1;
+    }
+    if next_window != windows.len() || completed != windows.len() {
+        return Err("VADが検出した音声区間をすべて読み取れませんでした。".into());
+    }
+    Ok(())
+}
+
+/// Streaming box-filter resampler. It bounds memory to one decoded packet and
+/// preserves state for the entire source timeline.
+pub(crate) struct StreamingAreaResampler {
+    pub(crate) source_rate: u32,
+    target_rate: u32,
+    output_remaining: u64,
+    weighted_sum: f64,
+}
+
+impl StreamingAreaResampler {
+    pub(crate) fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            source_rate,
+            target_rate,
+            output_remaining: source_rate as u64,
+            weighted_sum: 0.0,
+        }
+    }
+
+    pub(crate) fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        let expected = input.len().saturating_mul(self.target_rate as usize)
+            / self.source_rate.max(1) as usize
+            + 2;
+        let mut output = Vec::with_capacity(expected);
+        for &sample in input {
+            let mut input_remaining = self.target_rate as u64;
+            while input_remaining > 0 {
+                let overlap = input_remaining.min(self.output_remaining);
+                self.weighted_sum += sample as f64 * overlap as f64;
+                input_remaining -= overlap;
+                self.output_remaining -= overlap;
+                if self.output_remaining == 0 {
+                    output.push((self.weighted_sum / self.source_rate as f64) as f32);
+                    self.output_remaining = self.source_rate as u64;
+                    self.weighted_sum = 0.0;
+                }
+            }
+        }
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
 
-    use super::{decode_mono_regions, decode_mono_windows};
+    use super::{
+        decode_mono_regions, decode_mono_regions_resampled, decode_mono_windows,
+        StreamingAreaResampler,
+    };
 
     #[test]
     fn decodes_only_requested_wav_windows() {
@@ -357,6 +503,31 @@ mod tests {
         .expect("decode overlapping regions");
         assert_eq!(region_lengths, [1_600, 1_600]);
 
+        let mut resampled_lengths = [0usize; 2];
+        decode_mono_regions_resampled(
+            &path,
+            16_000,
+            &[(100, 200), (150, 200)],
+            |index, rate, samples| {
+                assert_eq!(rate, 16_000);
+                resampled_lengths[index] = samples.len();
+                Ok(())
+            },
+        )
+        .expect("decode continuously resampled regions");
+        assert_eq!(resampled_lengths, [3_200, 3_200]);
+
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn resamples_48khz_in_streaming_chunks_without_drift() {
+        let mut resampler = StreamingAreaResampler::new(48_000, 16_000);
+        let mut output = resampler.process(&vec![1.0; 24_001]);
+        output.extend(resampler.process(&vec![1.0; 23_999]));
+        assert_eq!(output.len(), 16_000);
+        assert!(output
+            .iter()
+            .all(|sample| (*sample - 1.0).abs() < f32::EPSILON));
     }
 }

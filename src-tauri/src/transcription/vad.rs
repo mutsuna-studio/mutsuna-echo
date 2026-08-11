@@ -1,23 +1,28 @@
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
 use super::{
-    audio_decode::decode_mono,
+    audio_decode::{decode_mono, StreamingAreaResampler},
     vad_settings::{VadParameters, VadPreset},
 };
 
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
 const REGION_PADDING_MS: u64 = 300;
 const REGION_PADDING_SAMPLES: u64 = REGION_PADDING_MS * SAMPLE_RATE as u64 / 1_000;
-// Silero finalizes a region when max_speech_duration is reached even when no
-// silence was detected. Rejoin those artificial boundaries before recognition
-// so a word cannot be decoded independently on either side of a 30-second cut.
+// Rejoin detector-level forced splits and short false-negative gaps before
+// recognition. The latter commonly occurs around quiet fillers or speech
+// partially masked by another speaker; keeping both sides in one recognition
+// window prevents those samples from being discarded outright.
+pub(crate) const MISSED_SPEECH_RECOVERY_GAP_MS: u64 = 2_500;
 const FORCED_SPLIT_MAX_GAP_MS: u64 = 100;
 // Keep recognition bounded on mobile while allowing normal continuous speech
 // to pass through several detector-level safety cuts as one context window.
 const MAX_RECOGNITION_REGION_MS: u64 = 180_000;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SpeechRegion {
     /// Start of the padded recognition window on the original timeline.
     pub(crate) start_ms: u64,
@@ -40,6 +45,7 @@ pub(crate) fn visit_speech_regions(
     model_path: &Path,
     preset: VadPreset,
     mut on_progress: impl FnMut(u64) -> Result<(), String>,
+    mut on_resampled_audio: impl FnMut(&[f32]) -> Result<(), String>,
 ) -> Result<(u64, Vec<SpeechRegion>), String> {
     let parameters = preset.parameters();
     let detector = create_detector(model_path, parameters)?;
@@ -54,6 +60,7 @@ pub(crate) fn visit_speech_regions(
             return Err("途中でサンプルレートが変わる音声には対応していません。".into());
         }
         let output = resampler.process(samples);
+        on_resampled_audio(&output)?;
         detector.accept_waveform(&output);
         resampled_samples = resampled_samples.saturating_add(output.len() as u64);
         collect_detected(&detector, &mut detected);
@@ -76,17 +83,31 @@ pub(crate) fn visit_speech_regions(
             ),
         })
         .collect();
-    let regions = coalesce_forced_split_regions(regions);
+    let regions =
+        coalesce_short_detector_gaps(regions, seconds_to_ms(parameters.max_speech_duration));
     Ok((duration_ms, regions))
 }
 
-fn coalesce_forced_split_regions(regions: Vec<SpeechRegion>) -> Vec<SpeechRegion> {
+fn coalesce_short_detector_gaps(
+    regions: Vec<SpeechRegion>,
+    max_speech_duration_ms: u64,
+) -> Vec<SpeechRegion> {
+    // A recovered gap joins at most two detector-sized speech windows. Without
+    // this separate bound, ordinary sub-2.5-second pauses chain an entire
+    // conversation into 180-second recognition regions and make offline ASR
+    // dramatically slower. The limit follows the active VAD preset instead of
+    // restoring the old fixed 32-second buffer.
+    let recovery_region_limit_ms = max_speech_duration_ms
+        .saturating_mul(2)
+        .saturating_add(REGION_PADDING_MS.saturating_mul(2));
     let mut coalesced: Vec<SpeechRegion> = Vec::with_capacity(regions.len());
     for next in regions {
         let should_merge = coalesced.last().is_some_and(|current| {
-            next.speech_start_ms.saturating_sub(current.speech_end_ms) <= FORCED_SPLIT_MAX_GAP_MS
-                && next.speech_end_ms.saturating_sub(current.speech_start_ms)
-                    <= MAX_RECOGNITION_REGION_MS
+            let gap_ms = next.speech_start_ms.saturating_sub(current.speech_end_ms);
+            let combined_duration_ms = next.speech_end_ms.saturating_sub(current.speech_start_ms);
+            (gap_ms <= FORCED_SPLIT_MAX_GAP_MS && combined_duration_ms <= MAX_RECOGNITION_REGION_MS)
+                || (gap_ms <= MISSED_SPEECH_RECOVERY_GAP_MS
+                    && combined_duration_ms <= recovery_region_limit_ms)
         });
         if should_merge {
             let current = coalesced
@@ -115,7 +136,7 @@ fn create_detector(
             max_speech_duration: parameters.max_speech_duration,
         },
         sample_rate: SAMPLE_RATE as i32,
-        num_threads: 1,
+        num_threads: crate::compute_tuning::profile().vad_threads,
         provider: Some("cpu".into()),
         debug: false,
         ..Default::default()
@@ -178,55 +199,17 @@ const fn samples_to_ms(samples: u64) -> u64 {
     samples.saturating_mul(1_000) / SAMPLE_RATE as u64
 }
 
-/// Streaming box-filter resampler. It bounds memory to one decoded packet and
-/// avoids aliasing when common 44.1/48 kHz meeting audio is reduced to 16 kHz.
-struct StreamingAreaResampler {
-    source_rate: u32,
-    target_rate: u32,
-    output_remaining: u64,
-    weighted_sum: f64,
-}
-
-pub(crate) fn resample_mono(source_rate: u32, samples: &[f32]) -> Vec<f32> {
-    StreamingAreaResampler::new(source_rate, SAMPLE_RATE).process(samples)
-}
-
-impl StreamingAreaResampler {
-    fn new(source_rate: u32, target_rate: u32) -> Self {
-        Self {
-            source_rate,
-            target_rate,
-            output_remaining: source_rate as u64,
-            weighted_sum: 0.0,
-        }
-    }
-
-    fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        let expected = input.len().saturating_mul(self.target_rate as usize)
-            / self.source_rate.max(1) as usize
-            + 2;
-        let mut output = Vec::with_capacity(expected);
-        for &sample in input {
-            let mut input_remaining = self.target_rate as u64;
-            while input_remaining > 0 {
-                let overlap = input_remaining.min(self.output_remaining);
-                self.weighted_sum += sample as f64 * overlap as f64;
-                input_remaining -= overlap;
-                self.output_remaining -= overlap;
-                if self.output_remaining == 0 {
-                    output.push((self.weighted_sum / self.source_rate as f64) as f32);
-                    self.output_remaining = self.source_rate as u64;
-                    self.weighted_sum = 0.0;
-                }
-            }
-        }
-        output
+fn seconds_to_ms(seconds: f32) -> u64 {
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds * 1_000.0).round() as u64
+    } else {
+        0
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{coalesce_forced_split_regions, SpeechRegion, StreamingAreaResampler};
+    use super::{coalesce_short_detector_gaps, SpeechRegion};
 
     fn region(speech_start_ms: u64, speech_end_ms: u64) -> SpeechRegion {
         SpeechRegion {
@@ -238,31 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn resamples_48khz_in_streaming_chunks_without_drift() {
-        let mut resampler = StreamingAreaResampler::new(48_000, 16_000);
-        let mut output = resampler.process(&vec![1.0; 24_001]);
-        output.extend(resampler.process(&vec![1.0; 23_999]));
-        assert_eq!(output.len(), 16_000);
-        assert!(output
-            .iter()
-            .all(|sample| (*sample - 1.0).abs() < f32::EPSILON));
-    }
-
-    #[test]
-    fn supports_44khz_and_low_rate_inputs() {
-        let mut down = StreamingAreaResampler::new(44_100, 16_000);
-        assert_eq!(down.process(&vec![0.5; 44_100]).len(), 16_000);
-        let mut up = StreamingAreaResampler::new(8_000, 16_000);
-        assert_eq!(up.process(&vec![0.5; 8_000]).len(), 16_000);
-    }
-
-    #[test]
     fn rejoins_detector_max_duration_boundaries_without_silence() {
-        let regions = coalesce_forced_split_regions(vec![
-            region(1_000, 31_000),
-            region(31_032, 61_032),
-            region(61_064, 72_000),
-        ]);
+        let regions = coalesce_short_detector_gaps(
+            vec![
+                region(1_000, 31_000),
+                region(31_032, 61_032),
+                region(61_064, 72_000),
+            ],
+            30_000,
+        );
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].speech_start_ms, 1_000);
         assert_eq!(regions[0].speech_end_ms, 72_000);
@@ -271,15 +238,42 @@ mod tests {
 
     #[test]
     fn preserves_real_silence_boundaries() {
-        let regions =
-            coalesce_forced_split_regions(vec![region(1_000, 31_000), region(31_500, 50_000)]);
+        let regions = coalesce_short_detector_gaps(
+            vec![region(1_000, 31_000), region(34_000, 50_000)],
+            30_000,
+        );
         assert_eq!(regions.len(), 2);
     }
 
     #[test]
     fn keeps_continuous_recognition_windows_bounded() {
         let regions =
-            coalesce_forced_split_regions(vec![region(0, 90_000), region(90_032, 180_032)]);
+            coalesce_short_detector_gaps(vec![region(0, 90_000), region(90_032, 180_032)], 30_000);
         assert_eq!(regions.len(), 2);
+    }
+
+    #[test]
+    fn recovers_short_detector_gaps_that_can_hide_quiet_words() {
+        let regions = coalesce_short_detector_gaps(
+            vec![region(41_022, 45_996), region(47_710, 52_620)],
+            30_000,
+        );
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].speech_start_ms, 41_022);
+        assert_eq!(regions[0].speech_end_ms, 52_620);
+    }
+
+    #[test]
+    fn does_not_chain_short_conversational_pauses_into_huge_regions() {
+        let regions = coalesce_short_detector_gaps(
+            vec![
+                region(0, 30_000),
+                region(31_000, 60_000),
+                region(61_000, 90_000),
+            ],
+            30_000,
+        );
+        assert_eq!(regions.len(), 2);
+        assert!(regions.iter().all(|region| region.duration_ms() <= 60_600));
     }
 }

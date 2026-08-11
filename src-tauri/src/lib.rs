@@ -4,11 +4,15 @@ mod audio_enhancement;
 mod audio_playback;
 mod audio_waveform;
 mod commands;
+mod compute_tuning;
 mod credentials;
+mod inference_cache;
 #[cfg(desktop)]
 mod meeting_detection;
 mod meeting_store;
+mod pcm_cache;
 mod pending_action;
+mod processing_metrics;
 mod recording;
 #[cfg(desktop)]
 mod resident;

@@ -11,10 +11,12 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.File
+import java.util.Locale
 import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.Instant
@@ -113,8 +115,10 @@ class EchoRecordingService : Service() {
 
       val micBuffer = ShortArray(FRAMES_PER_CHUNK)
       val sysBuffer = ShortArray(FRAMES_PER_CHUNK)
+      var mixedBuffer = ShortArray(FRAMES_PER_CHUNK)
       var lastManifest = startedAt
       var noDataSince: Long? = null
+      var audioProcessingNanos = 0L
       while (!stop.get()) {
         val elapsed = SystemClock.elapsedRealtime() - startedAt
         if (elapsed >= MAX_DURATION_MS) break
@@ -131,23 +135,31 @@ class EchoRecordingService : Service() {
           continue
         }
         noDataSince = null
+        val processingStarted = SystemClock.elapsedRealtimeNanos()
         val enhancedMic = if (micRead > 0) {
-          microphoneEnhancer?.process(micBuffer.copyOf(micRead)) ?: ShortArray(0)
+          val microphoneInput = if (micRead == micBuffer.size) micBuffer else micBuffer.copyOf(micRead)
+          microphoneEnhancer?.process(microphoneInput) ?: ShortArray(0)
         } else ShortArray(0)
         if (enhancedMic.isNotEmpty()) micWriter?.write(enhancedMic)
-        if (sysRead > 0) systemWriter?.write(sysBuffer.copyOf(sysRead))
+        if (sysRead > 0) {
+          val systemInput = if (sysRead == sysBuffer.size) sysBuffer else sysBuffer.copyOf(sysRead)
+          systemWriter?.write(systemInput)
+        }
         val mixedFrames = max(enhancedMic.size, sysRead)
-        val mixed = ShortArray(mixedFrames) { index ->
+        if (mixedFrames > mixedBuffer.size) mixedBuffer = ShortArray(mixedFrames)
+        for (index in 0 until mixedFrames) {
           val a = if (index < enhancedMic.size) enhancedMic[index] / 32768f else 0f
           val b = if (index < sysRead) sysBuffer[index] / 32768f else 0f
           val sum = a + b
           val limited = if (abs(sum) <= 0.95f) sum else kotlin.math.sign(sum) * (0.95f + 0.05f * kotlin.math.tanh(((abs(sum) - 0.95f) / 0.05f).toDouble()).toFloat())
-          (limited * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
+          mixedBuffer[index] = (limited * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
         }
+        val mixed = if (mixedFrames == mixedBuffer.size) mixedBuffer else mixedBuffer.copyOf(mixedFrames)
         if (mixed.isNotEmpty()) {
           mixedWriter.write(mixed)
           waveform.accept(mixed)
         }
+        audioProcessingNanos += SystemClock.elapsedRealtimeNanos() - processingStarted
         RecordingBridge.update {
           put("elapsedMs", elapsed)
           put("microphoneLevel", if (micRead > 0) peak(micBuffer, micRead) else 0.0)
@@ -160,6 +172,7 @@ class EchoRecordingService : Service() {
       }
 
       RecordingBridge.update { put("phase", "finalizing"); put("microphoneLevel", 0.0); put("systemLevel", 0.0) }
+      val finalizationStarted = SystemClock.elapsedRealtimeNanos()
       mic?.stop(); system?.stop()
       systemWriter?.close(); systemWriter = null
       val enhancedTail = microphoneEnhancer?.finish() ?: ShortArray(0); microphoneEnhancer = null
@@ -196,6 +209,9 @@ class EchoRecordingService : Service() {
           put("waveformPath", waveformFile.absolutePath)
           put("stopReason", if (SystemClock.elapsedRealtime() - startedAt >= MAX_DURATION_MS) "durationLimit" else "user")
         }
+        val audioMs = SystemClock.elapsedRealtime() - startedAt
+        logTiming("realtime_audio_processing_cpu", audioProcessingNanos, audioMs)
+        logTiming("finalize_files", SystemClock.elapsedRealtimeNanos() - finalizationStarted, audioMs)
       }
     } catch (error: Throwable) {
       try {
@@ -266,6 +282,15 @@ class EchoRecordingService : Service() {
   private fun bufferBytes() = max(FRAMES_PER_CHUNK * 4, AudioRecord.getMinBufferSize(48_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT))
   private fun readExact(record: AudioRecord, buffer: ShortArray): Int = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
   private fun peak(samples: ShortArray, count: Int): Double = (0 until count).maxOfOrNull { abs(samples[it].toInt()) }?.div(32768.0) ?: 0.0
+
+  private fun logTiming(stage: String, elapsedNanos: Long, audioMs: Long) {
+    val elapsedMs = elapsedNanos / 1_000_000.0
+    val realtimeFactor = if (audioMs > 0) elapsedMs / audioMs else 0.0
+    Log.i(
+      "MutsunaProcessing",
+      "processing_timing pipeline=recording stage=$stage elapsed_ms=${String.format(Locale.US, "%.1f", elapsedMs)} audio_ms=$audioMs realtime_factor=${String.format(Locale.US, "%.4f", realtimeFactor)}"
+    )
+  }
 
   private class WaveformAccumulator {
     private val values = FloatArray(360_000)

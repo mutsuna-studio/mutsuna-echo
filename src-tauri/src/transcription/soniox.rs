@@ -188,7 +188,10 @@ pub(crate) async fn validate_api_key(api_key: &SecretString) -> Result<(), Strin
         .get("/models")
         .send()
         .await
-        .map_err(|error| format!("Sonioxに接続できませんでした: {error}"))?;
+        .map_err(|error| {
+            eprintln!("Soniox API key validation request failed: {error:?}");
+            format!("Sonioxに接続できませんでした: {error}")
+        })?;
     let body: Value = parse_response(response, "APIキーの確認").await?;
     let model_available = body
         .get("models")
