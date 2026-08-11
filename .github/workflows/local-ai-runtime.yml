@@ -49,6 +49,9 @@ jobs:
           bash scripts/prepare-android-runtime.sh arm64-v8a
           mkdir -p "$RUNNER_TEMP/runtime"
           cp src-tauri/gen/android/local_ai_runtime/src/main/jniLibs/arm64-v8a/*.so "$RUNNER_TEMP/runtime/"
+          cp src-tauri/vendor/sherpa-onnx/LICENSE "$RUNNER_TEMP/runtime/LICENSE.sherpa-onnx.txt"
+          cp third-party/onnxruntime/LICENSE.txt "$RUNNER_TEMP/runtime/LICENSE.onnxruntime.txt"
+          cp third-party/onnxruntime/ThirdPartyNotices.txt "$RUNNER_TEMP/runtime/ThirdPartyNotices.onnxruntime.txt"
       - name: Configure and sign macOS libraries
         if: matrix.platform == 'macos'
         shell: bash

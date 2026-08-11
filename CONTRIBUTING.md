@@ -15,6 +15,8 @@ cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 ```
 
+When changing a dependency, local AI runtime, or model version, run `pnpm licenses:generate` from the repository root and include the generated license catalog in the same pull request. Use `pnpm licenses:check` to verify that the generated files are current.
+
 Do not commit API keys, signing keys, keystores, recordings, transcripts, or other private meeting data. Use synthetic data in tests.
 
 ## Pull requests
@@ -25,4 +27,4 @@ Do not commit API keys, signing keys, keystores, recordings, transcripts, or oth
 - Allow the required CI checks and Code Owner review to complete.
 - Do not add a workflow using `pull_request_target` to execute pull-request code.
 
-By contributing, you agree that your contribution is licensed under the repository's MIT License.
+By contributing, you agree that your contribution is licensed under the repository's Mozilla Public License 2.0 (MPL-2.0).

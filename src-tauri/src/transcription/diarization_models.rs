@@ -26,6 +26,10 @@ const SEGMENTATION_MODEL_SHA256: &str =
 const EMBEDDING_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const EMBEDDING_SIZE: u64 = 39_593_761;
 const EMBEDDING_SHA256: &str = "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b";
+const SEGMENTATION_LICENSE: &str =
+    include_str!("../../../third-party/models/pyannote-segmentation-LICENSE.txt");
+const EMBEDDING_LICENSE: &str = include_str!("../../vendor/sherpa-onnx/LICENSE");
+const MODEL_SOURCE_NOTICE: &str = "pyannote segmentation 3.0\nLicense: MIT\nSource: https://huggingface.co/pyannote/segmentation-3.0\n\n3D-Speaker ERes2Net Base\nLicense: Apache-2.0\nSource: https://github.com/modelscope/3D-Speaker\n";
 const DOWNLOAD_EVENT: &str = "local-diarization-model-download-progress";
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -206,6 +210,13 @@ async fn download_and_install(app: &AppHandle, directory: &Path) -> Result<(), S
         .map_err(|error| format!("話者分離モデルのmanifestを作成できませんでした: {error}"))?;
     fs::write(directory.join(MANIFEST_FILE), bytes)
         .map_err(|error| format!("話者分離モデルのmanifestを保存できませんでした: {error}"))?;
+    fs::write(
+        directory.join("LICENSE.pyannote-segmentation.txt"),
+        SEGMENTATION_LICENSE,
+    )
+    .and_then(|_| fs::write(directory.join("LICENSE.3d-speaker.txt"), EMBEDDING_LICENSE))
+    .and_then(|_| fs::write(directory.join("SOURCE.models.txt"), MODEL_SOURCE_NOTICE))
+    .map_err(|error| format!("話者分離モデルのライセンス情報を保存できませんでした: {error}"))?;
     Ok(())
 }
 

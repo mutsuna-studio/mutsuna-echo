@@ -167,3 +167,9 @@ Public化時にはGitHub側でも次を設定してください。
 - `.github/CODEOWNERS`でWorkflowと署名設定の変更に`@mutsuna-jp`のレビューを必須にする
 
 外部Actionは完全なコミットSHAへ固定し、`.github/dependabot.yml`で週次更新します。
+
+## ライセンス
+
+このプロジェクトは[Mozilla Public License 2.0](LICENSE)の下で公開されています。`src-tauri/vendor`以下の第三者コードには、それぞれのライセンスが適用されます。
+
+使用している外部ソフトウェア、フォント、ローカルAIランタイム、モデルのライセンスは、アプリの「設定」→「一般」→「オープンソースライセンス」から確認できます。配布物には`THIRD-PARTY-NOTICES.txt`も同梱されます。依存関係を更新したときは`pnpm licenses:generate`で一覧を再生成してください。

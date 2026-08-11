@@ -10,6 +10,7 @@ const projectRoot = process.cwd().replaceAll("\\", "/");
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [tailwindcss(), svelte()],
+  publicDir: "static",
   resolve: {
     alias: [
       {

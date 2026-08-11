@@ -53,4 +53,12 @@ foreach ($name in $required) {
     if ($matches.Count -lt 1) { throw "Required runtime file is missing: $name" }
     Copy-Item -LiteralPath $matches[0].FullName -Destination (Join-Path $OutputDirectory $name) -Force
 }
+$licenseFiles = @{
+    "LICENSE.sherpa-onnx.txt" = Join-Path $repositoryRoot "src-tauri/vendor/sherpa-onnx/LICENSE"
+    "LICENSE.onnxruntime.txt" = Join-Path $repositoryRoot "third-party/onnxruntime/LICENSE.txt"
+    "ThirdPartyNotices.onnxruntime.txt" = Join-Path $repositoryRoot "third-party/onnxruntime/ThirdPartyNotices.txt"
+}
+foreach ($entry in $licenseFiles.GetEnumerator()) {
+    Copy-Item -LiteralPath $entry.Value -Destination (Join-Path $OutputDirectory $entry.Key) -Force
+}
 Write-Host "Prepared on-demand runtime in $OutputDirectory"

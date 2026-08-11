@@ -20,6 +20,8 @@ const REAZONSPEECH_VERSION: &str = "2024-08-01";
 const REAZONSPEECH_ENGINE: &str = "sherpa-onnx-transducer";
 const HF_REVISION: &str = "291488c8151be24d7da4bf7af26e533fad96e407";
 const DOWNLOAD_EVENT: &str = "local-stt-model-download-progress";
+const REAZONSPEECH_LICENSE: &str = include_str!("../../vendor/sherpa-onnx/LICENSE");
+const REAZONSPEECH_SOURCE_NOTICE: &str = "ReazonSpeech K2 v2\nLicense: Apache-2.0\nSource: https://huggingface.co/reazon-research/reazonspeech-k2-v2/tree/291488c8151be24d7da4bf7af26e533fad96e407\n";
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -250,6 +252,17 @@ fn install_downloaded_model(
     final_directory: &Path,
     manifest: &LocalModelManifest,
 ) -> Result<(), String> {
+    fs::write(
+        temporary.join("LICENSE.reazonspeech.txt"),
+        REAZONSPEECH_LICENSE,
+    )
+    .and_then(|_| {
+        fs::write(
+            temporary.join("SOURCE.reazonspeech.txt"),
+            REAZONSPEECH_SOURCE_NOTICE,
+        )
+    })
+    .map_err(|error| format!("モデルのライセンス情報を保存できませんでした: {error}"))?;
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|error| format!("モデル情報を作成できませんでした: {error}"))?;
     {

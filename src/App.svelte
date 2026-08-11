@@ -16,6 +16,7 @@
   import Settings from "@lucide/svelte/icons/settings";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
+  import ThirdPartyLicenses from "./lib/components/ThirdPartyLicenses.svelte";
   import { checkAndroidUpdate, isAndroid, waitForAndroidUpdateCheck } from "./lib/androidUpdate";
   import AppSidebar from "./lib/components/AppSidebar.svelte";
   import LocalModelManager from "./lib/components/LocalModelManager.svelte";
@@ -1922,6 +1923,7 @@
                     onBeforeInstall={prepareForUpdate}
                     onBusyChange={(value) => updating = value}
                   />
+                  <ThirdPartyLicenses />
                 </div>
               {:else if settingsPane === "transcription" && !summarySettingsPreview}
                 <header class="settings-detail-heading">

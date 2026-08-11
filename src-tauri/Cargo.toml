@@ -3,6 +3,7 @@ name = "mutsuna-echo"
 version = "0.1.7"
 description = "A cross-platform recording and pluggable transcription app"
 authors = ["Mutsuna Studio"]
+license = "MPL-2.0"
 edition = "2021"
 
 [lib]

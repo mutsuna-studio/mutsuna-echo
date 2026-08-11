@@ -18,6 +18,9 @@ const MODEL_URL: &str =
     "https://github.com/snakers4/silero-vad/raw/refs/tags/v5.0/files/silero_vad.onnx";
 const MODEL_SIZE: u64 = 2_313_101;
 const MODEL_SHA256: &str = "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396";
+const MODEL_LICENSE: &str = include_str!("../../../third-party/models/silero-vad-LICENSE.txt");
+const MODEL_SOURCE_NOTICE: &str =
+    "Silero VAD v5.0\nLicense: MIT\nSource: https://github.com/snakers4/silero-vad/tree/v5.0\n";
 const DOWNLOAD_EVENT: &str = "local-vad-model-download-progress";
 const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -115,11 +118,17 @@ pub(crate) async fn download_local_vad_model(app: AppHandle) -> Result<(), Strin
     }
     let temporary = directory.join(format!(".{MODEL_FILE}.download-{}", uuid::Uuid::now_v7()));
     let result = download_to(&app, &temporary).await.and_then(|_| {
-        fs::rename(&temporary, final_path)
-            .map_err(|error| format!("VADモデルをインストールできませんでした: {error}"))
+        fs::rename(&temporary, &final_path)
+            .map_err(|error| format!("VADモデルをインストールできませんでした: {error}"))?;
+        fs::write(directory.join("LICENSE.silero-vad.txt"), MODEL_LICENSE)
+            .and_then(|_| fs::write(directory.join("SOURCE.silero-vad.txt"), MODEL_SOURCE_NOTICE))
+            .map_err(|error| format!("VADモデルのライセンス情報を保存できませんでした: {error}"))
     });
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&final_path);
+        let _ = fs::remove_file(directory.join("LICENSE.silero-vad.txt"));
+        let _ = fs::remove_file(directory.join("SOURCE.silero-vad.txt"));
     }
     result
 }
