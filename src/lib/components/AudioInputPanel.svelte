@@ -70,13 +70,18 @@
       : `クラウド · ${availableProvider.capabilitySummary}`
   })));
   const estimatedCostUsd = $derived(
-    selectedAudio && providerDefinition?.pricingUsdPerHour != null
+    selectedAudio && providerDefinition?.ready === true && providerDefinition.pricingUsdPerHour != null
       ? selectedAudio.durationMs / 3_600_000 * providerDefinition.pricingUsdPerHour
       : null
   );
   const transcriptionStatus = $derived.by(() => {
     if (!transcribing) return "文字起こし開始";
-    if (transcriptionProgress?.stage === "detectingSpeech") return "発話区間を検出中…";
+    if (transcriptionProgress?.stage === "detectingSpeech") {
+      if (transcriptionProgress.totalChunks != null) {
+        return `発話区間を検出中 ${transcriptionProgress.completedChunks} / ${transcriptionProgress.totalChunks}`;
+      }
+      return "発話区間を検出中…";
+    }
     if (transcriptionProgress?.stage === "transcribing") {
       if (transcriptionProgress.totalChunks != null) {
         return `文字起こし中 ${transcriptionProgress.completedChunks} / ${transcriptionProgress.totalChunks}`;
@@ -182,7 +187,7 @@
         </div>
       {/if}
     </div>
-    {#if selectedAudio && providerDefinition?.pricingUsdPerHour != null && estimatedCostUsd != null}
+    {#if selectedAudio && providerDefinition?.ready === true && providerDefinition.pricingUsdPerHour != null && estimatedCostUsd != null}
       <p class="selected-cost">この音声の推定料金: <strong>{formatEstimatedCost(estimatedCostUsd)}</strong></p>
     {/if}
     <div class="action-row provider-action" data-transcription-action>

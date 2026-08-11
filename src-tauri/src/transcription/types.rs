@@ -90,15 +90,16 @@ struct SegmentBuilder {
     last_start_ms: Option<u64>,
     end_time_source: Option<TokenTimeSource>,
     text: String,
-    character_count: usize,
 }
 
 // Provider-authored timestamps are precise enough to retain natural pauses,
 // but short hesitations within an unfinished sentence should stay together.
 const SEGMENT_GAP_MS: u64 = 2_000;
 const INFERRED_SEGMENT_GAP_MS: u64 = 2_500;
-const MAX_SEGMENT_DURATION_MS: u64 = 30_000;
-const MAX_SEGMENT_CHARACTERS: usize = 160;
+// These limits only prevent a refinement pass from rejoining already separated
+// passages into an unwieldy block. They must never create a speech boundary.
+const MAX_SEGMENT_DURATION_MS: u64 = 120_000;
+const MAX_SEGMENT_CHARACTERS: usize = 600;
 const MAX_INFERRED_TOKEN_DURATION_MS: u64 = 1_000;
 const MAX_ORPHAN_CHARACTERS: usize = 1;
 const MAX_ORPHAN_DURATION_MS: u64 = 1_500;
@@ -107,7 +108,7 @@ const MAX_CONTINUATION_MERGE_GAP_MS: u64 = 3_000;
 
 // Increment when display segmentation changes so unedited stored transcripts
 // are rebuilt from their provider tokens on the next load.
-pub(crate) const DISPLAY_SEGMENTATION_VERSION: u32 = 6;
+pub(crate) const DISPLAY_SEGMENTATION_VERSION: u32 = 7;
 
 type AdjacentSegmentMergeRule = fn(&TranscriptSegment, &TranscriptSegment) -> bool;
 
@@ -230,12 +231,7 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
         let gap_boundary = gap_anchor
             .zip(token.start_ms)
             .is_some_and(|(end, start)| start.saturating_sub(end) >= gap_threshold);
-        let duration_boundary = current
-            .start_ms
-            .zip(token.end_ms.or(token.start_ms))
-            .is_some_and(|(start, end)| end.saturating_sub(start) >= MAX_SEGMENT_DURATION_MS);
-        let length_boundary = current.character_count >= MAX_SEGMENT_CHARACTERS;
-        if speaker_changed || gap_boundary || duration_boundary || length_boundary {
+        if speaker_changed || gap_boundary {
             let next_speaker = token
                 .speaker
                 .clone()
@@ -257,7 +253,6 @@ pub(crate) fn segments_from_tokens(tokens: &[TranscriptToken]) -> Vec<Transcript
             current.end_time_source = token.end_time_source;
         }
         current.text.push_str(&token.text);
-        current.character_count += token.text.chars().count();
 
         if token
             .text
@@ -520,6 +515,17 @@ mod tests {
             segments[0].text,
             "なんか会計とか経理とかやってるところの、やっぱかゆいところに手が届くというか、あれですね。"
         );
+    }
+
+    #[test]
+    fn continuous_sentence_is_not_cut_at_thirty_seconds() {
+        let tokens = vec![
+            token("認証情報とかの発行とかコピ", 3_000, 32_900, None),
+            token("ーが必要ない", 33_000, 39_000, None),
+        ];
+        let segments = segments_from_tokens(&tokens);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "認証情報とかの発行とかコピーが必要ない");
     }
 
     #[test]

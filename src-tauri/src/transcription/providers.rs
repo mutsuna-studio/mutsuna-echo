@@ -147,11 +147,14 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
             format!("APIキーの保存状態を確認できませんでした: {error}"),
         ),
     };
+    let vad_installed =
+        super::vad_models::installed_model_path(app).is_ok_and(|path| path.is_some());
     let local = match super::local_models::list_installed(app) {
         Ok(models) => local_provider(
             models
                 .iter()
                 .find(|model| model.model_id == super::local_models::REAZONSPEECH_MODEL_ID),
+            vad_installed,
         ),
         Err(error) => unavailable_provider(LOCAL_DEFINITION, error),
     };
@@ -234,20 +237,27 @@ fn soniox(has_api_key: bool) -> TranscriptionProviderDescriptor {
     }
 }
 
-fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProviderDescriptor {
+fn local_provider(
+    installed: Option<&InstalledLocalModel>,
+    vad_installed: bool,
+) -> TranscriptionProviderDescriptor {
     let engine_available = cfg!(any(desktop, target_os = "android"));
     let (availability, configured, model_id, model_label, status_message) = match installed {
         Some(model) => (
-            if engine_available {
+            if engine_available && vad_installed {
                 ProviderAvailability::Ready
+            } else if engine_available {
+                ProviderAvailability::ModelRequired
             } else {
                 ProviderAvailability::EngineUnavailable
             },
             true,
             Some(model.model_id.clone()),
             model.display_name.clone(),
-            if engine_available {
+            if engine_available && vad_installed {
                 "端末内で日本語を文字起こしできます。話者分離には未対応です。".into()
+            } else if engine_available {
+                "音声区間検出モデルの導入が完了すると会議ページで選択できます。".into()
             } else {
                 "このOSではReazonSpeechの推論エンジンをまだ利用できません。".into()
             },
@@ -266,7 +276,7 @@ fn local_provider(installed: Option<&InstalledLocalModel>) -> TranscriptionProvi
         kind: LOCAL_DEFINITION.kind,
         setup: LOCAL_DEFINITION.setup,
         availability,
-        ready: installed.is_some() && engine_available,
+        ready: installed.is_some() && vad_installed && engine_available,
         configured,
         model_id,
         model_label,
@@ -301,7 +311,7 @@ mod tests {
 
     #[test]
     fn local_provider_requires_an_external_model() {
-        let provider = local_provider(None);
+        let provider = local_provider(None, false);
         assert!(!provider.ready);
         assert!(!provider.configured);
         assert!(matches!(provider.kind, ProviderKind::Local));
@@ -323,7 +333,7 @@ mod tests {
             language_codes: vec!["ja".into()],
             size_bytes: 169_180_699,
         };
-        let provider = local_provider(Some(&model));
+        let provider = local_provider(Some(&model), true);
         assert_eq!(provider.ready, cfg!(any(desktop, target_os = "android")));
         assert!(provider.configured);
         assert_eq!(
@@ -334,6 +344,27 @@ mod tests {
         assert!(provider.capabilities.external_diarization);
         assert!(!provider.capabilities.context_text);
         assert!(provider.capabilities.context_terms);
+    }
+
+    #[test]
+    fn installed_local_model_is_hidden_from_meetings_until_vad_is_installed() {
+        let model = InstalledLocalModel {
+            model_id: super::super::local_models::REAZONSPEECH_MODEL_ID.into(),
+            version: "2024-08-01".into(),
+            engine: "sherpa-onnx-transducer".into(),
+            display_name: "ReazonSpeech K2 int8-fp32".into(),
+            language_codes: vec!["ja".into()],
+            size_bytes: 169_180_699,
+        };
+
+        let provider = local_provider(Some(&model), false);
+
+        assert!(!provider.ready);
+        assert!(provider.configured);
+        assert!(matches!(
+            provider.availability,
+            ProviderAvailability::ModelRequired
+        ));
     }
 
     #[test]

@@ -184,7 +184,11 @@
   let seekRequestId = 0;
   const providerOptions = $derived(transcriptionProviderOptions(providers));
   const selectedProviderOption = $derived(providerOptions.find((option) => option.value === provider));
-  const selectedProvider = $derived(providers.find((candidate) => candidate.id === provider) ?? null);
+  const selectedProvider = $derived(
+    selectedProviderOption
+      ? providers.find((candidate) => candidate.id === selectedProviderOption.value) ?? null
+      : null
+  );
   const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
   const saveStatus = $derived.by(() => {
     if (!selectedRun) return "";
@@ -226,11 +230,15 @@
   );
   const transcriptionLabel = $derived.by(() => {
     if (!transcribing) return transcript ? "再文字起こし" : "文字起こし";
-    if (progress?.stage === "detectingSpeech") return "発話を検出中…";
+    if (progress?.stage === "detectingSpeech") {
+      if (progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
+      return "発話を検出中…";
+    }
     if (progress?.stage === "transcribing" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     return "文字起こし中…";
   });
   const contextStatus = $derived.by(() => {
+    if (!selectedProvider) return "モデルを選択してください";
     if (!contextEnabled) return "コンテキスト: オフ";
     if (!selectedProvider?.capabilities.contextText && !selectedProvider?.capabilities.contextTerms) return "このモデルはコンテキスト非対応";
     if (!selectedProvider.capabilities.contextText && contextTermCount === 0) return "このモデルへ送信できる重要用語はありません";

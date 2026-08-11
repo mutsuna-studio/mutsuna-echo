@@ -111,12 +111,17 @@ pub(crate) fn get_recorded_audio(
     let status = recording::android::status()?;
     #[cfg(not(target_os = "android"))]
     let status = state.status();
-    status
+    let audio = status
         .output_path
         .as_deref()
         .map(std::path::Path::new)
         .map(|path| set_selected_audio_path(&app, path.to_path_buf()))
-        .transpose()
+        .transpose()?;
+    #[cfg(target_os = "android")]
+    if let Some(audio) = &audio {
+        cache_android_recorded_waveform(&app, &status, audio);
+    }
+    Ok(audio)
 }
 
 #[tauri::command]
@@ -166,6 +171,7 @@ pub(crate) async fn stop_recording(app: AppHandle) -> Result<StopRecordingResult
             for path in [microphone, system].into_iter().flatten() {
                 let _ = std::fs::remove_file(path);
             }
+            cache_android_recorded_waveform(&app, &status, audio);
         }
         return Ok(StopRecordingResult { status, audio });
     }
@@ -529,7 +535,9 @@ pub(crate) fn select_recorded_audio(
     meeting_id: String,
 ) -> Result<SelectedAudioFile, String> {
     let path = recording::completed_recording_path(&app, &recording_id)?;
-    set_selected_audio_with_meeting(&app, path, meeting_id)
+    let selected = set_selected_audio_with_meeting(&app, path, meeting_id)?;
+    schedule_selected_waveform(&app, &selected);
+    Ok(selected)
 }
 
 #[tauri::command]
@@ -574,7 +582,52 @@ pub(crate) fn recover_recording(
         recovered.microphone_track_path.as_deref(),
         recovered.system_track_path.as_deref(),
     )?;
+    schedule_selected_waveform(&app, &selected);
     Ok(selected)
+}
+
+fn schedule_selected_waveform(app: &AppHandle, selected: &SelectedAudioFile) {
+    if let Ok((audio_path, duration_ms)) =
+        crate::commands::transcribe::selected_audio_for_waveform(app, selected.meeting_id())
+    {
+        crate::audio_waveform::schedule_waveform_generation(
+            app,
+            selected.meeting_id(),
+            &audio_path,
+            duration_ms,
+        );
+    }
+}
+
+#[cfg(target_os = "android")]
+fn cache_android_recorded_waveform(
+    app: &AppHandle,
+    status: &RecordingStatus,
+    audio: &SelectedAudioFile,
+) {
+    let Some(waveform_path) = status.waveform_path.as_deref() else {
+        return;
+    };
+    let waveform_path = std::path::Path::new(waveform_path);
+    let cache_result = (|| {
+        let bytes = std::fs::read(waveform_path)
+            .map_err(|error| format!("Android録音波形を読み取れませんでした: {error}"))?;
+        let peaks: Vec<f32> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Android録音波形の形式が不正です: {error}"))?;
+        let (audio_path, duration_ms) =
+            crate::commands::transcribe::selected_audio_for_waveform(app, audio.meeting_id())?;
+        crate::audio_waveform::cache_external_recorded_waveform(
+            app,
+            audio.meeting_id(),
+            &audio_path,
+            duration_ms,
+            peaks,
+        )
+    })();
+    if let Err(error) = cache_result {
+        eprintln!("Could not cache Android recorded waveform: {error}");
+    }
+    let _ = std::fs::remove_file(waveform_path);
 }
 
 #[tauri::command]

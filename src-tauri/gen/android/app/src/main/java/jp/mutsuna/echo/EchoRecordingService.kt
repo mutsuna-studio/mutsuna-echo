@@ -13,6 +13,7 @@ import android.os.*
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDateTime
@@ -91,6 +92,7 @@ class EchoRecordingService : Service() {
     var systemWriter: AacFragmentWriter? = null
     var mixedWriter: AacFragmentWriter? = null
     var microphoneEnhancer: SonoraAudioEnhancer.Session? = null
+    val waveform = WaveformAccumulator()
     val startedAt = SystemClock.elapsedRealtime()
     try {
       if (microphoneEnabled) {
@@ -142,7 +144,10 @@ class EchoRecordingService : Service() {
           val limited = if (abs(sum) <= 0.95f) sum else kotlin.math.sign(sum) * (0.95f + 0.05f * kotlin.math.tanh(((abs(sum) - 0.95f) / 0.05f).toDouble()).toFloat())
           (limited * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
         }
-        if (mixed.isNotEmpty()) mixedWriter.write(mixed)
+        if (mixed.isNotEmpty()) {
+          mixedWriter.write(mixed)
+          waveform.accept(mixed)
+        }
         RecordingBridge.update {
           put("elapsedMs", elapsed)
           put("microphoneLevel", if (micRead > 0) peak(micBuffer, micRead) else 0.0)
@@ -161,6 +166,7 @@ class EchoRecordingService : Service() {
       if (enhancedTail.isNotEmpty()) {
         micWriter?.write(enhancedTail)
         mixedWriter.write(enhancedTail)
+        waveform.accept(enhancedTail)
       }
       micWriter?.close(); micWriter = null
       mixedWriter.close(); mixedWriter = null
@@ -179,6 +185,7 @@ class EchoRecordingService : Service() {
           M4aFinalizer.finalize(systemFile, it)
         } else null
         publishToMusic(cacheOutput, name)
+        val waveformFile = writeWaveform(sessionId, waveform.finish(512))
         session.deleteRecursively()
         RecordingBridge.update {
           put("phase", "completed")
@@ -186,6 +193,7 @@ class EchoRecordingService : Service() {
           put("outputPath", cacheOutput.absolutePath)
           put("microphoneTrackPath", finalizedMic?.absolutePath ?: JSONObject.NULL)
           put("systemTrackPath", finalizedSystem?.absolutePath ?: JSONObject.NULL)
+          put("waveformPath", waveformFile.absolutePath)
           put("stopReason", if (SystemClock.elapsedRealtime() - startedAt >= MAX_DURATION_MS) "durationLimit" else "user")
         }
       }
@@ -196,6 +204,7 @@ class EchoRecordingService : Service() {
         if (enhancedTail.isNotEmpty()) {
           micWriter?.write(enhancedTail)
           mixedWriter?.write(enhancedTail)
+          waveform.accept(enhancedTail)
         }
       } catch (_: Throwable) {}
       try { micWriter?.close() } catch (_: Throwable) {}
@@ -214,11 +223,13 @@ class EchoRecordingService : Service() {
             M4aFinalizer.finalize(systemFile, it)
           } else null
           publishToMusic(output, output.name); session.deleteRecursively()
+          val waveformFile = writeWaveform(sessionId, waveform.finish(512))
           RecordingBridge.update {
             put("phase", "completed"); put("elapsedMs", SystemClock.elapsedRealtime() - startedAt)
             put("outputPath", output.absolutePath)
             put("microphoneTrackPath", finalizedMic?.absolutePath ?: JSONObject.NULL)
             put("systemTrackPath", finalizedSystem?.absolutePath ?: JSONObject.NULL)
+            put("waveformPath", waveformFile.absolutePath)
             put("stopReason", "captureError")
             put("error", error.message ?: "音声の取得が停止したため、途中までの録音を保存しました。")
           }
@@ -255,6 +266,71 @@ class EchoRecordingService : Service() {
   private fun bufferBytes() = max(FRAMES_PER_CHUNK * 4, AudioRecord.getMinBufferSize(48_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT))
   private fun readExact(record: AudioRecord, buffer: ShortArray): Int = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
   private fun peak(samples: ShortArray, count: Int): Double = (0 until count).maxOfOrNull { abs(samples[it].toInt()) }?.div(32768.0) ?: 0.0
+
+  private class WaveformAccumulator {
+    private val values = FloatArray(360_000)
+    private var valueCount = 0
+    private var sumSquares = 0.0
+    private var transient = 0f
+    private var sampleCount = 0
+
+    fun accept(samples: ShortArray) {
+      for (sample in samples) {
+        val amplitude = abs(sample.toInt()) / 32768f
+        sumSquares += amplitude * amplitude
+        transient = max(transient, amplitude)
+        sampleCount += 1
+        if (sampleCount >= 4_800) flush()
+      }
+    }
+
+    private fun flush() {
+      if (sampleCount == 0 || valueCount >= values.size) return
+      val rms = kotlin.math.sqrt(sumSquares / sampleCount).toFloat()
+      values[valueCount++] = rms * 0.85f + transient * 0.15f
+      sumSquares = 0.0
+      transient = 0f
+      sampleCount = 0
+    }
+
+    fun finish(points: Int): FloatArray {
+      flush()
+      if (valueCount == 0) return FloatArray(points)
+      val sums = FloatArray(points)
+      val maxima = FloatArray(points)
+      val counts = IntArray(points)
+      for (index in 0 until valueCount) {
+        val target = (index.toLong() * points / valueCount).toInt().coerceAtMost(points - 1)
+        sums[target] += values[index]
+        maxima[target] = max(maxima[target], values[index])
+        counts[target] += 1
+      }
+      val peaks = FloatArray(points) { index ->
+        if (counts[index] == 0) 0f else (sums[index] / counts[index]) * 0.85f + maxima[index] * 0.15f
+      }
+      val audible = peaks.filter { it > 0.001f }.sorted()
+      if (audible.isNotEmpty()) {
+        val reference = audible[((audible.size - 1) * 0.95f).toInt()].coerceAtLeast(0.05f)
+        for (index in peaks.indices) peaks[index] = kotlin.math.sqrt((peaks[index] / reference).coerceIn(0f, 1f))
+      }
+      return peaks
+    }
+  }
+
+  private fun writeWaveform(sessionId: String, peaks: FloatArray): File {
+    val directory = File(cacheDir, "recording-waveforms").apply { mkdirs() }
+    val output = File(directory, "$sessionId.json")
+    val temporary = File(directory, "$sessionId.tmp")
+    val array = JSONArray()
+    peaks.forEach { array.put(it.toDouble()) }
+    FileOutputStream(temporary).use { stream ->
+      stream.write(array.toString().toByteArray(Charsets.UTF_8))
+      stream.fd.sync()
+    }
+    if (output.exists()) output.delete()
+    if (!temporary.renameTo(output)) throw IllegalStateException("録音波形を保存できませんでした。")
+    return output
+  }
 
   private fun writeManifest(file: File, sessionId: String, startedAt: Long, mic: File, system: File, mixed: File, micOn: Boolean, systemOn: Boolean) {
     val elapsed = SystemClock.elapsedRealtime() - startedAt

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use super::{
-    audio_decode::decode_mono, context::TranscriptionContext, local_models, local_settings,
+    audio_decode, context::TranscriptionContext, local_models, local_settings,
     repair_inferred_token_ends, segments_from_tokens, vad, vad_models, vad_settings,
     TokenTimeSource, Transcript, TranscriptSegment, TranscriptToken,
 };
@@ -17,10 +17,13 @@ const ENCODER: &str = "encoder-epoch-99-avg-1.int8.onnx";
 const DECODER: &str = "decoder-epoch-99-avg-1.onnx";
 const JOINER: &str = "joiner-epoch-99-avg-1.int8.onnx";
 const TOKENS: &str = "tokens.txt";
+const VAD_PROGRESS_UNIT_MS: u64 = 1_000;
+const MAX_VAD_PROGRESS_UNITS: u32 = 100;
 
 pub(crate) fn transcribe(
     app: &tauri::AppHandle,
     audio_path: &Path,
+    audio_duration_ms: u64,
     model_id: &str,
     context: Option<&TranscriptionContext>,
 ) -> Result<Transcript, String> {
@@ -52,26 +55,19 @@ pub(crate) fn transcribe(
 
     let recognizer = OfflineRecognizer::create(&config)
         .ok_or_else(|| "ReazonSpeechの推論エンジンを初期化できませんでした。モデルを再インストールしてください。".to_string())?;
-    let (tokens, segments) = match vad_models::installed_model_path(app)? {
-        Some(vad_model) => {
-            let preset = vad_settings::current_preset(app)?;
-            transcribe_speech_regions(
-                app,
-                &recognizer,
-                audio_path,
-                &vad_model,
-                preset,
-                hotwords.as_deref(),
-            )?
-        }
-        None => {
-            publish_transcription_progress(
-                app,
-                TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
-            );
-            transcribe_full_audio(&recognizer, audio_path, hotwords.as_deref())?
-        }
-    };
+    let vad_model = vad_models::installed_model_path(app)?.ok_or_else(|| {
+        "文字起こしに必要なVADモデルがありません。設定から再インストールしてください。".to_string()
+    })?;
+    let preset = vad_settings::current_preset(app)?;
+    let (tokens, segments) = transcribe_speech_regions(
+        app,
+        &recognizer,
+        audio_path,
+        audio_duration_ms,
+        &vad_model,
+        preset,
+        hotwords.as_deref(),
+    )?;
     Ok(Transcript {
         provider: "local".into(),
         model: local_models::REAZONSPEECH_MODEL_ID.into(),
@@ -81,80 +77,123 @@ pub(crate) fn transcribe(
     })
 }
 
-fn transcribe_full_audio(
-    recognizer: &OfflineRecognizer,
-    audio_path: &Path,
-    hotwords: Option<&str>,
-) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
-    let stream = create_stream(recognizer, hotwords);
-    let duration_ms = decode_mono(audio_path, |sample_rate, samples| {
-        stream.accept_waveform(sample_rate as i32, samples);
-        Ok(())
-    })?;
-    recognizer.decode(&stream);
-    let result = stream
-        .get_result()
-        .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
-    Ok(normalize_result(&result, duration_ms, 0))
-}
-
 fn transcribe_speech_regions(
     app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,
     audio_path: &Path,
+    audio_duration_ms: u64,
     vad_model: &Path,
     preset: vad_settings::VadPreset,
     hotwords: Option<&str>,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
+    let total_vad_units = vad_total_units(audio_duration_ms);
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(TranscriptionStage::DetectingSpeech, 0, None),
+        TranscriptionProgress::new(
+            TranscriptionStage::DetectingSpeech,
+            0,
+            Some(total_vad_units),
+        ),
     );
-    let mut total_chunks = 0u32;
-    let audio_duration_ms = vad::visit_speech_regions(audio_path, vad_model, preset, |_| {
-        total_chunks = total_chunks.saturating_add(1);
-        Ok(())
-    })?;
+    let mut published_vad_units = 0u32;
+    let (decoded_duration_ms, regions) =
+        vad::visit_speech_regions(audio_path, vad_model, preset, |processed_ms| {
+            let completed = vad_completed_units(processed_ms, audio_duration_ms, total_vad_units);
+            if completed > published_vad_units {
+                published_vad_units = completed;
+                publish_transcription_progress(
+                    app,
+                    TranscriptionProgress::new(
+                        TranscriptionStage::DetectingSpeech,
+                        completed,
+                        Some(total_vad_units),
+                    ),
+                );
+            }
+            Ok(())
+        })?;
+    let total_chunks = u32::try_from(regions.len()).unwrap_or(u32::MAX);
+    if published_vad_units < total_vad_units {
+        publish_transcription_progress(
+            app,
+            TranscriptionProgress::new(
+                TranscriptionStage::DetectingSpeech,
+                total_vad_units,
+                Some(total_vad_units),
+            ),
+        );
+    }
     publish_transcription_progress(
         app,
         TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, Some(total_chunks)),
     );
+    if total_chunks == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
 
     let mut tokens = Vec::new();
     let mut completed_chunks = 0u32;
-    vad::visit_speech_regions(audio_path, vad_model, preset, |region| {
-        let stream = create_stream(recognizer, hotwords);
-        stream.accept_waveform(vad::SAMPLE_RATE as i32, &region.samples);
-        recognizer.decode(&stream);
-        let result = stream
-            .get_result()
-            .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
-        let (mut region_tokens, _) =
-            normalize_result(&result, region.duration_ms(), region.start_ms);
-        // Padded windows overlap by design. Keep only tokens whose midpoint
-        // belongs to the original VAD region, retaining boundary context for
-        // recognition without duplicating transcript text.
-        region_tokens.retain(|token| {
-            let start = token.start_ms.unwrap_or(region.speech_start_ms);
-            let end = token.end_ms.unwrap_or(start);
-            let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
-            midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
-        });
-        tokens.append(&mut region_tokens);
-        completed_chunks = completed_chunks.saturating_add(1);
-        publish_transcription_progress(
-            app,
-            TranscriptionProgress::new(
-                TranscriptionStage::Transcribing,
-                completed_chunks,
-                Some(total_chunks),
-            ),
-        );
-        Ok(())
-    })?;
-    repair_inferred_token_ends(&mut tokens, Some(audio_duration_ms));
+    let windows = regions
+        .iter()
+        .map(|region| (region.start_ms, region.duration_ms()))
+        .collect::<Vec<_>>();
+    audio_decode::decode_mono_regions(
+        audio_path,
+        &windows,
+        |region_index, sample_rate, samples| {
+            let region = regions
+                .get(region_index)
+                .ok_or_else(|| "VAD区間の対応関係が不正です。".to_string())?;
+            let region_samples = vad::resample_mono(sample_rate, samples);
+            let stream = create_stream(recognizer, hotwords);
+            stream.accept_waveform(vad::SAMPLE_RATE as i32, &region_samples);
+            recognizer.decode(&stream);
+            let result = stream.get_result().ok_or_else(|| {
+                "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string()
+            })?;
+            let (mut region_tokens, _) =
+                normalize_result(&result, region.duration_ms(), region.start_ms);
+            // Padded windows overlap by design. Keep only tokens whose midpoint
+            // belongs to the original VAD region, retaining boundary context for
+            // recognition without duplicating transcript text.
+            region_tokens.retain(|token| {
+                let start = token.start_ms.unwrap_or(region.speech_start_ms);
+                let end = token.end_ms.unwrap_or(start);
+                let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
+                midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
+            });
+            tokens.append(&mut region_tokens);
+            completed_chunks = completed_chunks.saturating_add(1);
+            publish_transcription_progress(
+                app,
+                TranscriptionProgress::new(
+                    TranscriptionStage::Transcribing,
+                    completed_chunks,
+                    Some(total_chunks),
+                ),
+            );
+            Ok(())
+        },
+    )?;
+    repair_inferred_token_ends(&mut tokens, Some(decoded_duration_ms));
     let segments = segments_from_tokens(&tokens);
     Ok((tokens, segments))
+}
+
+fn vad_total_units(duration_ms: u64) -> u32 {
+    (duration_ms
+        .saturating_add(VAD_PROGRESS_UNIT_MS - 1)
+        .saturating_div(VAD_PROGRESS_UNIT_MS)
+        .min(MAX_VAD_PROGRESS_UNITS as u64) as u32)
+        .max(1)
+}
+
+fn vad_completed_units(processed_ms: u64, duration_ms: u64, total_units: u32) -> u32 {
+    if duration_ms == 0 {
+        return total_units;
+    }
+    ((processed_ms as u128 * total_units as u128) / duration_ms as u128).min(total_units as u128)
+        as u32
 }
 
 fn create_stream(
@@ -329,7 +368,7 @@ fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_result, tokenize_hotword};
+    use super::{normalize_result, tokenize_hotword, vad_completed_units, vad_total_units};
     use sherpa_onnx::OfflineRecognizerResult;
 
     #[test]
@@ -395,5 +434,16 @@ mod tests {
             Some(vec!["Mutsuna".into(), "Echo".into()])
         );
         assert_eq!(tokenize_hotword("未登録", &vocabulary), None);
+    }
+
+    #[test]
+    fn vad_progress_is_bounded_and_proportional() {
+        assert_eq!(vad_total_units(0), 1);
+        assert_eq!(vad_total_units(1_000), 1);
+        assert_eq!(vad_total_units(5_500), 6);
+        assert_eq!(vad_total_units(3_829_000), 100);
+        assert_eq!(vad_completed_units(0, 3_829_000, 100), 0);
+        assert_eq!(vad_completed_units(1_914_500, 3_829_000, 100), 50);
+        assert_eq!(vad_completed_units(3_829_000, 3_829_000, 100), 100);
     }
 }

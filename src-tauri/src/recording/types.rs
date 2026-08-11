@@ -97,6 +97,9 @@ pub struct RecordingStatus {
     pub microphone_track_path: Option<String>,
     #[serde(default)]
     pub system_track_path: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub waveform_path: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub warning: Option<String>,
     pub error: Option<String>,
@@ -116,6 +119,7 @@ impl Default for RecordingStatus {
             output_path: None,
             microphone_track_path: None,
             system_track_path: None,
+            waveform_path: None,
             stop_reason: None,
             warning: None,
             error: None,

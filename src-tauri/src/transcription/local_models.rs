@@ -187,7 +187,10 @@ pub(crate) async fn download_local_stt_model(
     }
     let _guard = DownloadGuard::acquire()?;
     download_reazonspeech(&app).await?;
-    super::vad_models::download_local_vad_model(app).await
+    if let Err(error) = super::vad_models::download_local_vad_model(app).await {
+        eprintln!("ReazonSpeechの導入後にSilero VADを追加できませんでした: {error}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -240,7 +243,9 @@ async fn download_reazonspeech(app: &AppHandle) -> Result<(), String> {
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
-    result
+    result?;
+    emit_progress(app, total_download_bytes(), total_download_bytes());
+    Ok(())
 }
 
 fn install_downloaded_model(

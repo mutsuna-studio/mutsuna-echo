@@ -300,7 +300,7 @@
     return [...new Set(terms)];
   });
   const contextSurchargeActive = $derived(
-    transcriptionProvider === "elevenlabs" && effectiveContextTerms.length > 0
+    transcriptionProvider === "elevenlabs" && currentProvider?.ready === true && effectiveContextTerms.length > 0
   );
   const hasApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "elevenlabs")?.configured ?? false
@@ -1165,6 +1165,7 @@
       );
       if (!status.installed && !status.downloading && status.runtimeSupported) {
         await invoke("download_local_vad_model");
+        await refreshProviders();
       }
     } catch (error) {
       console.warn("Could not install the standard VAD model", error);

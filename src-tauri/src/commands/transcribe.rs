@@ -181,6 +181,10 @@ pub(crate) fn validate_audio_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn audio_duration_ms(path: &Path) -> Result<u64, String> {
+    inspect_audio(path).map(|audio| audio.duration_ms)
+}
+
 pub(crate) fn set_selected_audio_path(
     app: &AppHandle,
     path: PathBuf,
@@ -674,12 +678,22 @@ pub(crate) async fn select_audio_file(app: AppHandle) -> Result<Option<SelectedA
     };
 
     let path = selected_file_path(selected)?;
+    let selection_app = app.clone();
     let selected =
-        tauri::async_runtime::spawn_blocking(move || set_selected_audio_path(&app, path))
+        tauri::async_runtime::spawn_blocking(move || set_selected_audio_path(&selection_app, path))
             .await
             .map_err(|error| {
                 format!("音声ファイルのMeeting情報を準備できませんでした: {error}")
             })??;
+    if let Ok((audio_path, duration_ms)) = selected_audio_for_waveform(&app, selected.meeting_id())
+    {
+        crate::audio_waveform::schedule_waveform_generation(
+            &app,
+            selected.meeting_id(),
+            &audio_path,
+            duration_ms,
+        );
+    }
     Ok(Some(selected))
 }
 
@@ -744,6 +758,7 @@ pub(crate) async fn transcribe_selected_audio(
         &app,
         &selected.descriptor.meeting_id,
         &selected.path,
+        selected.descriptor.duration_ms,
         request.provider,
         request.model_id.as_deref(),
         context.as_ref(),

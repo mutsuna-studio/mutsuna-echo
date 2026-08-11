@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::time::{Duration, Instant};
 
 pub(crate) const SILERO_VAD_MODEL_ID: &str = "silero-vad";
 const MODEL_FILE: &str = "silero_vad.onnx";
@@ -18,6 +19,7 @@ const MODEL_URL: &str =
 const MODEL_SIZE: u64 = 2_313_101;
 const MODEL_SHA256: &str = "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396";
 const DOWNLOAD_EVENT: &str = "local-vad-model-download-progress";
+const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -89,13 +91,13 @@ pub(crate) fn get_local_vad_model_status(app: AppHandle) -> Result<VadModelStatu
         size_bytes: MODEL_SIZE,
         installed: installed_model_path(&app).is_ok_and(|path| path.is_some()),
         downloading: DOWNLOAD_ACTIVE.load(Ordering::Acquire),
-        runtime_supported: cfg!(desktop),
+        runtime_supported: cfg!(any(desktop, target_os = "android")),
     })
 }
 
 #[tauri::command]
 pub(crate) async fn download_local_vad_model(app: AppHandle) -> Result<(), String> {
-    if !cfg!(desktop) {
+    if !cfg!(any(desktop, target_os = "android")) {
         return Err("このOS向けのVAD推論エンジンは準備中です。".into());
     }
     let _guard = DownloadGuard::acquire()?;
@@ -120,6 +122,29 @@ pub(crate) async fn download_local_vad_model(app: AppHandle) -> Result<(), Strin
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+pub(crate) async fn ensure_installed(app: &AppHandle) -> Result<PathBuf, String> {
+    let deadline = Instant::now() + INSTALL_WAIT_TIMEOUT;
+    loop {
+        if let Ok(Some(path)) = installed_model_path(app) {
+            return Ok(path);
+        }
+        if !DOWNLOAD_ACTIVE.load(Ordering::Acquire) {
+            match download_local_vad_model(app.clone()).await {
+                Ok(()) => continue,
+                Err(error) if error.contains("ダウンロード中") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "VADモデルの準備に時間がかかっています。通信状態を確認して再試行してください。"
+                    .into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tauri::command]

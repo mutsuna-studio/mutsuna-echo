@@ -39,6 +39,7 @@ pub(crate) async fn transcribe(
     app: &AppHandle,
     meeting_id: &str,
     audio_path: &Path,
+    audio_duration_ms: u64,
     provider: TranscriptionProvider,
     model_id: Option<&str>,
     context: Option<&context::TranscriptionContext>,
@@ -52,12 +53,22 @@ pub(crate) async fn transcribe(
         sources.push((path, RecordingChannel::System));
     }
     if sources.is_empty() {
-        return transcribe_one(app, audio_path, provider, model_id, context).await;
+        return transcribe_one(
+            app,
+            audio_path,
+            audio_duration_ms,
+            provider,
+            model_id,
+            context,
+        )
+        .await;
     }
 
     let mut outcomes = Vec::with_capacity(sources.len());
     for (path, channel) in sources {
-        let mut outcome = transcribe_one(app, &path, provider, model_id, context).await?;
+        let duration_ms = crate::commands::transcribe::audio_duration_ms(&path)?;
+        let mut outcome =
+            transcribe_one(app, &path, duration_ms, provider, model_id, context).await?;
         label_channel(&mut outcome.transcript, channel);
         outcomes.push(outcome);
     }
@@ -73,6 +84,7 @@ enum RecordingChannel {
 async fn transcribe_one(
     app: &AppHandle,
     audio_path: &Path,
+    audio_duration_ms: u64,
     provider: TranscriptionProvider,
     model_id: Option<&str>,
     context: Option<&context::TranscriptionContext>,
@@ -105,6 +117,9 @@ async fn transcribe_one(
                     .find(|model| model.model_id == local_models::REAZONSPEECH_MODEL_ID),
             }
             .ok_or_else(|| "選択したローカルSTTモデルがインストールされていません。".to_string())?;
+            vad_models::ensure_installed(app).await.map_err(|error| {
+                format!("文字起こしに必要なVADモデルを準備できませんでした: {error}")
+            })?;
             #[cfg(any(desktop, target_os = "android"))]
             {
                 let app = app.clone();
@@ -112,7 +127,13 @@ async fn transcribe_one(
                 let model_id = model.model_id.clone();
                 let context = context.cloned();
                 let transcript = tauri::async_runtime::spawn_blocking(move || {
-                    local::transcribe(&app, &audio_path, &model_id, context.as_ref())
+                    local::transcribe(
+                        &app,
+                        &audio_path,
+                        audio_duration_ms,
+                        &model_id,
+                        context.as_ref(),
+                    )
                 })
                 .await
                 .map_err(|error| {

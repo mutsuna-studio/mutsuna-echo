@@ -94,7 +94,17 @@
         unlisten = await listen<LocalSttModelDownloadProgress>(
           "local-stt-model-download-progress",
           ({ payload }) => {
-            if (!cancelled) progress = payload;
+            if (!cancelled) {
+              progress = payload;
+              if (payload.totalBytes > 0 && payload.downloadedBytes >= payload.totalBytes) {
+                window.setTimeout(() => {
+                  if (!cancelled) void (async () => {
+                    await refresh();
+                    await onChanged();
+                  })().catch((error) => onError(errorText(error)));
+                }, 300);
+              }
+            }
           }
         );
         const unlistenVad = await listen<LocalSttModelDownloadProgress>(
@@ -162,7 +172,10 @@
     } finally {
       working = false;
       progress = null;
-      try { await refresh(); } catch { /* 次回表示時に再取得する */ }
+      try {
+        await refresh();
+        await onChanged();
+      } catch { /* 次回表示時に再取得する */ }
     }
   }
 
@@ -196,6 +209,7 @@
     try {
       await invoke("download_local_vad_model");
       await refresh();
+      await onChanged();
       onMessage(automatic
         ? "音声のない部分を見つける機能を追加しました。"
         : "音声のない部分を見つける機能を追加しました。次回の文字起こしから処理時間を短くします。");
