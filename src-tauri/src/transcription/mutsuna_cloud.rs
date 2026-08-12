@@ -196,6 +196,39 @@ async fn require_success_json<T: DeserializeOwned>(
     bounded_json(response, action).await
 }
 
+async fn start_job(
+    session: &crate::mutsuna_cloud::MutsunaCloudSession,
+    job_id: &str,
+    idempotency_key: &str,
+) -> Result<bool, String> {
+    let request = session
+        .request(
+            reqwest::Method::POST,
+            session.endpoint(&format!("/v1/jobs/{job_id}/start"))?,
+        )?
+        .header("Idempotency-Key", idempotency_key)
+        .json(&serde_json::json!({}));
+    let response = match session.send_idempotent(request).await {
+        Ok(response) => response,
+        // The server may have committed before the response was lost. The
+        // caller reconciles with GET /jobs/:id rather than starting a new job.
+        Err(_) => return Ok(false),
+    };
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || response.status().is_server_error()
+    {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        return Err(crate::mutsuna_cloud::api_status_error(
+            response.status(),
+            "文字起こし開始",
+        ));
+    }
+    let _: serde_json::Value = bounded_json(response, "文字起こし開始").await?;
+    Ok(true)
+}
+
 fn normalize_result(response: JobResultResponse) -> Result<Transcript, String> {
     if response.model != MODEL_ID
         || response.result.duration_ms > MAX_AUDIO_DURATION_MS
@@ -287,8 +320,11 @@ async fn transcribe_inner(
             "language": "ja-JP",
             "tracks": [{ "id": "mixed", "kind": "mixed" }]
         }));
-    let created: CreateJobResponse =
-        require_success_json(session.send(create_request).await?, "文字起こしジョブ作成").await?;
+    let created: CreateJobResponse = require_success_json(
+        session.send_idempotent(create_request).await?,
+        "文字起こしジョブ作成",
+    )
+    .await?;
     if created.job_id.is_empty() || created.uploads.len() != 1 {
         return Err("Mutsuna Cloudからアップロード先を受け取れませんでした。".into());
     }
@@ -316,7 +352,7 @@ async fn transcribe_inner(
         .header("X-Content-SHA256", content_sha256)
         .timeout(UPLOAD_TIMEOUT)
         .body(audio);
-    let uploaded = session.send(upload_request).await?;
+    let uploaded = session.send_idempotent(upload_request).await?;
     if !uploaded.status().is_success() {
         return Err(crate::mutsuna_cloud::api_status_error(
             uploaded.status(),
@@ -324,24 +360,11 @@ async fn transcribe_inner(
         ));
     }
 
-    let start_request = session
-        .request(
-            reqwest::Method::POST,
-            session.endpoint(&format!("/v1/jobs/{}/start", created.job_id))?,
-        )?
-        .header(
-            "Idempotency-Key",
-            crate::mutsuna_cloud::new_idempotency_key("start-job"),
-        )
-        .json(&serde_json::json!({}));
-    let started = session.send(start_request).await?;
-    if !started.status().is_success() {
-        return Err(crate::mutsuna_cloud::api_status_error(
-            started.status(),
-            "文字起こし開始",
-        ));
-    }
-    let _: serde_json::Value = bounded_json(started, "文字起こし開始").await?;
+    let start_idempotency_key = crate::mutsuna_cloud::new_idempotency_key("start-job");
+    // A false result is intentionally not fatal: it means the response is
+    // uncertain, so the status loop below determines whether the same frozen
+    // start request must be replayed.
+    let _ = start_job(&session, &created.job_id, &start_idempotency_key).await?;
 
     let polling_started = Instant::now();
     loop {
@@ -353,9 +376,21 @@ async fn transcribe_inner(
             reqwest::Method::GET,
             session.endpoint(&format!("/v1/jobs/{}", created.job_id))?,
         )?;
+        let status_response = match session.send(status_request).await {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        if status_response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status_response.status().is_server_error()
+        {
+            continue;
+        }
         let status: JobStatusResponse =
-            require_success_json(session.send(status_request).await?, "文字起こし状態確認").await?;
+            require_success_json(status_response, "文字起こし状態確認").await?;
         match status.status.as_str() {
+            "ready" => {
+                let _ = start_job(&session, &created.job_id, &start_idempotency_key).await?;
+            }
             "queued" | "processing" => {
                 let remote = status.progress_percent.unwrap_or(0).min(99);
                 let completed = 2 + u32::from(remote >= 50);
@@ -387,12 +422,30 @@ async fn transcribe_inner(
         }
     }
 
-    let result_request = session.request(
-        reqwest::Method::GET,
-        session.endpoint(&format!("/v1/jobs/{}/result", created.job_id))?,
-    )?;
-    let result: JobResultResponse =
-        require_success_json(session.send(result_request).await?, "文字起こし結果取得").await?;
+    let result_started = Instant::now();
+    let result: JobResultResponse = loop {
+        if result_started.elapsed() >= Duration::from_secs(60) {
+            return Err("Mutsuna Cloudの文字起こし結果を取得できませんでした。".into());
+        }
+        let result_request = session.request(
+            reqwest::Method::GET,
+            session.endpoint(&format!("/v1/jobs/{}/result", created.job_id))?,
+        )?;
+        let result_response = match session.send(result_request).await {
+            Ok(response) => response,
+            Err(_) => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        if result_response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || result_response.status().is_server_error()
+        {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+        break require_success_json(result_response, "文字起こし結果取得").await?;
+    };
     publish_transcription_progress(
         app,
         TranscriptionProgress::new(TranscriptionStage::Transcribing, 4, Some(4)),

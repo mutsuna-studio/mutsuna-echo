@@ -11,6 +11,7 @@ use crate::credentials::CredentialId;
 const DEFAULT_API_BASE_URL: &str = "https://cloud.mutsuna.jp";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const IDEMPOTENT_REQUEST_ATTEMPTS: usize = 3;
 const DEVICE_FLOW_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 const ACCESS_TOKEN_MIN_LENGTH: usize = 16;
 const ACCESS_TOKEN_MAX_LENGTH: usize = 4_096;
@@ -191,6 +192,42 @@ impl MutsunaCloudSession {
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, String> {
         request.send().await.map_err(map_network_error)
+    }
+
+    /// Retries a request whose replay semantics are already safe (a frozen
+    /// idempotency key or a conditional content upload). `try_clone` preserves
+    /// the exact headers/body, so a lost response cannot become a second
+    /// logical server mutation.
+    pub(crate) async fn send_idempotent(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        let mut next = request;
+        for attempt in 0..IDEMPOTENT_REQUEST_ATTEMPTS {
+            let retry = next.try_clone();
+            match next.send().await {
+                Ok(response)
+                    if attempt + 1 < IDEMPOTENT_REQUEST_ATTEMPTS
+                        && (response.status() == StatusCode::TOO_MANY_REQUESTS
+                            || response.status().is_server_error()) =>
+                {
+                    let Some(cloned) = retry else {
+                        return Ok(response);
+                    };
+                    next = cloned;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if attempt + 1 < IDEMPOTENT_REQUEST_ATTEMPTS => {
+                    let Some(cloned) = retry else {
+                        return Err(map_network_error(error));
+                    };
+                    next = cloned;
+                }
+                Err(error) => return Err(map_network_error(error)),
+            }
+            tokio::time::sleep(Duration::from_millis(250 * (attempt as u64 + 1))).await;
+        }
+        Err("Mutsuna Cloudとの通信を再試行できませんでした。".into())
     }
 }
 
@@ -644,7 +681,7 @@ pub(crate) async fn purchase_mutsuna_cloud_credits(app: AppHandle) -> Result<(),
         )?
         .header("Idempotency-Key", new_idempotency_key("purchase"))
         .json(&serde_json::json!({ "offerId": PREPAID_CREDIT_OFFER_ID }));
-    let response = session.send(request).await?;
+    let response = session.send_idempotent(request).await?;
     if !response.status().is_success() {
         return Err(api_status_error(response.status(), "購入画面の作成"));
     }
@@ -901,5 +938,51 @@ mod tests {
         let uuid = key.strip_prefix("purchase-").expect("key prefix");
         assert!(uuid::Uuid::parse_str(uuid).is_ok());
         assert!(key.len() >= 16 && key.len() <= 128);
+    }
+
+    #[test]
+    fn idempotent_requests_replay_the_exact_key_after_a_lost_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("retry server");
+        let address = listener.local_addr().expect("retry address");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().expect("retry request");
+                let mut request = [0_u8; 4_096];
+                let read = stream.read(&mut request).expect("read retry request");
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                if attempt == 1 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    )
+                    .expect("retry response");
+                }
+            }
+            requests
+        });
+        let base_url = Url::parse(&format!("http://{address}")).expect("retry base URL");
+        let session = MutsunaCloudSession {
+            client: http_client().expect("client"),
+            base_url: base_url.clone(),
+            access_token: SecretString::from("synthetic-access-token-1234".to_string()),
+        };
+        let request = session
+            .request(
+                reqwest::Method::POST,
+                base_url.join("/idempotent").expect("retry URL"),
+            )
+            .expect("same origin")
+            .header("Idempotency-Key", "synthetic-retry-key-0001")
+            .json(&serde_json::json!({ "operation": "synthetic" }));
+        let response = tauri::async_runtime::block_on(session.send_idempotent(request))
+            .expect("retry response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = server.join().expect("retry server join");
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert!(request.contains("idempotency-key: synthetic-retry-key-0001"));
+            assert!(request.contains(r#"{"operation":"synthetic"}"#));
+        }
     }
 }
