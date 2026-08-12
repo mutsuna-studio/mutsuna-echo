@@ -154,6 +154,7 @@ pub fn run() {
             commands::recording::reveal_recorded_audio,
             commands::recording::reveal_meeting_audio,
             commands::recording::rename_meeting_audio,
+            commands::recording::rename_meeting_audio_to_generated_title,
             commands::recording::recover_recording,
             commands::recording::discard_recording,
             #[cfg(desktop)]

@@ -12,6 +12,16 @@
   import { AdminShellFrame } from "@mutsuna/ui/admin-shell-frame";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
   import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
+  import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle
+  } from "@mutsuna/ui/alert-dialog";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import Settings from "@lucide/svelte/icons/settings";
@@ -111,6 +121,7 @@
   };
   type ContextDraft = { background: string; termsText: string; correctionsText: string };
   type MeetingContextDraft = ContextDraft & { useGlobal: boolean };
+  type GeneratedNameProposal = { meetingId: string; title: string };
 
   function termsFromText(value: string): string[] {
     return [...new Set(value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean))];
@@ -224,6 +235,9 @@
   let summaryAttempt = $state.raw<GenerationAttemptSummary | null>(null);
   let summaryGenerating = $state(false);
   let summaryProgress = $state.raw<SummaryProgress | null>(null);
+  let generatedNameProposal = $state.raw<GeneratedNameProposal | null>(null);
+  let generatedNameDialogOpen = $state(false);
+  let generatedNameBusy = $state(false);
   let transcriptFormatting = $state(false);
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
   let transcript = $state.raw<EditableTranscript | null>(null);
@@ -1195,11 +1209,42 @@
     }
   }
 
-  async function refreshGeneratedMeetingName(meetingId: string) {
+  async function refreshGeneratedMeetingName(meetingId: string, document?: MeetingDocument | null) {
     await refreshMeetings();
     const meeting = meetings.find((candidate) => candidate.meetingId === meetingId);
     if (meeting && selectedAudio?.meetingId === meetingId && selectedAudio.name !== meeting.fileName) {
       selectedAudio = { ...selectedAudio, name: meeting.fileName };
+    }
+    if (!meeting || meeting.source !== "imported" || !document) return;
+    const qualityChecks = document.qualityChecks ?? [];
+    const qualityCheck = document.latestQualityCheckId
+      ? qualityChecks.find((check) => check.checkId === document.latestQualityCheckId)
+      : qualityChecks[qualityChecks.length - 1];
+    const title = qualityCheck?.title?.trim();
+    if (!title) return;
+    const currentStem = meeting.fileName.replace(/\.[^.]+$/, "");
+    if (currentStem === title) return;
+    generatedNameProposal = { meetingId, title };
+    generatedNameDialogOpen = true;
+  }
+
+  async function applyGeneratedMeetingName() {
+    const proposal = generatedNameProposal;
+    if (!proposal || generatedNameBusy) return;
+    generatedNameBusy = true;
+    try {
+      const fileName = await invoke<string>("rename_meeting_audio_to_generated_title", proposal);
+      if (selectedAudio?.meetingId === proposal.meetingId) {
+        selectedAudio = { ...selectedAudio, name: fileName };
+      }
+      generatedNameDialogOpen = false;
+      generatedNameProposal = null;
+      await refreshMeetings();
+      showSuccessToast("音声ファイル名を会議タイトルに変更しました。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      generatedNameBusy = false;
     }
   }
 
@@ -1510,6 +1555,8 @@
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
+    generatedNameDialogOpen = false;
+    generatedNameProposal = null;
     processingMeetingId = operationMeetingId;
     summaryAttempt = null;
     summaryProgress = null;
@@ -1524,7 +1571,7 @@
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
         meetingId: selectedMeetingId
       });
-      await refreshGeneratedMeetingName(operationMeetingId);
+      await refreshGeneratedMeetingName(operationMeetingId, summaryStatus);
       showSuccessToast("会議ノートを生成しました。");
     } catch (error) {
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
@@ -1553,7 +1600,7 @@
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
         meetingId: selectedMeetingId
       });
-      await refreshGeneratedMeetingName(selectedMeetingId);
+      await refreshGeneratedMeetingName(selectedMeetingId, summaryStatus);
       showSuccessToast("保存済みの生成結果を再検証しました。");
     } catch (error) {
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
@@ -2248,6 +2295,21 @@
       </div>
     </div>
   </AdminShellFrame>
+
+  <AlertDialog bind:open={generatedNameDialogOpen}>
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>音声ファイル名を更新しますか？</AlertDialogTitle>
+        <AlertDialogDescription>
+          会議ノートから「{generatedNameProposal?.title ?? ""}」というタイトルを生成しました。取り込んだ音声のファイル名にも反映できます。
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel disabled={generatedNameBusy} onclick={() => generatedNameProposal = null}>変更しない</AlertDialogCancel>
+        <AlertDialogAction disabled={generatedNameBusy} onclick={applyGeneratedMeetingName}>変更する</AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
 
   {#if OverlayPreviewControls}
     <div class="dev-preview-dock"><OverlayPreviewControls /></div>

@@ -470,28 +470,95 @@ pub(crate) fn rename_meeting_audio(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let current = crate::meeting_store::local_audio_path(&app, &meeting_id)?;
-        let extension = current
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("");
-        let new_file_name = validate_audio_file_name(&new_file_name, extension)?;
-        let destination = current.with_file_name(&new_file_name);
-        if destination.exists() {
-            return Err("同じ名前の音声ファイルがすでにあります。".into());
-        }
-        std::fs::rename(&current, &destination)
-            .map_err(|error| format!("音声ファイル名を変更できませんでした: {error}"))?;
-        if let Err(error) = crate::meeting_store::link_existing(&app, &meeting_id, &destination)
-            .and_then(|_| {
-                crate::meeting_store::rename_audio_metadata(&app, &meeting_id, &new_file_name)
-            })
-        {
-            let _ = std::fs::rename(&destination, &current);
-            return Err(error);
-        }
-        Ok(())
+        rename_linked_local_audio(&app, &meeting_id, &new_file_name)
     }
+}
+
+#[tauri::command]
+pub(crate) fn rename_meeting_audio_to_generated_title(
+    app: AppHandle,
+    meeting_id: String,
+    title: String,
+) -> Result<String, String> {
+    crate::meeting_store::validate_meeting_id(&meeting_id)?;
+    let stem = safe_generated_file_stem(&title)?;
+
+    #[cfg(target_os = "android")]
+    {
+        let recordings = recording::completed_recordings(&app)?;
+        if let Some(recording) = recordings.iter().find(|recording| {
+            recording::completed_recording_path(&app, &recording.id)
+                .ok()
+                .and_then(|path| crate::meeting_store::resolve_or_create(&app, &path).ok())
+                .as_deref()
+                == Some(meeting_id.as_str())
+        }) {
+            let existing = recordings
+                .iter()
+                .map(|recording| recording.file_name.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let new_file_name =
+                unique_generated_file_name(&stem, "m4a", |candidate| existing.contains(candidate));
+            recording::android::rename_completed_recording(&recording.id, &new_file_name)?;
+            crate::meeting_store::rename_audio_metadata(&app, &meeting_id, &new_file_name)?;
+            if let Ok(path) = recording::completed_recording_path(&app, &recording.id) {
+                crate::commands::transcribe::refresh_selected_audio_after_rename(
+                    &app,
+                    &meeting_id,
+                    path,
+                )?;
+            }
+            return Ok(new_file_name);
+        }
+    }
+
+    let current = crate::meeting_store::local_audio_path(&app, &meeting_id)?;
+    let extension = current
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "音声ファイルの拡張子を確認できませんでした。".to_string())?;
+    let new_file_name = unique_generated_file_name(&stem, extension, |candidate| {
+        current.with_file_name(candidate).exists()
+    });
+    rename_linked_local_audio(&app, &meeting_id, &new_file_name)?;
+    Ok(new_file_name)
+}
+
+fn rename_linked_local_audio(
+    app: &AppHandle,
+    meeting_id: &str,
+    new_file_name: &str,
+) -> Result<(), String> {
+    let current = crate::meeting_store::local_audio_path(app, meeting_id)?;
+    let extension = current
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let new_file_name = validate_audio_file_name(new_file_name, extension)?;
+    let destination = current.with_file_name(&new_file_name);
+    if destination == current {
+        return Ok(());
+    }
+    if destination.exists() {
+        return Err("同じ名前の音声ファイルがすでにあります。".into());
+    }
+    std::fs::rename(&current, &destination)
+        .map_err(|error| format!("音声ファイル名を変更できませんでした: {error}"))?;
+    if let Err(error) = crate::meeting_store::link_existing(app, meeting_id, &destination)
+        .and_then(|_| crate::meeting_store::rename_audio_metadata(app, meeting_id, &new_file_name))
+        .and_then(|_| {
+            crate::commands::transcribe::refresh_selected_audio_after_rename(
+                app,
+                meeting_id,
+                destination.clone(),
+            )
+        })
+    {
+        let _ = std::fs::rename(&destination, &current);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) fn rename_default_meeting_audio(
