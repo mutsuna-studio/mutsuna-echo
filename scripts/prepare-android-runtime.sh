@@ -28,10 +28,15 @@ if [[ ! -f "${ARCHIVE_PATH}" ]]; then
   mv "${ARCHIVE_PATH}.part" "${ARCHIVE_PATH}"
 fi
 
+api_headers=(
+  --header "Accept: application/vnd.github+json"
+  --header "X-GitHub-Api-Version: 2022-11-28"
+)
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  api_headers+=(--header "Authorization: Bearer ${GITHUB_TOKEN}")
+fi
 release_json="$(curl --fail --location --retry 5 --retry-all-errors \
-  --header "Accept: application/vnd.github+json" \
-  --header "X-GitHub-Api-Version: 2022-11-28" \
-  "${RELEASE_API}")"
+  "${api_headers[@]}" "${RELEASE_API}")"
 release_digest="$(printf '%s' "${release_json}" | node -e '
   const fs = require("node:fs");
   const archiveName = process.argv[1];

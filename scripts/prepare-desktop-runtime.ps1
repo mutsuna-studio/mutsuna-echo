@@ -29,7 +29,14 @@ if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
     Invoke-WebRequest -Uri $releaseUrl -OutFile "$archivePath.part"
     Move-Item -LiteralPath "$archivePath.part" -Destination $archivePath
 }
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/tags/v$version"
+$headers = @{
+    Accept = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+}
+if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+    $headers.Authorization = "Bearer $env:GITHUB_TOKEN"
+}
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/tags/v$version" -Headers $headers
 $asset = $release.assets | Where-Object { $_.name -eq $archiveName } | Select-Object -First 1
 if ($null -eq $asset -or $asset.digest -notmatch '^sha256:([0-9a-f]{64})$') {
     throw "GitHub did not return a SHA-256 digest for $archiveName."

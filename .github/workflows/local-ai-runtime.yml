@@ -41,10 +41,14 @@ jobs:
       - name: Prepare desktop libraries
         if: matrix.platform != 'android'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-desktop-runtime.ps1 -Platform '${{ matrix.platform }}' -OutputDirectory '${{ runner.temp }}/runtime'
       - name: Prepare Android libraries
         if: matrix.platform == 'android'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           bash scripts/prepare-android-runtime.sh arm64-v8a
           mkdir -p "$RUNNER_TEMP/runtime"
