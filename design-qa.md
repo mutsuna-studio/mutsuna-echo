@@ -1,45 +1,92 @@
-# Design QA
+# Design QA — UI redesign phase 3
 
-## Evidence
+## Comparison target
 
-- Visual source of truth: `C:\Users\taich.000\.codex\generated_images\019feed0-56cd-7d41-b80c-9ff0a981ab84\exec-903bd854-690d-4ba1-9ee7-0deaeacce831.png`
-- Android implementation capture: `E:\MutsunaJP\mutsuna-echo\.local-notes\unified-home-android-final-v3.png`
-- Side-by-side comparison: `E:\MutsunaJP\mutsuna-echo\.local-notes\design-qa-comparison.png`
-- Source dimensions: 1536 x 1024 px (desktop and mobile concept board)
-- Implementation dimensions: 1080 x 2424 px (Pixel 9a physical-device capture)
-- Compared state: Android, portrait, idle recording, system audio off, empty meeting list
-- Normalization note: the source is a composite concept board rather than a device-native viewport. The mobile concept column was cropped and compared at equal rendered height; no claim of pixel-identical scaling is made.
+- Source visual truth: `docs/ui-redesign/phase-0/selected-direction-desktop.png`
+- Implementation screenshot: `docs/ui-redesign/phase-3/phase-3-recording-area-1280x720.png`
+- Combined comparison: `docs/ui-redesign/phase-3/design-comparison.png`
+- Source pixels: 1487 x 1058.
+- Implementation pixels and CSS viewport: 1280 x 720 at device scale 1.
+- State: desktop home, idle recording, microphone on, system audio off,
+  populated synthetic meeting list.
 
-## Full-view comparison
+## Findings
 
-- Passed: one shared header contains the only `録音と会議` title.
-- Passed: recording options, file selection, and meeting list form one flat screen without card containers.
-- Passed: file selection is the first list item.
-- Passed: idle state does not show elapsed time.
-- Passed: the meeting-list fade communicates scrolling without covering the recording control.
-- Passed: the mobile recording control remains a full-width-diameter semicircle attached to the bottom edge.
+No actionable P0, P1, or P2 finding remains within the phase 3 recording-area
+scope.
 
-## Focused comparison
+## Full-view comparison evidence
 
-- Passed: the list-to-control transition follows the circle's curve instead of ending as a straight clipped line.
-- Passed: the recording control's shadow remains visible above the circle and is not clipped by the list overlay.
-- Passed: microphone and system-audio rows remain aligned without overlap.
-- Passed: the common content surface keeps its intended rounded top corners.
+- Layout and spacing: the recording state, live waveform, central action, and
+  three setting groups now follow the selected direction's vertical reading
+  order. Dividers connect the settings without introducing a generic card.
+- Fonts and typography: existing Noto Sans JP hierarchy remains intact; compact
+  status and control labels stay readable without competing with the main page
+  heading.
+- Colors and tokens: microphone teal, system cyan, silent gray, recording red,
+  the phase 1 gradient, and the amber orbit marker all use semantic tokens.
+- Image quality and assets: the waveform is a canvas rendering of supplied
+  recording levels, not decorative CSS art. Lucide icons remain sharp and
+  consistently stroked; there is no placeholder raster imagery.
+- Copy and content: ready, start, stop, device, and silence-stop labels describe
+  the existing recording workflow directly.
 
-## Iteration history
+## Focused region comparison evidence
 
-- Fixed P1: removed duplicate main-content title below the common header.
-- Fixed P1: moved the bottom fade behind the recording control after it obscured the semicircle.
-- Fixed P2: extended and softened the fade so the lower list edge no longer reads as a straight cut.
-- Fixed P1: added a safe default for `onBusyChange` to prevent the recording screen from crashing during component initialization or hot reload.
+- Spectrum: the desktop hero now reserves 24 logarithmic bands per source from
+  80Hz to 12kHz. Microphone occupies the left half and system audio the right;
+  both progress from low frequencies at the center to high frequencies outside.
+  The compact overlay retains its existing level-history data contract.
+- Primary action: the 82px central control is visually isolated by a quiet ring,
+  supports keyboard focus, and changes to the recording stop state.
+- Audio sources: microphone and system-audio toggles retain their native state,
+  device binding, level meter, and disabled behavior while using the approved
+  non-searchable `@mutsuna/ui` Select composition.
+- Silence stop: the VAD preset remains bound to the existing command and exposes
+  the unavailable/preparing messages already supported by the product.
 
-## Required surfaces
+## Responsive and interaction checks
 
-- Default state: verified on the physical Android device.
-- Empty state: verified; explanatory text appears without a redundant section heading.
-- Responsive/mobile state: verified at the physical-device capture size.
-- Loading/error state: no new visual treatment introduced by this change; existing shared handling remains in place.
+- The desktop composition has no horizontal overflow at the verified 1280px
+  viewport.
+- Desktop-only additions are hidden at the existing 600px recording breakpoint;
+  the established mobile source stack, expanded controls, and semicircle record
+  action remain the active composition.
+- Accessibility snapshot exposes the recording region/status, labelled record
+  action, two checkboxes, three labelled Select trigger buttons, and both level
+  meters. Open Selects expose their listbox choices without a text input.
+- Disabled system-audio selection remains visibly and semantically disabled.
+- Focus indicators, reduced-motion rules, and minimum mobile action sizes remain
+  present in the existing component styles.
 
-## Result
+## Comparison history
 
-Passed. No remaining P0, P1, or P2 visual mismatch was found in the requested mobile idle/empty state.
+- Initial phase 3 capture: `@mutsuna/ui` Select was used as a primitive root, so
+  device and VAD values were absent. Classified P1 because recording setup was
+  not understandable.
+- Fix: composed the library's standard trigger, content, and item primitives,
+  restoring full-width normal Selects without editable text fields.
+- Second capture: the hero waveform appended its own sample state repeatedly,
+  flattening all bars. Classified P1 because it misrepresented level history.
+- Fix: sample updates are now keyed only to new level/status input, preserving
+  genuine variation and preventing a reactive feedback loop.
+- Post-fix evidence: the regenerated combined comparison shows the real level
+  history, centered record action, and all three setting groups together.
+
+## Follow-up polish
+
+- P3: the selected concept includes more cyan waveform segments while system
+  audio is off. The implementation intentionally reflects actual enabled-source
+  data instead of introducing decorative system-audio samples.
+- Meeting list density and table metadata remain intentionally deferred to the
+  next phase and are not phase 3 acceptance findings.
+
+## Implementation checklist
+
+- Real-time per-source frequency spectrum introduced.
+- Central start/stop action implemented.
+- Device and VAD choices visibly restored with `@mutsuna/ui` 0.5.0.
+- Overlay and mobile recording layouts preserved.
+- Type check, production build, licenses, and combined visual QA passed.
+
+final result: pending user verification

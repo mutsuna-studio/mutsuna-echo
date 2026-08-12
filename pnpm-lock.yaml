@@ -11,12 +11,15 @@ importers:
       '@fontsource-variable/inter':
         specifier: 5.3.0
         version: 5.3.0
+      '@fontsource-variable/noto-sans-jp':
+        specifier: 5.3.0
+        version: 5.3.0
       '@lucide/svelte':
         specifier: 1.17.0
         version: 1.17.0(svelte@5.56.8)
       '@mutsuna/ui':
-        specifier: ^0.3.1
-        version: 0.3.1(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(tailwindcss@4.3.3)(typescript@5.6.3)
+        specifier: 0.5.0
+        version: 0.5.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(tailwindcss@4.3.3)(typescript@5.6.3)
       '@tauri-apps/api':
         specifier: ^2
         version: 2.11.1
@@ -261,6 +264,9 @@ packages:
   '@fontsource-variable/inter@5.3.0':
     resolution: {integrity: sha512-OupL48va4JNofb97w6NYeF9S7W/kHNKM0Er8Dem5nqi4jeOLrVJDoE8tZEpnMJmtkvNbB1EIPPwHcdkF6b1oUA==}
 
+  '@fontsource-variable/noto-sans-jp@5.3.0':
+    resolution: {integrity: sha512-XVL9GfGBRjj523v9w3Bctu4mNq7E5rUa+AMZm8DK1EM3LAGlKC3DZMvuqkLn4DB4TwwoAjcsJUCiRpUTDzzOkw==}
+
   '@hapi/hoek@9.3.0':
     resolution: {integrity: sha512-/c6rf4UJlmHlC9b5BaNvzAcFv7HZ2QHaV0D4/HNlBdvFnvQq8RI4kYdhyPCl7Xj+oWvTWQ8ujhqS53LIgAe6KQ==}
 
@@ -297,11 +303,6 @@ packages:
 
   '@lucide/svelte@1.17.0':
     resolution: {integrity: sha512-q06YCFBN5CO8cd1ADmLCxWRVMVb7xxvHzqC0lvNoxGa+FLW6Cd1Y1AOxgbQk4Iwe68vkAMCRveNHint4WoaVKg==}
-    peerDependencies:
-      svelte: ^5
-
-  '@lucide/svelte@1.29.0':
-    resolution: {integrity: sha512-qzpfzxG8WZiAnyjh1qaQCtG4MA5R6HOyvb3c+LezexgFf69ptBdK3PjvGYGCWHKgTIVZMsOU9fqfczjsZAJl0A==}
     peerDependencies:
       svelte: ^5
 
@@ -378,8 +379,8 @@ packages:
   '@milkdown/utils@7.22.0':
     resolution: {integrity: sha512-YnD+obHFsb0r8aO+BnFau8u8JmknKNX26jQjOAHa4RsX4NDw93wR7m6blvfnxqUpwu5W9swDWIc7n+2MCilMoA==}
 
-  '@mutsuna/ui@0.3.1':
-    resolution: {integrity: sha512-/cFcKhjXWPYOMDwr+R8aCsSA8lWl2A/bLrRIC0PuHZOd5B/BFFMrrigapvwlVIaCKC/kKfJNvxtfbXUIw9bcdw==}
+  '@mutsuna/ui@0.5.0':
+    resolution: {integrity: sha512-d6VxKC5NlL5p6ch9a4Bsn3dJ2wNcxYSGC9skKJ3H7EVSBBV2RNcru6lNJVgTMiA4A3JPatvOXScyfsm0x6BAiA==}
     engines: {node: '>=22.14.0'}
     peerDependencies:
       '@sveltejs/kit': '>=2.57.0 <3'
@@ -1819,6 +1820,8 @@ snapshots:
 
   '@fontsource-variable/inter@5.3.0': {}
 
+  '@fontsource-variable/noto-sans-jp@5.3.0': {}
+
   '@hapi/hoek@9.3.0':
     optional: true
 
@@ -1861,10 +1864,6 @@ snapshots:
       '@lezer/common': 1.5.2
 
   '@lucide/svelte@1.17.0(svelte@5.56.8)':
-    dependencies:
-      svelte: 5.56.8
-
-  '@lucide/svelte@1.29.0(svelte@5.56.8)':
     dependencies:
       svelte: 5.56.8
 
@@ -2127,11 +2126,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@mutsuna/ui@0.3.1(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(tailwindcss@4.3.3)(typescript@5.6.3)':
+  '@mutsuna/ui@0.5.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(tailwindcss@4.3.3)(typescript@5.6.3)':
     dependencies:
       '@fontsource-variable/inter': 5.3.0
       '@internationalized/date': 3.12.3
-      '@lucide/svelte': 1.29.0(svelte@5.56.8)
+      '@lucide/svelte': 1.17.0(svelte@5.56.8)
       '@milkdown/kit': 7.22.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.8)(typescript@5.6.3)
       '@tanstack/table-core': 8.21.3
       bits-ui: 2.18.1(@internationalized/date@3.12.3)(@sveltejs/kit@2.70.2(@sveltejs/vite-plugin-svelte@5.1.1(svelte@5.56.8)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)(typescript@5.6.3)(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)))(svelte@5.56.8)

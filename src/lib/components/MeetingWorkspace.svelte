@@ -18,6 +18,7 @@
     AlertDialogTitle
   } from "@mutsuna/ui/alert-dialog";
   import { Button } from "@mutsuna/ui/button";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import {
     DropdownMenu,
     DropdownMenuContent,
@@ -50,13 +51,20 @@
     ContextSaveState,
     LocalDiarizationProgress
   } from "../types/transcript";
-  import type { SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "../types/summary";
+  import type {
+    SummaryProgress,
+    SummaryProviderDefinition,
+    SummarySourceSelection,
+    SummaryStatus
+  } from "../types/summary";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
+  import SummarySourceSheet from "./SummarySourceSheet.svelte";
   import TranscriptView from "./TranscriptView.svelte";
   import TranscriptionContextEditor from "./TranscriptionContextEditor.svelte";
 
   type MeetingContextDraft = { background: string; termsText: string; correctionsText: string; useGlobal: boolean };
+  type SummarySourceState = { selection: SummarySourceSelection; returnFocus: HTMLButtonElement };
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
@@ -185,6 +193,7 @@
   let timelineFollowRequestId = $state(0);
   let detailContentElement = $state<HTMLElement | null>(null);
   let seekRequest = $state.raw<AudioSeekRequest | null>(null);
+  let summarySourceState = $state.raw<SummarySourceState | null>(null);
   let editingFileName = $state(false);
   let fileNameDraft = $state("");
   let fileNameInput = $state<HTMLInputElement | null>(null);
@@ -296,6 +305,7 @@
     }
   }
   const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
+  const selectedSummarySource = $derived(summarySourceState?.selection ?? null);
   const saveStatus = $derived.by(() => {
     if (!selectedRun) return "";
     if (saveState === "saving") return "保存中…";
@@ -368,6 +378,7 @@
     playbackPlaying = false;
     timelineFollowRequestId = 0;
     seekRequest = null;
+    summarySourceState = null;
     seekRequestId = 0;
     editingFileName = false;
   });
@@ -441,6 +452,28 @@
     timelineFollowRequestId += 1;
   }
 
+  function showTranscriptTab() {
+    detailTab = "transcript";
+  }
+
+  function showSummarySource(selection: SummarySourceSelection, trigger: HTMLButtonElement) {
+    summarySourceState = { selection, returnFocus: trigger };
+  }
+
+  async function closeSummarySource() {
+    const returnFocus = summarySourceState?.returnFocus ?? null;
+    summarySourceState = null;
+    await tick();
+    if (returnFocus?.isConnected) returnFocus.focus();
+  }
+
+  async function openSummarySourceInTranscript(positionMs: number) {
+    summarySourceState = null;
+    seekFromSummary(positionMs);
+    await tick();
+    document.getElementById("meeting-transcript-tab")?.focus();
+  }
+
   function handlePlaybackPosition(positionMs: number, followTimeline: boolean) {
     playbackPositionMs = positionMs;
     if (followTimeline) timelineFollowRequestId += 1;
@@ -481,11 +514,24 @@
 
     <div class="detail-tabs" role="tablist" aria-label="会議の表示内容">
       <button class:active={detailTab === "summary"} type="button" role="tab" aria-selected={detailTab === "summary"} onclick={() => detailTab = "summary"}>会議ノート</button>
-      <button class:active={detailTab === "transcript"} type="button" role="tab" aria-selected={detailTab === "transcript"} onclick={() => detailTab = "transcript"}>文字起こし</button>
+      <button
+        id="meeting-transcript-tab"
+        class:active={detailTab === "transcript"}
+        type="button"
+        role="tab"
+        aria-selected={detailTab === "transcript"}
+        onclick={showTranscriptTab}
+      >
+        文字起こし
+      </button>
       <button class:active={detailTab === "info"} type="button" role="tab" aria-selected={detailTab === "info"} onclick={() => detailTab = "info"}>会議情報</button>
     </div>
 
-    <div class="detail-content" bind:this={detailContentElement}>
+    <div
+      class="detail-content mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+      bind:this={detailContentElement}
+      use:scrollbarVisibility
+    >
       {#if detailTab === "summary"}
         <MeetingSummary
           {transcript}
@@ -497,11 +543,11 @@
           generating={summaryGenerating}
           progress={summaryProgress}
           blocked={transcriptFormatting}
-          playbackAvailable={Boolean(selectedAudio)}
+          selectedSourceKey={selectedSummarySource?.key ?? null}
           onProviderChange={onSummaryProviderChange}
           onModelChange={onSummaryModelChange}
           onGenerate={onGenerateSummary}
-          onSeekSource={seekFromSummary}
+          onShowSource={showSummarySource}
         />
       {:else if detailTab === "transcript"}
         {#if transcript}
@@ -756,6 +802,15 @@
   {/if}
 </section>
 
+<SummarySourceSheet
+  selection={selectedSummarySource}
+  {transcript}
+  playbackAvailable={Boolean(selectedAudio)}
+  onClose={() => { void closeSummarySource(); }}
+  onPlay={playFromTranscript}
+  onOpenTranscript={(positionMs) => { void openSummarySourceInTranscript(positionMs); }}
+/>
+
 {#if meeting}
   <AlertDialog bind:open={deleteDialogOpen}>
     <AlertDialogContent>
@@ -816,7 +871,7 @@
   .detail-tabs button.active { color: var(--primary); }
   .detail-tabs button.active::after { background: var(--primary); }
   .detail-tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; }
-  .detail-content { min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 0 30px 36px; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .detail-content { min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 0 30px 36px; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
 
   .empty-transcript, .workspace-empty { display: grid; place-items: center; align-content: center; text-align: center; }
   .empty-transcript { min-height: 420px; margin-top: 24px; padding: 32px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }

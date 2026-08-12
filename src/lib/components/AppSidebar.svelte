@@ -106,8 +106,8 @@
   .brand-mark { display: grid; width: 30px; height: 30px; flex: none; place-items: center; color: var(--primary); }
   .brand-mark :global(svg) { width: 28px; height: 28px; stroke-width: 1.8; }
   :global(.new-meeting) { width: 100%; justify-content: center; }
-  .home-link { display: grid; width: 100%; min-height: 42px; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 10px; border: 0; border-radius: 7px; color: color-mix(in oklch, var(--primary) 88%, var(--foreground)); background: color-mix(in oklch, var(--primary) 9%, var(--background)); cursor: pointer; font: inherit; font-size: 0.82rem; font-weight: 680; text-align: left; }
-  .home-link:hover { background: color-mix(in oklch, var(--primary) 13%, var(--background)); }
+  .home-link { display: grid; width: 100%; min-height: 42px; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 10px; border: 0; border-radius: 7px; color: color-mix(in oklch, var(--primary) 88%, var(--foreground)); background: var(--gradient-active); cursor: pointer; font: inherit; font-size: 0.82rem; font-weight: 680; text-align: left; }
+  .home-link:hover { background: linear-gradient(100deg, color-mix(in oklch, var(--primary) 17%, var(--background)) 0%, color-mix(in oklch, var(--primary) 7%, transparent) 100%); }
   .home-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .home-link :global(svg) { width: 18px; height: 18px; justify-self: center; color: var(--primary); stroke-width: 1.8; }
 
@@ -121,7 +121,7 @@
   .settings-menu nav { display: grid; gap: 4px; }
   .settings-menu nav button { display: grid; width: 100%; min-width: 0; min-height: 40px; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 10px; border: 0; border-radius: 7px; color: var(--foreground); background: transparent; cursor: pointer; font: inherit; text-align: left; }
   .settings-menu nav button:hover { background: var(--muted); }
-  .settings-menu nav button.active { color: color-mix(in oklch, var(--primary) 88%, var(--foreground)); background: color-mix(in oklch, var(--primary) 11%, var(--background)); }
+  .settings-menu nav button.active { color: color-mix(in oklch, var(--primary) 88%, var(--foreground)); background: var(--gradient-active); }
   .settings-menu nav button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .settings-menu nav button > :global(svg) { width: 17px; height: 17px; justify-self: center; color: var(--muted-foreground); stroke-width: 1.8; }
   .settings-menu nav button.active > :global(svg) { color: var(--primary); }
@@ -135,4 +135,16 @@
   footer button :global(svg) { width: 18px; height: 18px; flex: none; stroke-width: 1.8; }
 
   @media (max-width: 780px) { .app-sidebar-content { padding: calc(20px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px)); } }
+
+  @media (min-width: 781px) {
+    .app-sidebar-content { gap: 10px; padding: 30px 22px 24px; }
+    .brand { gap: 11px; margin-bottom: 20px; padding: 0 8px; }
+    .brand strong { font-size: 1.02rem; font-weight: 720; }
+    .brand-mark { width: 32px; height: 32px; }
+    .brand-mark :global(svg) { width: 30px; height: 30px; }
+    :global(.new-meeting) { display: none; }
+    .home-link { min-height: 54px; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; padding: 10px 12px; border-radius: var(--radius-control); font-size: 0.86rem; }
+    footer { margin-top: 0; padding-top: 0; border-top: 0; }
+    footer button { height: 50px; padding: 0 14px; border-radius: var(--radius-control); }
+  }
 </style>

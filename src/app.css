@@ -1,10 +1,77 @@
+@import "@fontsource-variable/noto-sans-jp";
 @import "@mutsuna/ui/theme.css";
 
 :root {
-  font-family: "Segoe UI Variable Text", "Segoe UI", Inter, "Noto Sans JP", system-ui, sans-serif;
+  /* Phase 1 design foundation: calm, audio-focused teal on a pale mist canvas. */
+  --font-ui: "Noto Sans JP Variable", "Inter Variable", "Segoe UI Variable Text", sans-serif;
+  --font-numeric: "Inter Variable", "Noto Sans JP Variable", sans-serif;
+
+  --background: oklch(0.973 0.004 197.087);
+  --foreground: oklch(0.235 0.025 218.662);
+  --card: oklch(0.992 0.003 197.087);
+  --card-foreground: var(--foreground);
+  --popover: oklch(0.998 0.002 197.087);
+  --popover-foreground: var(--foreground);
+  --secondary: oklch(0.954 0.011 196.978);
+  --secondary-foreground: oklch(0.32 0.035 207);
+  --muted: oklch(0.946 0.009 197);
+  --muted-foreground: oklch(0.56 0.023 219.912);
+  --accent: oklch(0.936 0.025 190);
+  --accent-foreground: oklch(0.42 0.075 184);
+  --border: oklch(0.902 0.015 196.891);
+  --input: oklch(0.872 0.018 197);
+  --ring: oklch(0.527 0.093 185.044);
+  --success: oklch(0.57 0.12 154);
+  --success-foreground: oklch(0.985 0.01 154);
+  --warning: oklch(0.817 0.14 80.096);
+  --warning-foreground: oklch(0.29 0.055 62);
+  --destructive: oklch(0.575 0.168 27.534);
+
+  --sidebar: oklch(0.982 0.006 197);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-accent: oklch(0.936 0.025 190);
+  --sidebar-accent-foreground: oklch(0.42 0.075 184);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  --audio-microphone: oklch(0.527 0.093 185.044);
+  --audio-system: oklch(0.724 0.12 219.404);
+  --audio-microphone-gradient-outer: oklch(0.61 0.095 202);
+  --audio-system-gradient-outer: oklch(0.62 0.15 247);
+  --audio-silent: oklch(0.902 0.015 196.891);
+  --audio-recording: oklch(0.575 0.168 27.534);
+  --brand-amber: oklch(0.817 0.14 80.096);
+  --surface-subtle: oklch(0.962 0.009 197);
+  --surface-raised: oklch(0.995 0.002 197);
+  --primary-hover: oklch(0.46 0.09 185);
+  --focus-ring: color-mix(in oklch, var(--ring) 72%, white);
+  --gradient-canvas:
+    radial-gradient(ellipse 68% 54% at 72% 0%, color-mix(in oklch, var(--audio-system) 7%, transparent) 0%, transparent 72%),
+    linear-gradient(180deg, color-mix(in oklch, var(--background) 94%, white) 0%, var(--background) 72%);
+  --gradient-active:
+    linear-gradient(100deg, color-mix(in oklch, var(--primary) 13%, var(--background)) 0%, color-mix(in oklch, var(--primary) 5%, transparent) 100%);
+  --gradient-primary:
+    linear-gradient(145deg, color-mix(in oklch, var(--primary) 84%, white) 0%, var(--primary) 58%, color-mix(in oklch, var(--primary) 91%, black) 100%);
+  --gradient-primary-hover:
+    linear-gradient(145deg, color-mix(in oklch, var(--primary) 76%, white) 0%, var(--primary-hover) 62%, color-mix(in oklch, var(--primary-hover) 90%, black) 100%);
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --radius: 0.75rem;
+  --radius-control: 0.625rem;
+  --radius-panel: 0.875rem;
+  --shadow-active: 0 8px 24px color-mix(in oklch, var(--ring) 16%, transparent);
+
+  font-family: var(--font-ui);
   color: var(--foreground);
   background: var(--background);
   font-synthesis: none;
+  text-rendering: optimizeLegibility;
 }
 
 body {
@@ -42,8 +109,20 @@ body.overlay-window #app {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
+}
+
+:where(button, a[href], input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:where(time, [data-numeric]) {
+  font-family: var(--font-numeric);
+  font-variant-numeric: tabular-nums;
 }
 
 .app-shell-content {
@@ -55,7 +134,7 @@ input {
   padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
   padding-left: env(safe-area-inset-left, 0px);
-  background: var(--background);
+  background: var(--gradient-canvas);
 }
 
 .app-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
@@ -64,13 +143,25 @@ input {
 .meeting-workspace-container { display: none; width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .meeting-workspace-container.mobile-detail-open { display: block; }
 
+@media (min-width: 781px) {
+  [data-slot="sidebar-wrapper"] { --sidebar-width: 18rem !important; }
+  .app-main-header {
+    display: none;
+  }
+  .app-shell-frame-content {
+    border-top: 0 !important;
+    border-left-color: var(--sidebar-border) !important;
+    border-radius: 0 !important;
+  }
+}
+
 .page-view {
   width: min(820px, calc(100% - 48px));
   height: 100%;
   margin: 0 auto;
   padding: 38px 0 64px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: stable both-edges;
 }
 
 .page-header { margin-bottom: 24px; }
@@ -92,11 +183,8 @@ input {
   border: 0 !important;
   border-radius: 0 !important;
   background: var(--background) !important;
-  scrollbar-gutter: auto !important;
-  scrollbar-width: none;
 }
-.settings-shell-content::-webkit-scrollbar { width: 0; height: 0; }
-.settings-detail-scroll { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.settings-detail-scroll { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .settings-detail { width: min(920px, calc(100% - 64px)); margin: 0; padding: 28px 32px 56px; }
 .settings-detail-heading { margin-bottom: 24px; }
 .settings-detail-heading h1 { margin: 0 0 5px; font-size: 1.3rem; font-weight: 620; line-height: 1.25; letter-spacing: -0.025em; }

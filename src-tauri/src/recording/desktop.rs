@@ -27,7 +27,7 @@ use super::{
     session::atomic_copy_to_output,
     types::{
         StopReason, VoiceActivityState, CHANNELS, FINAL_BITRATE, MAX_DURATION_MS, SAMPLE_RATE,
-        SOURCE_BITRATE,
+        SOURCE_BITRATE, SPECTRUM_BANDS,
     },
 };
 
@@ -57,6 +57,102 @@ fn accumulate_meter_samples(level: &mut f32, samples: &[f32]) {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn take_meter_levels(microphone: &mut f32, system: &mut f32) -> (f32, f32) {
     (std::mem::take(microphone), std::mem::take(system))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SPECTRUM_WINDOW_SAMPLES: usize = 1_024;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SPECTRUM_MIN_HZ: f32 = 80.0;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SPECTRUM_MAX_HZ: f32 = 8_000.0;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SPECTRUM_ATTACK_SMOOTHING: f32 = 0.58;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SPECTRUM_RELEASE_SMOOTHING: f32 = 0.45;
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn spectrum_frequency(index: usize) -> f32 {
+    let position = index as f32 / (SPECTRUM_BANDS.saturating_sub(1).max(1)) as f32;
+    SPECTRUM_MIN_HZ * (SPECTRUM_MAX_HZ / SPECTRUM_MIN_HZ).powf(position)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+struct LiveSpectrumAnalyzer {
+    samples: VecDeque<f32>,
+    smoothed: [f32; SPECTRUM_BANDS],
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl LiveSpectrumAnalyzer {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(SPECTRUM_WINDOW_SAMPLES),
+            smoothed: [0.0; SPECTRUM_BANDS],
+        }
+    }
+
+    fn accept(&mut self, samples: &[f32]) {
+        for sample in samples {
+            if self.samples.len() == SPECTRUM_WINDOW_SAMPLES {
+                self.samples.pop_front();
+            }
+            self.samples
+                .push_back(if sample.is_finite() { *sample } else { 0.0 });
+        }
+    }
+
+    fn snapshot(&mut self) -> Vec<f32> {
+        if self.samples.len() < 128 {
+            self.smoothed
+                .iter_mut()
+                .for_each(|value| *value *= 1.0 - SPECTRUM_RELEASE_SMOOTHING);
+            return self.smoothed.to_vec();
+        }
+
+        let sample_count = self.samples.len();
+        let denominator = sample_count.saturating_sub(1).max(1) as f32;
+        let mut window_sum = 0.0f32;
+        let windowed_samples = self
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let window = 0.5
+                    - 0.5
+                        * (std::f32::consts::TAU * index as f32 / denominator).cos();
+                window_sum += window;
+                sample * window
+            })
+            .collect::<Vec<_>>();
+        let window_sum = window_sum.max(f32::EPSILON);
+
+        for band in 0..SPECTRUM_BANDS {
+            let step = std::f32::consts::TAU * spectrum_frequency(band) / SAMPLE_RATE as f32;
+            let (step_sin, step_cos) = step.sin_cos();
+            let (mut phase_sin, mut phase_cos) = (0.0f32, 1.0f32);
+            let (mut real, mut imaginary) = (0.0f32, 0.0f32);
+
+            for sample in &windowed_samples {
+                real += sample * phase_cos;
+                imaginary -= sample * phase_sin;
+                let next_cos = phase_cos * step_cos - phase_sin * step_sin;
+                phase_sin = phase_sin * step_cos + phase_cos * step_sin;
+                phase_cos = next_cos;
+            }
+
+            let amplitude = (2.0 * real.hypot(imaginary) / window_sum).max(1.0e-7);
+            let decibels = 20.0 * amplitude.log10();
+            let target = ((decibels + 72.0) / 72.0).clamp(0.0, 1.0);
+            let smoothing = if target > self.smoothed[band] {
+                SPECTRUM_ATTACK_SMOOTHING
+            } else {
+                SPECTRUM_RELEASE_SMOOTHING
+            };
+            self.smoothed[band] += (target - self.smoothed[band]) * smoothing;
+        }
+
+        self.smoothed.to_vec()
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -144,23 +240,31 @@ pub(super) fn run_input_monitor(
         let mut last_status = Instant::now() - STATUS_INTERVAL;
         let mut microphone_level = 0.0;
         let mut system_level = 0.0;
+        let mut microphone_spectrum = LiveSpectrumAnalyzer::new();
+        let mut system_spectrum = LiveSpectrumAnalyzer::new();
         while !stop.load(Ordering::Acquire) {
             if let Some(stream) = microphone.as_mut() {
                 while let Some(chunk) = stream.poll_chunk() {
                     accumulate_meter_samples(&mut microphone_level, &chunk.data);
+                    microphone_spectrum.accept(&chunk.data);
                 }
             }
             if let Some(stream) = system.as_mut() {
                 while let Some(chunk) = stream.poll_chunk() {
                     accumulate_meter_samples(&mut system_level, &chunk.data);
+                    system_spectrum.accept(&chunk.data);
                 }
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 let (published_microphone_level, published_system_level) =
                     take_meter_levels(&mut microphone_level, &mut system_level);
+                let published_microphone_spectrum = microphone_spectrum.snapshot();
+                let published_system_spectrum = system_spectrum.snapshot();
                 publish_status(&app, &status, |current| {
                     current.microphone_level = published_microphone_level;
                     current.system_level = published_system_level;
+                    current.microphone_spectrum = published_microphone_spectrum;
+                    current.system_spectrum = published_system_spectrum;
                 });
                 last_status = Instant::now();
             }
@@ -175,6 +279,8 @@ pub(super) fn run_input_monitor(
     publish_status(&app, &status, |current| {
         current.microphone_level = 0.0;
         current.system_level = 0.0;
+        current.microphone_spectrum.fill(0.0);
+        current.system_spectrum.fill(0.0);
     });
 }
 
@@ -325,6 +431,8 @@ fn run_desktop_recording(
     let mut waveform = crate::audio_waveform::LiveWaveformAccumulator::new(SAMPLE_RATE);
     let mut microphone_level = 0.0;
     let mut system_level = 0.0;
+    let mut microphone_spectrum = LiveSpectrumAnalyzer::new();
+    let mut system_spectrum = LiveSpectrumAnalyzer::new();
     let mut stop_reason = StopReason::User;
     let mut microphone_stalled = false;
     let mut system_stalled = false;
@@ -343,6 +451,7 @@ fn run_desktop_recording(
             }
             while let Some(chunk) = stream.poll_chunk() {
                 accumulate_meter_samples(&mut microphone_level, &chunk.data);
+                microphone_spectrum.accept(&chunk.data);
                 let enhancement_started = Instant::now();
                 let enhanced = microphone_enhancer
                     .as_mut()
@@ -368,6 +477,7 @@ fn run_desktop_recording(
                     writer.write(&chunk.data)?;
                 }
                 accumulate_meter_samples(&mut system_level, &chunk.data);
+                system_spectrum.accept(&chunk.data);
                 sys_queue.push_back((chunk.pts_ns, chunk.data));
             }
         }
@@ -395,10 +505,14 @@ fn run_desktop_recording(
         if last_status.elapsed() >= STATUS_INTERVAL {
             let (published_microphone_level, published_system_level) =
                 take_meter_levels(&mut microphone_level, &mut system_level);
+            let published_microphone_spectrum = microphone_spectrum.snapshot();
+            let published_system_spectrum = system_spectrum.snapshot();
             publish_status(app, status, |current| {
                 current.elapsed_ms = elapsed_ms;
                 current.microphone_level = published_microphone_level;
                 current.system_level = published_system_level;
+                current.microphone_spectrum = published_microphone_spectrum;
+                current.system_spectrum = published_system_spectrum;
                 current.voice_activity = voice_activity;
             });
             last_status = Instant::now();
@@ -521,6 +635,8 @@ fn run_desktop_recording(
         current.warning = None;
         current.microphone_level = 0.0;
         current.system_level = 0.0;
+        current.microphone_spectrum.fill(0.0);
+        current.system_spectrum.fill(0.0);
         current.voice_activity = VoiceActivityState::Unavailable;
     });
     Ok(())
@@ -629,7 +745,8 @@ fn capture_start_error(kind: flexaudio::SourceKind, detail: &str) -> String {
 mod tests {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     use super::{
-        accumulate_meter_samples, capture_event_effect, take_meter_levels, CaptureEventEffect,
+        accumulate_meter_samples, capture_event_effect, spectrum_frequency, take_meter_levels,
+        CaptureEventEffect, LiveSpectrumAnalyzer, SPECTRUM_WINDOW_SAMPLES,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -646,6 +763,40 @@ mod tests {
             (0.18, 0.42)
         );
         assert_eq!((microphone, system), (0.0, 0.0));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn spectrum_places_a_tone_in_its_nearest_log_frequency_band() {
+        let frequency = 440.0f32;
+        let samples = (0..SPECTRUM_WINDOW_SAMPLES)
+            .map(|index| {
+                (std::f32::consts::TAU * frequency * index as f32
+                    / super::SAMPLE_RATE as f32)
+                    .sin()
+                    * 0.5
+            })
+            .collect::<Vec<_>>();
+        let mut analyzer = LiveSpectrumAnalyzer::new();
+        analyzer.accept(&samples);
+
+        let spectrum = analyzer.snapshot();
+        let peak_band = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .expect("spectrum has bands");
+        let expected_band = (0..spectrum.len())
+            .min_by(|left, right| {
+                (spectrum_frequency(*left) - frequency)
+                    .abs()
+                    .total_cmp(&(spectrum_frequency(*right) - frequency).abs())
+            })
+            .expect("spectrum has bands");
+
+        assert!(peak_band.abs_diff(expected_band) <= 1);
+        assert!(spectrum[peak_band] > 0.4);
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]

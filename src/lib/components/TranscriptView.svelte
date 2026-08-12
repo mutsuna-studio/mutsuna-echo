@@ -9,6 +9,7 @@
   import Undo2 from "@lucide/svelte/icons/undo-2";
   import X from "@lucide/svelte/icons/x";
   import { Button } from "@mutsuna/ui/button";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import { formatTimestamp } from "../format";
   import type { EditableTranscript, TranscriptSegmentTextChange } from "../types/transcript";
 
@@ -244,7 +245,6 @@
   function updateSearchText(event: Event) {
     searchText = (event.currentTarget as HTMLInputElement).value;
     currentMatchIndex = 0;
-    void focusCurrentMatch();
   }
 
   function updateReplacementText(event: Event) {
@@ -350,7 +350,15 @@
         {/if}
       </div>
       {#if replaceOpen}
-        <section class="replace-panel" aria-label="文字起こしを検索・置換">
+        <section
+          class="replace-panel mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+          aria-label="文字起こしを検索・置換"
+          use:scrollbarVisibility
+        >
+          <div class="mobile-replace-heading">
+            <strong>検索・置換</strong>
+            <Button size="icon-sm" variant="ghost" type="button" icon={X} aria-label="検索・置換を閉じる" title="閉じる" disabled={formatting} onclick={toggleReplace} />
+          </div>
           <div class="replace-fields">
             <label>
               <span>検索</span>
@@ -361,21 +369,19 @@
               <input type="text" value={replacementText} placeholder="正しい表記" disabled={formatting} oninput={updateReplacementText} />
             </label>
           </div>
-          <div class="replace-summary" aria-live="polite">
-            <span>{searchText ? `${searchMatches.length.toLocaleString("ja-JP")}件` : "検索語を入力してください"}</span>
-            {#if searchText && searchMatches.length > 0}
-              <small>「{searchText}」→「{replacementText || "（削除）"}」</small>
-            {/if}
-          </div>
           <div class="replace-actions">
             <span class="match-navigation">
               <Button size="icon-sm" variant="ghost" type="button" icon={ChevronLeft} aria-label="前の検索結果" title="前の検索結果" disabled={searchMatches.length === 0 || replacing || formatting} onclick={() => moveMatch(-1)} />
-              <span>{searchMatches.length > 0 ? `${currentMatchIndex + 1} / ${searchMatches.length}` : "0 / 0"}</span>
+              <span class="match-count" aria-live="polite">{searchMatches.length > 0 ? `${currentMatchIndex + 1} / ${searchMatches.length}` : searchText ? "0件" : "—"}</span>
               <Button size="icon-sm" variant="ghost" type="button" icon={ChevronRight} aria-label="次の検索結果" title="次の検索結果" disabled={searchMatches.length === 0 || replacing || formatting} onclick={() => moveMatch(1)} />
             </span>
-            <Button size="sm" variant="outline" type="button" disabled={!currentMatch || replacing || formatting} onclick={() => void replaceCurrentMatch()}>1件置換</Button>
-            <Button size="sm" type="button" disabled={searchMatches.length === 0 || replacing || formatting} loading={replacing} onclick={() => void replaceAllMatches()}>すべて置換{searchMatches.length > 0 ? `（${searchMatches.length}件）` : ""}</Button>
-            <Button size="icon-sm" variant="ghost" type="button" icon={X} aria-label="検索・置換を閉じる" title="閉じる" disabled={formatting} onclick={toggleReplace} />
+            <span class="replace-buttons">
+              <Button size="sm" variant="outline" type="button" disabled={!currentMatch || replacing || formatting} onclick={() => void replaceCurrentMatch()}>置換</Button>
+              <Button size="sm" type="button" disabled={searchMatches.length === 0 || replacing || formatting} loading={replacing} onclick={() => void replaceAllMatches()}>すべて置換</Button>
+            </span>
+            <span class="desktop-replace-close">
+              <Button size="icon-sm" variant="ghost" type="button" icon={X} aria-label="検索・置換を閉じる" title="閉じる" disabled={formatting} onclick={toggleReplace} />
+            </span>
           </div>
         </section>
       {/if}
@@ -477,16 +483,18 @@
 <style>
   .transcript-view { min-width: 0; }
   .correction-toolbar { display: flex; min-height: 42px; align-items: center; justify-content: flex-end; gap: 4px; padding: 7px 0 3px; }
-  .replace-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 14px; margin: 6px 0 10px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
-  .replace-fields { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 8px; }
-  .replace-fields label { display: grid; min-width: 0; gap: 4px; }
-  .replace-fields label > span { color: var(--muted-foreground); font-size: 0.67rem; font-weight: 650; }
-  .replace-fields input { width: 100%; min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--foreground); background: var(--background); font: inherit; font-size: 0.78rem; }
+  .replace-panel { display: flex; min-width: 0; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 4px 0 8px; padding: 8px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
+  .mobile-replace-heading { display: none; }
+  .replace-fields { display: grid; min-width: 260px; flex: 1 1 360px; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 6px; }
+  .replace-fields label { display: grid; min-width: 0; gap: 3px; }
+  .replace-fields label > span { color: var(--muted-foreground); font-size: 0.64rem; font-weight: 650; line-height: 1; }
+  .replace-fields input { width: 100%; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--foreground); background: var(--background); font: inherit; font-size: 0.76rem; }
   .replace-fields input:focus { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); outline: 2px solid color-mix(in oklch, var(--primary) 18%, transparent); }
-  .replace-summary { display: flex; min-width: 120px; flex-direction: column; justify-content: center; gap: 2px; color: var(--foreground); font-size: 0.74rem; font-weight: 650; }
-  .replace-summary small { overflow: hidden; max-width: 240px; color: var(--muted-foreground); font-size: 0.65rem; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .replace-actions { display: flex; grid-column: 1 / -1; align-items: center; justify-content: flex-end; gap: 5px; }
-  .match-navigation { display: flex; margin-right: auto; align-items: center; gap: 3px; color: var(--muted-foreground); font-size: 0.68rem; font-variant-numeric: tabular-nums; }
+  .replace-actions { display: flex; flex: 0 0 auto; margin-left: auto; align-items: center; gap: 4px; }
+  .match-navigation { display: flex; align-items: center; gap: 1px; color: var(--muted-foreground); font-size: 0.68rem; font-variant-numeric: tabular-nums; }
+  .match-count { min-width: 38px; text-align: center; white-space: nowrap; }
+  .replace-buttons { display: flex; align-items: center; gap: 4px; }
+  .desktop-replace-close { display: flex; }
   .speaker-labels { margin: 14px 0 8px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
   .speaker-labels-heading { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
   .speaker-labels-heading strong { font-size: 0.78rem; }
@@ -520,10 +528,27 @@
   }
   .empty-result { margin: 28px 0 0; color: var(--muted-foreground); font-size: 0.84rem; }
 
+  @media (max-width: 780px) {
+    .replace-panel { position: fixed; z-index: 40; top: 0; right: 0; left: 0; max-height: 100dvh; align-items: stretch; margin: 0; padding: calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 14px calc(14px + env(safe-area-inset-left, 0px)); overflow-y: auto; border-width: 0 0 1px; border-radius: 0 0 16px 16px; background: var(--background); box-shadow: 0 14px 36px rgb(0 0 0 / 18%); animation: replace-panel-enter 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+    .mobile-replace-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; }
+    .mobile-replace-heading strong { font-size: 0.84rem; }
+    .replace-fields { flex-basis: 100%; }
+    .replace-actions { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+    .match-navigation { margin-right: auto; }
+    .desktop-replace-close { display: none; }
+  }
+
   @media (max-width: 600px) {
-    .replace-panel { grid-template-columns: minmax(0, 1fr); }
     .replace-fields { grid-template-columns: minmax(0, 1fr); }
-    .replace-actions { flex-wrap: wrap; }
     .segment { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 9px 4px; }
+  }
+
+  @keyframes replace-panel-enter {
+    from { transform: translateY(-100%); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .replace-panel { animation: none; }
   }
 </style>

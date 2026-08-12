@@ -25,7 +25,7 @@
   import type { PendingAction } from "../types/pending-action";
   import type { RecordingStatus, StopRecordingResult } from "../types/recording";
 
-  const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
+  const echoTheme = createTheme("custom", "oklch(0.527 0.093 185.044)");
   const promptSize = { width: 320, height: 60 };
   const controllerSize = { width: 380, height: 64 };
   const minimizedControllerSize = { width: 88, height: 48 };

@@ -14,9 +14,10 @@
   } from "@mutsuna/ui/alert-dialog";
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
-  import { Select } from "@mutsuna/ui/select";
+  import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
   import Info from "@lucide/svelte/icons/info";
   import Mic from "@lucide/svelte/icons/mic";
+  import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import { VAD_PRESET_OPTIONS, type LocalVadModelStatus, type VadPreset } from "../providers";
@@ -27,9 +28,11 @@
     RecordingStatus,
     StopRecordingResult
   } from "../types/recording";
+  import AudioLevelWaveform from "./AudioLevelWaveform.svelte";
 
   interface Props {
     disabled?: boolean;
+    preview?: boolean;
     mobileExpanded?: boolean;
     consumeMobileAction?: () => boolean;
     onAudioReady: (audio: SelectedAudioFile) => void;
@@ -40,6 +43,7 @@
 
   let {
     disabled = false,
+    preview = false,
     mobileExpanded = false,
     consumeMobileAction = () => false,
     onAudioReady,
@@ -47,6 +51,40 @@
     onMessage,
     onError
   }: Props = $props();
+
+  const previewCapabilities: RecordingCapabilities = {
+    platform: "windows",
+    supported: true,
+    microphoneSupported: true,
+    systemAudioSupported: true,
+    systemAudioLimited: false,
+    limitation: null,
+    microphoneDevices: [{ id: "preview-microphone", name: "既定のマイク", isDefault: true }],
+    systemDevices: [{ id: "preview-system", name: "既定の出力", isDefault: true }],
+    sampleRate: 48_000,
+    channels: 1,
+    codec: "AAC-LC",
+    bitrate: 128_000,
+    maxDurationMs: 36_000_000
+  };
+  const previewStatus: RecordingStatus = {
+    phase: "idle",
+    sessionId: null,
+    elapsedMs: 0,
+    microphoneLevel: 0.18,
+    systemLevel: 0,
+    microphoneSpectrum: [],
+    systemSpectrum: [],
+    microphone: true,
+    systemAudio: false,
+    voiceActivity: "listening",
+    outputPath: null,
+    microphoneTrackPath: null,
+    systemTrackPath: null,
+    stopReason: null,
+    warning: null,
+    error: null
+  };
 
   let capabilities = $state<RecordingCapabilities | null>(null);
   let status = $state<RecordingStatus | null>(null);
@@ -68,6 +106,44 @@
   let vadPreset = $state<VadPreset>("standard");
   let vadPresetBusy = $state(false);
   let vadModel = $state.raw<LocalVadModelStatus | null>(null);
+  let previewRecordingStartedAt = 0;
+  let previewMicrophoneLevel = $state(0.18);
+
+  $effect(() => {
+    if (!preview) return;
+    capabilities = previewCapabilities;
+    status = previewStatus;
+    microphone = true;
+    systemAudio = false;
+    microphoneDeviceId = "preview-microphone";
+    systemDeviceId = "preview-system";
+    vadModel = {
+      modelId: "preview-vad",
+      displayName: "Silero VAD",
+      version: "preview",
+      sizeBytes: 0,
+      installed: true,
+      downloading: false,
+      runtimeSupported: true
+    };
+    loading = false;
+
+    const startedAt = performance.now();
+    const previewMeter = window.setInterval(() => {
+      const phase = (performance.now() - startedAt) / 420;
+      const current = status ?? previewStatus;
+      const previewActive = current.phase === "recording";
+      previewMicrophoneLevel = 0.08 + Math.abs(Math.sin(phase) * 0.2 + Math.sin(phase * 0.47) * 0.08);
+      if (previewActive) {
+        status = {
+          ...current,
+          elapsedMs: performance.now() - previewRecordingStartedAt,
+          microphoneLevel: previewMicrophoneLevel
+        };
+      }
+    }, 90);
+    return () => window.clearInterval(previewMeter);
+  });
 
   const active = $derived(
     status?.phase === "starting" || status?.phase === "recording" || status?.phase === "finalizing"
@@ -76,7 +152,12 @@
     Boolean(capabilities?.supported) && (microphone || systemAudio) && !disabled && !actionBusy && !active
   );
   const metering = $derived(active || monitoring);
-  const microphoneMeterPercent = $derived(toMeterPercent(status?.microphoneLevel ?? 0, metering && microphone));
+  const microphoneInputLevel = $derived(preview ? previewMicrophoneLevel : (status?.microphoneLevel ?? 0));
+  const microphoneSpectrum = $derived(
+    preview ? createPreviewSpectrum(previewMicrophoneLevel, 0.35) : (status?.microphoneSpectrum ?? [])
+  );
+  const systemSpectrum = $derived(status?.systemSpectrum ?? []);
+  const microphoneMeterPercent = $derived(toMeterPercent(microphoneInputLevel, (preview || metering) && microphone));
   const systemMeterPercent = $derived(toMeterPercent(status?.systemLevel ?? 0, metering && systemAudio));
   const vadAvailability = $derived.by<"preparing" | "available" | "unavailable">(() => {
     if (loading || !capabilities || !vadModel || vadModel.downloading) return "preparing";
@@ -102,11 +183,37 @@
       label: `${device.name}${device.isDefault ? "（既定）" : ""}`
     })))
   ]);
+  const defaultDeviceSelectValue = "__os_default_device__";
+  const selectedMicrophoneLabel = $derived(
+    microphoneOptions.find((option) => option.value === microphoneDeviceId)?.label ?? "OSの既定マイク"
+  );
+  const selectedSystemLabel = $derived(
+    systemOptions.find((option) => option.value === systemDeviceId)?.label ?? "OSの既定出力"
+  );
+  const selectedVadLabel = $derived(
+    VAD_PRESET_OPTIONS.find((option) => option.value === vadPreset)?.label ?? "標準"
+  );
+
+  function toDeviceSelectValue(value: string): string {
+    return value === "" ? defaultDeviceSelectValue : value;
+  }
+
+  function fromDeviceSelectValue(value: string): string {
+    return value === defaultDeviceSelectValue ? "" : value;
+  }
 
   function errorText(error: unknown): string {
     if (typeof error === "string") return error;
     if (error instanceof Error) return error.message;
     return "録音中に予期しないエラーが発生しました。";
+  }
+
+  function createPreviewSpectrum(level: number, phase: number): number[] {
+    return Array.from({ length: 24 }, (_, index) => {
+      const lowFrequencyBias = Math.exp(-index / 14);
+      const contour = 0.56 + 0.28 * Math.sin(index * 0.72 + phase) + 0.16 * Math.sin(index * 1.83);
+      return Math.max(0, Math.min(1, level * lowFrequencyBias * Math.max(0.12, contour) * 3.2));
+    });
   }
 
   function formatTimer(milliseconds: number): string {
@@ -177,6 +284,7 @@
   });
 
   $effect(() => {
+    if (preview) return;
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
     void (async () => {
@@ -221,6 +329,7 @@
   });
 
   $effect(() => {
+    if (preview) return;
     const ready = !loading && Boolean(capabilities?.supported) && !active && !monitorSuspended && (microphone || systemAudio);
     const request = currentRequest();
     const revision = ++monitorRevision;
@@ -265,6 +374,7 @@
 
   // Androidまたはイベント購読失敗時だけ、録音中に限定して状態を確認する。
   $effect(() => {
+    if (preview) return;
     if ((!active && !monitoring) || (capabilities?.platform !== "android" && statusEventsAvailable)) return;
     const timer = window.setInterval(() => {
       void refreshStatus().catch((error) => onError(errorText(error)));
@@ -273,6 +383,11 @@
   });
 
   async function start() {
+    if (preview) {
+      previewRecordingStartedAt = performance.now();
+      status = { ...previewStatus, phase: "recording", sessionId: "preview-recording" };
+      return;
+    }
     actionBusy = true;
     monitorSuspended = true;
     monitorRevision += 1;
@@ -299,6 +414,7 @@
     if (!(VAD_PRESET_OPTIONS as readonly { value: string }[]).some((option) => option.value === value)) return;
     const previous = vadPreset;
     vadPreset = value as VadPreset;
+    if (preview) return;
     vadPresetBusy = true;
     try {
       await invoke("set_vad_preset", { preset: vadPreset });
@@ -312,6 +428,10 @@
   }
 
   async function stop() {
+    if (preview) {
+      status = previewStatus;
+      return;
+    }
     actionBusy = true;
     onMessage("");
     onError("");
@@ -327,6 +447,11 @@
   }
 
   async function cancel() {
+    if (preview) {
+      status = previewStatus;
+      cancelDialogOpen = false;
+      return;
+    }
     actionBusy = true;
     try {
       status = await invoke<RecordingStatus>("cancel_recording");
@@ -402,6 +527,43 @@
   {/if}
 
   <div class:active class:mobile-expanded={mobileExpanded} class="recording-console">
+  <section class="desktop-recording-hero" aria-label="録音操作">
+    <div class:active class="desktop-recording-status" role="status">
+      {#if active}
+        <span class="record-dot" aria-hidden="true"></span>
+        <span>{status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中"}</span>
+        <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
+      {/if}
+    </div>
+    <div class="waveform-stage">
+      <AudioLevelWaveform
+        microphoneLevel={microphoneInputLevel}
+        systemLevel={status?.systemLevel ?? 0}
+        microphoneEnabled={microphone}
+        systemEnabled={systemAudio}
+        elapsedMs={status?.elapsedMs ?? 0}
+        {microphoneSpectrum}
+        {systemSpectrum}
+        hero
+      />
+      <div class="desktop-record-controls">
+        <button
+          class:active
+          class="desktop-start"
+          type="button"
+          onclick={active ? stop : start}
+          disabled={active ? actionBusy || status?.phase === "finalizing" : !canStart}
+          aria-label={active ? "録音を停止" : "録音を開始"}
+        >
+          {#if active}<Square aria-hidden="true" />{:else}<Mic aria-hidden="true" />{/if}
+        </button>
+        <span>{active ? (status?.phase === "finalizing" || actionBusy ? "保存中…" : "録音を停止") : "録音を開始"}</span>
+        {#if active}
+          <button class="desktop-discard" type="button" onclick={() => cancelDialogOpen = true} disabled={actionBusy || status?.phase === "finalizing"}>破棄</button>
+        {/if}
+      </div>
+    </div>
+  </section>
   {#if active}
   <div class:active class="recorder mobile-recorder" role="status">
     <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
@@ -416,14 +578,29 @@
     <div class="source">
       <label class="source-toggle">
         <Checkbox bind:checked={microphone} disabled={!capabilities.microphoneSupported || active || disabled} />
+        <Mic aria-hidden="true" />
         <span>マイク</span>
       </label>
       {#if capabilities.microphoneDevices.length > 0}
-        <Select bind:value={microphoneDeviceId} options={microphoneOptions} disabled={!microphone || active || disabled} ariaLabel="マイクデバイス" class="source-select" />
+        <Select
+          type="single"
+          value={toDeviceSelectValue(microphoneDeviceId)}
+          onValueChange={(value) => microphoneDeviceId = fromDeviceSelectValue(value)}
+          disabled={!microphone || active || disabled}
+        >
+          <SelectTrigger aria-label="マイクデバイス" class="source-select">
+            <span class="select-value" title={selectedMicrophoneLabel}>{selectedMicrophoneLabel}</span>
+          </SelectTrigger>
+          <SelectContent>
+            {#each microphoneOptions as option (option.value)}
+              <SelectItem value={toDeviceSelectValue(option.value)}>{option.label}</SelectItem>
+            {/each}
+          </SelectContent>
+        </Select>
       {/if}
       <div
         class:live={metering && microphone}
-        class="meter"
+        class="meter microphone-meter"
         role="meter"
         aria-label="マイク入力レベル"
         aria-valuemin="0"
@@ -435,14 +612,29 @@
     <div class="source">
       <label class="source-toggle">
         <Checkbox bind:checked={systemAudio} disabled={!capabilities.systemAudioSupported || active || disabled} />
+        <MonitorSpeaker aria-hidden="true" />
         <span>システム音声</span>
       </label>
       {#if capabilities.systemDevices.length > 0}
-        <Select bind:value={systemDeviceId} options={systemOptions} disabled={!systemAudio || active || disabled} ariaLabel="システム音声デバイス" class="source-select" />
+        <Select
+          type="single"
+          value={toDeviceSelectValue(systemDeviceId)}
+          onValueChange={(value) => systemDeviceId = fromDeviceSelectValue(value)}
+          disabled={!systemAudio || active || disabled}
+        >
+          <SelectTrigger aria-label="システム音声デバイス" class="source-select">
+            <span class="select-value" title={selectedSystemLabel}>{selectedSystemLabel}</span>
+          </SelectTrigger>
+          <SelectContent>
+            {#each systemOptions as option (option.value)}
+              <SelectItem value={toDeviceSelectValue(option.value)}>{option.label}</SelectItem>
+            {/each}
+          </SelectContent>
+        </Select>
       {/if}
       <div
         class:live={metering && systemAudio}
-        class="meter"
+        class="meter system-meter"
         role="meter"
         aria-label="システム音声レベル"
         aria-valuemin="0"
@@ -458,12 +650,20 @@
   <div class:unavailable={vadAvailability === "unavailable"} class="vad-setting">
     <span>無音自動停止</span>
     <Select
+      type="single"
       value={vadPreset}
-      options={VAD_PRESET_OPTIONS}
       onValueChange={changeVadPreset}
       disabled={vadAvailability !== "available" || active || disabled || vadPresetBusy}
-      ariaLabel="録音中の音声検出感度"
-    />
+    >
+      <SelectTrigger aria-label="録音中の音声検出感度" class="source-select">
+        <span class="select-value" title={selectedVadLabel}>{selectedVadLabel}</span>
+      </SelectTrigger>
+      <SelectContent>
+        {#each VAD_PRESET_OPTIONS as option (option.value)}
+          <SelectItem value={option.value}>{option.label}</SelectItem>
+        {/each}
+      </SelectContent>
+    </Select>
     {#if vadAvailability === "preparing"}
       <small>音声検出を準備中</small>
     {:else if vadAvailability === "unavailable"}
@@ -471,26 +671,6 @@
     {/if}
   </div>
 
-  {#if active}
-  <div class:active class="recorder desktop-recorder" role="status">
-    <span class="record-dot" aria-hidden="true"></span>
-    <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
-    <small>{status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中"}</small>
-  </div>
-  {/if}
-
-  <div class="record-actions">
-    {#if active}
-      <Button variant="destructive" size="lg" type="button" onclick={stop} disabled={actionBusy || status?.phase === "finalizing"} loading={actionBusy || status?.phase === "finalizing"}>
-        {status?.phase === "finalizing" || actionBusy ? "M4Aを確定中…" : "録音を停止"}
-      </Button>
-      <Button variant="outline" size="lg" type="button" onclick={() => cancelDialogOpen = true} disabled={actionBusy || status?.phase === "finalizing"}>破棄</Button>
-    {:else}
-      <button class="desktop-start" type="button" onclick={start} disabled={!canStart} aria-label="録音を開始">
-        <Mic aria-hidden="true" />
-      </button>
-    {/if}
-  </div>
   </div>
 
   {#if active && status?.warning}
@@ -554,63 +734,73 @@
 
 <style>
   .placeholder,
-  .limitation { margin: 18px 0 0; color: #647068; font-size: 0.86rem; }
-  .limitation { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; }
+  .limitation { margin: 18px 0 0; color: var(--muted-foreground); font-size: 0.86rem; }
+  .limitation { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-radius: var(--radius-control); color: var(--warning-foreground); background: color-mix(in oklch, var(--warning) 16%, var(--background)); }
   .limitation :global(svg) { width: 17px; height: 17px; flex: 0 0 auto; }
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
-  .recording-console { display: grid; grid-template-areas: "mic system vad action"; grid-template-columns: minmax(185px, 1fr) minmax(185px, 1fr) minmax(150px, 0.76fr) auto; align-items: stretch; }
-  .recording-console.active { grid-template-areas: "status mic system vad action"; grid-template-columns: minmax(138px, 0.72fr) minmax(185px, 1fr) minmax(185px, 1fr) minmax(150px, 0.76fr) auto; }
-  .sources { display: contents; }
-  .source { display: grid; align-content: center; gap: 10px; min-width: 0; padding: 16px 20px; border-left: 1px solid #e4e9e5; background: transparent; }
-  .source:first-child { grid-area: mic; }
-  .source:last-child { grid-area: system; }
+  .recording-console { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.72fr); align-items: stretch; }
+  .desktop-recording-hero { grid-column: 1 / -1; min-width: 0; padding: 16px 24px 21px; border-bottom: 1px solid var(--border); }
+  .desktop-recording-status { display: flex; min-height: 24px; align-items: center; justify-content: center; gap: 9px; color: var(--muted-foreground); font-size: 0.8rem; font-weight: 680; }
+  .desktop-recording-status.active { color: var(--foreground); }
+  .desktop-recording-status strong { margin-left: 3px; font-size: 0.83rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+  .waveform-stage { position: relative; min-height: 119px; margin-top: 2px; padding: 13px 0 22px; }
+  .desktop-record-controls { position: absolute; z-index: 1; top: 2px; left: 50%; display: flex; width: 142px; align-items: center; flex-direction: column; gap: 7px; transform: translateX(-50%); color: var(--foreground); font-size: 0.78rem; font-weight: 720; }
+  .desktop-discard { padding: 0; border: 0; color: var(--muted-foreground); background: transparent; font: inherit; font-size: 0.72rem; cursor: pointer; }
+  .desktop-discard:hover:not(:disabled) { color: var(--destructive); }
+  .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source { display: grid; align-content: center; gap: 10px; min-width: 0; padding: 18px 24px; border-right: 1px solid var(--border); background: transparent; }
   .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
-  .meter { height: 5px; overflow: hidden; border-radius: 99px; background: #dfe6e1; }
-  .meter.live { background: color-mix(in srgb, #2c8058 13%, #dfe6e1); }
-  .meter span { display: block; height: 100%; border-radius: inherit; background: #2c8058; transition: width 90ms linear; }
-  .monitor-note { color: #68746c; font-size: 0.7rem; }
+  .source-toggle :global(> svg) { width: 17px; height: 17px; color: var(--muted-foreground); }
+  :global(.source-select) { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; }
+  .select-value { display: block; min-width: 0; max-width: 100%; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meter { --meter-color: var(--audio-microphone); --meter-gradient: linear-gradient(90deg, color-mix(in oklch, var(--meter-color) 42%, var(--card)) 0%, color-mix(in oklch, var(--meter-color) 76%, var(--card)) 52%, var(--meter-color) 100%); height: 5px; overflow: hidden; border-radius: 99px; background: var(--audio-silent); }
+  .meter.system-meter { --meter-color: var(--audio-system); }
+  .meter.live { background: color-mix(in oklch, var(--meter-color) 14%, var(--audio-silent)); }
+  .meter span { display: block; height: 100%; border-radius: inherit; background: var(--meter-gradient); transition: width 90ms linear; }
+  .monitor-note { color: var(--muted-foreground); font-size: 0.7rem; }
   .recorder { display: flex; align-items: center; gap: 9px; margin: 0; padding: 16px 20px 16px 4px; background: transparent; }
-  .desktop-recorder { grid-area: status; }
-  .vad-setting { display: grid; grid-area: vad; grid-template-columns: 1fr; align-content: center; gap: 7px; min-width: 0; margin: 0; padding: 16px 20px; border-left: 1px solid #e4e9e5; color: #243129; font-size: 0.78rem; font-weight: 680; }
+  .vad-setting { display: grid; grid-template-columns: 1fr; align-content: center; gap: 7px; min-width: 0; margin: 0; padding: 18px 24px; color: var(--foreground); font-size: 0.78rem; font-weight: 680; }
   .vad-setting.unavailable { color: var(--muted-foreground); }
   .vad-setting small { color: var(--muted-foreground); font-size: 0.68rem; font-weight: 500; line-height: 1.4; }
   .recorder strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
-  .recorder small { margin-left: auto; color: #68746c; }
-  .record-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #2c8058; }
-  .recorder.active .record-dot { background: #dc4438; box-shadow: 0 0 0 5px rgb(220 68 56 / 12%); }
-  .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: 9px; color: #7a4c20; background: #fff4e8; font-size: 0.84rem; }
-  .record-actions { display: flex; grid-area: action; align-items: center; justify-content: flex-end; gap: 9px; padding: 10px 4px 10px 20px; border-left: 1px solid #e4e9e5; }
-  .desktop-start { display: grid; width: 58px; height: 58px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: white; background: #2c8058; box-shadow: 0 6px 16px rgb(44 128 88 / 18%); cursor: pointer; }
-  .desktop-start:hover:not(:disabled) { background: #236a49; }
-  .desktop-start:focus-visible { outline: 3px solid color-mix(in srgb, #2c8058 34%, transparent); outline-offset: 3px; }
+  .record-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--audio-microphone); }
+  .recorder.active .record-dot { background: var(--audio-recording); box-shadow: 0 0 0 5px color-mix(in oklch, var(--audio-recording) 14%, transparent); }
+  .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-control); color: var(--warning-foreground); background: color-mix(in oklch, var(--warning) 16%, var(--background)); font-size: 0.84rem; }
+  .desktop-start { display: grid; width: 82px; height: 82px; place-items: center; padding: 0; border: 7px solid var(--card); border-radius: 50%; color: var(--primary-foreground); background: var(--gradient-primary); box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 22%, var(--border)), var(--shadow-active); cursor: pointer; }
+  .desktop-start.active { background: var(--audio-recording); box-shadow: 0 0 0 1px color-mix(in oklch, var(--audio-recording) 26%, var(--border)), var(--shadow-active); }
+  .desktop-start:hover:not(:disabled) { background: var(--gradient-primary-hover); }
+  .desktop-start.active:hover:not(:disabled) { background: color-mix(in oklch, var(--audio-recording) 88%, black); }
+  .desktop-start:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
   .desktop-start:disabled { cursor: not-allowed; opacity: 0.52; }
-  .desktop-start :global(svg) { width: 29px; height: 29px; stroke-width: 2; }
+  .desktop-start :global(svg) { width: 31px; height: 31px; stroke-width: 2; }
+  .desktop-start.active :global(svg) { width: 23px; height: 23px; fill: currentColor; }
   .mobile-recorder,
   .mobile-record-toggle,
   .mobile-discard-button { display: none; }
   @media (max-width: 600px) {
     .limitation { display: none; }
     .recording-console { --settings-motion: 300ms cubic-bezier(0.22, 1, 0.36, 1); display: block; }
+    .desktop-recording-hero { display: none; }
     .mobile-recorder { display: flex; min-height: 52px; flex-direction: row; justify-content: flex-start; gap: 9px; margin: 0; padding: 8px 2px; background: transparent; }
     .mobile-recorder strong { font-size: clamp(2.55rem, 13vw, 3.35rem); font-weight: 760; line-height: 1; letter-spacing: 0.025em; }
-    .mobile-recording-state { display: flex; align-items: center; gap: 7px; color: #4f5c54; font-size: 0.82rem; }
-    .mobile-recording-state .record-dot { width: 8px; height: 8px; background: #2c8058; }
-    .mobile-recorder.active .record-dot { background: #dc4438; }
-    .desktop-recorder { display: none; }
+    .mobile-recording-state { display: flex; align-items: center; gap: 7px; color: var(--muted-foreground); font-size: 0.82rem; }
+    .mobile-recording-state .record-dot { width: 8px; height: 8px; background: var(--audio-microphone); }
+    .mobile-recorder.active .record-dot { background: var(--audio-recording); }
     .sources { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: 0; }
-    .source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 42%); align-items: center; gap: 9px 12px; min-height: 58px; padding: 9px 2px; border: 0; border-bottom: 1px solid #e4e9e5; background: transparent; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion); }
+    .source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 42%); align-items: center; gap: 9px 12px; min-height: 58px; padding: 9px 2px; border: 0; border-bottom: 1px solid var(--border); background: transparent; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion); }
     .source:first-child,
     .source:last-child { grid-area: auto; }
     .source-toggle { gap: 10px; font-size: 0.88rem; transition: min-height var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
     .source-toggle :global(button) { width: 34px; height: 34px; border-radius: 7px; transition: width var(--settings-motion), height var(--settings-motion), border-radius var(--settings-motion); }
     .source-toggle :global(svg) { width: 20px; height: 20px; transition: width var(--settings-motion), height var(--settings-motion); }
+    .source-toggle :global(> svg) { display: none; }
     :global(.source-select) { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
-    .meter { height: 6px; margin-left: 0; background: repeating-linear-gradient(90deg, #e0e5e1 0 9px, transparent 9px 13px); transition: width var(--settings-motion), height var(--settings-motion); }
-    .meter.live { background: repeating-linear-gradient(90deg, #d8e7de 0 9px, transparent 9px 13px); }
-    .meter span { background: repeating-linear-gradient(90deg, #2c8058 0 9px, transparent 9px 13px); }
+    .meter { height: 6px; margin-left: 0; background: repeating-linear-gradient(90deg, var(--audio-silent) 0 9px, transparent 9px 13px); transition: width var(--settings-motion), height var(--settings-motion); }
+    .meter.live { background: repeating-linear-gradient(90deg, color-mix(in oklch, var(--meter-color) 18%, var(--audio-silent)) 0 9px, transparent 9px 13px); }
+    .meter span { background: var(--meter-gradient); -webkit-mask: repeating-linear-gradient(90deg, #000 0 9px, transparent 9px 13px); mask: repeating-linear-gradient(90deg, #000 0 9px, transparent 9px 13px); }
     .monitor-note { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
-    .vad-setting { grid-template-columns: 1fr minmax(108px, 132px); justify-content: stretch; min-height: 54px; margin: 0; padding: 7px 2px; border: 0; color: #243129; font-size: 0.86rem; font-weight: 720; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
+    .vad-setting { grid-template-columns: 1fr minmax(108px, 132px); justify-content: stretch; min-height: 54px; margin: 0; padding: 7px 2px; border: 0; color: var(--foreground); font-size: 0.86rem; font-weight: 720; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
     .vad-setting small { grid-column: 1 / -1; padding-bottom: 4px; transition: padding var(--settings-motion), font-size var(--settings-motion), line-height var(--settings-motion); }
     .recording-console.mobile-expanded .source { min-height: 112px; grid-template-columns: 1fr; align-content: center; gap: 16px; padding: 18px 4px; }
     .recording-console.mobile-expanded .source-toggle { min-height: 54px; gap: 14px; font-size: 1.12rem; }
@@ -621,12 +811,11 @@
     .recording-console.mobile-expanded .monitor-note { grid-column: 1; margin-left: 66px; font-size: 0.8rem; }
     .recording-console.mobile-expanded .vad-setting { min-height: 96px; grid-template-columns: 1fr; align-content: center; gap: 12px; padding: 16px 4px; font-size: 1.1rem; }
     .recording-console.mobile-expanded .vad-setting small { grid-column: 1; padding-bottom: 0; font-size: 0.8rem; line-height: 1.55; }
-    .record-actions { display: none; }
     .desktop-start { display: none; }
-    .mobile-record-toggle { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); overflow: hidden; border: 0; border-radius: 50vw 50vw 0 0; color: white; background: #2c8058; box-shadow: 0 -12px 34px rgb(44 128 88 / 22%); cursor: pointer; transition: background-color 360ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease; -webkit-tap-highlight-color: transparent; }
-    .mobile-record-toggle:active:not(:disabled) { background: #236a49; }
-    .mobile-record-toggle.active { background: #d64b43; box-shadow: 0 -8px 28px rgb(177 48 42 / 20%); }
-    .mobile-record-toggle.active:active:not(:disabled) { background: #b83b35; }
+    .mobile-record-toggle { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); overflow: hidden; border: 0; border-radius: 50vw 50vw 0 0; color: var(--primary-foreground); background: var(--gradient-primary); box-shadow: 0 -12px 34px color-mix(in oklch, var(--primary) 24%, transparent); cursor: pointer; transition: background 360ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease; -webkit-tap-highlight-color: transparent; }
+    .mobile-record-toggle:active:not(:disabled) { background: var(--gradient-primary-hover); }
+    .mobile-record-toggle.active { background: var(--audio-recording); box-shadow: 0 -8px 28px color-mix(in oklch, var(--audio-recording) 24%, transparent); }
+    .mobile-record-toggle.active:active:not(:disabled) { background: color-mix(in oklch, var(--audio-recording) 84%, black); }
     .mobile-record-toggle:disabled { opacity: 0.58; }
     .mobile-action-icon { display: grid; position: absolute; inset: 0; place-items: center; padding-bottom: env(safe-area-inset-bottom, 0px); opacity: 0; transform: scale(0.72) rotate(-12deg); transition: opacity 220ms ease, transform 360ms cubic-bezier(0.22, 1, 0.36, 1); pointer-events: none; }
     .mobile-action-icon.visible { opacity: 1; transform: scale(1) rotate(0deg); }

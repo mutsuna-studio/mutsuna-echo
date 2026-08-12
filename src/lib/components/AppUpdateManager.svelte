@@ -4,6 +4,7 @@
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import { Alert, AlertDescription } from "@mutsuna/ui/alert";
   import { Button } from "@mutsuna/ui/button";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import { getVersion } from "@tauri-apps/api/app";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
@@ -248,7 +249,10 @@
   {/if}
 
   {#if availableUpdate?.body}
-    <p class="release-notes">{availableUpdate.body}</p>
+    <p
+      class="release-notes mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+      use:scrollbarVisibility
+    >{availableUpdate.body}</p>
   {/if}
 
   {#if displayError}

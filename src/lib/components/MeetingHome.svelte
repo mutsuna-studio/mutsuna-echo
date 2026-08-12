@@ -1,7 +1,9 @@
 <script lang="ts">
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import CalendarDays from "@lucide/svelte/icons/calendar-days";
   import FileUp from "@lucide/svelte/icons/file-up";
   import Mic from "@lucide/svelte/icons/mic";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import { formatFileSize } from "../format";
   import type { RecentMeetingSummary } from "../types/recording";
   import type { SelectedAudioFile } from "../types/transcript";
@@ -13,7 +15,10 @@
     busy: boolean;
     recordingDisabled: boolean;
     recordingBusy: boolean;
+    recordingPreview?: boolean;
     allowMeetingNavigation?: boolean;
+    processingMeetingId?: string | null;
+    processingStatus?: string | null;
     selecting: boolean;
     onSelectMeeting: (meeting: RecentMeetingSummary) => void;
     onSelectFile: () => void;
@@ -29,7 +34,10 @@
     busy,
     recordingDisabled,
     recordingBusy,
+    recordingPreview = false,
     allowMeetingNavigation = false,
+    processingMeetingId = null,
+    processingStatus = null,
     selecting,
     onSelectMeeting,
     onSelectFile,
@@ -44,6 +52,14 @@
   let recordingSettingsExpanded = $state(false);
   let recordButtonSwipeConsumed = false;
   let recordButtonSwipeResetTimer: number | null = null;
+  const today = new Date();
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const todayLabel = new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "short"
+  }).format(today);
   let pullGesture = $state<{
     x: number;
     y: number;
@@ -156,9 +172,18 @@
   bind:this={meetingHomeElement}
   aria-label="録音と会議"
 >
+  <header class="home-intro">
+    <div>
+      <h1>録音と会議</h1>
+      <p>会議やインタビュー、アイデアのメモを録音して文字起こしします。</p>
+    </div>
+    <time datetime={todayIso}><CalendarDays aria-hidden="true" />{todayLabel}</time>
+  </header>
+
   <div class:active={recordingBusy} class="recording-area">
     <RecordingPanel
       disabled={recordingDisabled}
+      preview={recordingPreview}
       mobileExpanded={recordingSettingsExpanded}
       consumeMobileAction={consumeRecordButtonSwipe}
       {onAudioReady}
@@ -170,7 +195,11 @@
 
   {#if !recordingBusy}
   <div class="meeting-list-shell">
-    <div class="meeting-list" bind:this={meetingListElement}>
+    <div
+      class="meeting-list mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+      bind:this={meetingListElement}
+      use:scrollbarVisibility
+    >
       <button class="file-row" type="button" onclick={onSelectFile} disabled={busy}>
         <span class="row-icon imported" aria-hidden="true"><FileUp /></span>
         <span class="row-copy">
@@ -186,6 +215,7 @@
         <p class="library-message">録音すると、ここに会議が追加されます。</p>
       {:else}
         {#each meetings as meeting (meeting.meetingId)}
+          {@const activeProcessingStatus = meeting.meetingId === processingMeetingId ? processingStatus : null}
           <button
             class="meeting-row"
             type="button"
@@ -200,8 +230,12 @@
               <strong>{meeting.title}</strong>
               <small>{meetingDate(meeting)} · {formatFileSize(meeting.sizeBytes)}</small>
             </span>
-            <span class="row-status">
-              {#if meeting.transcriptProviders.length > 0}<small>文字起こし済み</small>{/if}
+            <span class:processing={activeProcessingStatus != null} class="row-status">
+              {#if activeProcessingStatus}
+                <small class="processing-status" aria-live="polite"><span class="processing-indicator" aria-hidden="true"></span>{activeProcessingStatus}</small>
+              {:else if meeting.transcriptProviders.length > 0}
+                <small>文字起こし済み</small>
+              {/if}
               {#if !meeting.audioAvailable}<small class="missing-audio">音声なし</small>{/if}
             </span>
             <ChevronRight aria-hidden="true" />
@@ -214,12 +248,18 @@
 </section>
 
 <style>
-  .meeting-home { display: grid; box-sizing: border-box; width: min(1120px, calc(100% - 56px)); height: 100%; min-height: 0; margin: 0 auto; grid-template-rows: auto minmax(0, 1fr); background: var(--background); }
+  .meeting-home { display: grid; box-sizing: border-box; width: min(1120px, calc(100% - 72px)); height: 100%; min-height: 0; margin: 0 auto; grid-template-rows: auto auto minmax(0, 1fr); background: transparent; }
+  .home-intro { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 32px; padding: 34px 0 26px; }
+  .home-intro > div { min-width: 0; }
+  .home-intro h1 { margin: 0 0 7px; font-size: clamp(1.7rem, 2.25vw, 2.1rem); font-weight: 720; line-height: 1.2; letter-spacing: -0.045em; }
+  .home-intro p { margin: 0; color: var(--muted-foreground); font-size: 0.82rem; line-height: 1.6; }
+  .home-intro time { display: inline-flex; flex: none; align-items: center; gap: 10px; padding-top: 8px; color: color-mix(in oklch, var(--foreground) 78%, var(--muted-foreground)); font-size: 0.78rem; font-weight: 560; white-space: nowrap; }
+  .home-intro time :global(svg) { width: 18px; height: 18px; color: var(--muted-foreground); stroke-width: 1.8; }
   .recording-area { position: relative; z-index: 2; border-bottom: 1px solid var(--border); }
   .recording-area.active { border-bottom: 0; }
   .meeting-list-shell { position: relative; min-height: 0; overflow: hidden; }
   .meeting-list-shell::after { position: absolute; z-index: 2; right: 0; bottom: 0; left: 0; height: 106px; pointer-events: none; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--background) 68%, transparent) 42%, var(--background)); content: ""; }
-  .meeting-list { height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .meeting-list { height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
   .file-row,
   .meeting-row { display: grid; width: 100%; min-width: 0; grid-template-columns: 44px minmax(0, 1fr) auto 20px; align-items: center; gap: 15px; min-height: 70px; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; color: var(--foreground); background: transparent; cursor: pointer; font: inherit; text-align: left; }
   .file-row { grid-template-columns: 44px minmax(0, 1fr) 20px; }
@@ -237,15 +277,18 @@
   .row-copy small { color: var(--muted-foreground); font-size: 0.7rem; }
   .row-status { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
   .row-status small { color: var(--primary); font-size: 0.68rem; font-weight: 650; white-space: nowrap; }
+  .processing-status { display: inline-flex; align-items: center; gap: 6px; }
+  .processing-indicator { box-sizing: border-box; width: 11px; height: 11px; border: 2px solid color-mix(in oklch, var(--primary) 24%, transparent); border-top-color: var(--primary); border-radius: 50%; animation: processing-spin 800ms linear infinite; }
   .row-status .missing-audio { color: var(--destructive); }
   .file-row > :global(svg),
   .meeting-row > :global(svg) { width: 17px; height: 17px; color: var(--muted-foreground); stroke-width: 1.8; }
   .library-message { margin: 0; padding: 28px 12px; color: var(--muted-foreground); font-size: 0.78rem; text-align: center; }
 
   @media (max-width: 780px) {
-    .meeting-home { width: 100%; }
+    .meeting-home { width: 100%; grid-template-rows: auto minmax(0, 1fr); }
+    .home-intro { display: none; }
     .recording-area { padding: 0 14px; }
-    .meeting-list { padding-bottom: calc(50vw + 28px + env(safe-area-inset-bottom, 0px)); scrollbar-gutter: auto; }
+    .meeting-list { padding-bottom: calc(50vw + 28px + env(safe-area-inset-bottom, 0px)); }
     .meeting-list-shell::after { position: fixed; z-index: 1; bottom: 0; height: calc(50vw + 100px); background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--background) 72%, transparent) 58px, var(--background) 100px, var(--background)); }
     .file-row,
     .meeting-row { min-height: 68px; grid-template-columns: 38px minmax(0, 1fr) auto 18px; gap: 9px; padding: 9px 14px; }
@@ -259,5 +302,14 @@
 
   @media (max-width: 430px) {
     .row-status { display: none; }
+    .row-status.processing { display: flex; }
+  }
+
+  @keyframes processing-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .processing-indicator { animation: none; }
   }
 </style>

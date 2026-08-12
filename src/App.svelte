@@ -11,6 +11,7 @@
   } from "@mutsuna/ui/sonner";
   import { AdminShellFrame } from "@mutsuna/ui/admin-shell-frame";
   import { ThemeProvider, createTheme } from "@mutsuna/ui/theme";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import Settings from "@lucide/svelte/icons/settings";
@@ -61,7 +62,7 @@
     LocalDiarizationProgress
   } from "./lib/types/transcript";
 
-  const echoTheme = createTheme("custom", "oklch(0.49 0.12 154)");
+  const echoTheme = createTheme("custom", "oklch(0.527 0.093 185.044)");
   const TRANSCRIPTION_PROVIDER_STORAGE_KEY = "mutsuna-echo.transcription-provider";
   const SUMMARY_PROVIDER_STORAGE_KEY = "mutsuna-echo.summary-provider";
   const SUMMARY_MODEL_STORAGE_KEY = "mutsuna-echo.summary-model";
@@ -188,6 +189,7 @@
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let transcriptionSessionSyncing = false;
   let diarizing = $state(false);
+  let processingMeetingId = $state<string | null>(null);
   let diarizationProgress = $state<LocalDiarizationProgress | null>(null);
   let diarizationModelStatus = $state.raw<LocalDiarizationModelStatus | null>(null);
   let usageLoading = $state(false);
@@ -346,6 +348,17 @@
 
   const saving = $derived(savingProviderId !== null);
   const busy = $derived(loading || saving || deleting || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
+  const processingMeetingStatus = $derived(
+    summaryGenerating
+      ? "要約中"
+      : transcriptFormatting
+        ? "整形中"
+        : transcribing
+          ? "文字起こし中"
+          : diarizing
+            ? "話者分離中"
+            : null
+  );
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || diarizing || updating);
   const canDiarize = $derived(Boolean(
     selectedAudio
@@ -1049,6 +1062,9 @@
         selectedMeetingId = session.selectedAudio?.meetingId ?? null;
         transcribing = session.transcribing;
         diarizing = session.diarizing;
+        processingMeetingId = session.transcribing || session.diarizing
+          ? session.selectedAudio?.meetingId ?? null
+          : null;
         transcriptionProgress = session.progress;
         diarizationModelStatus = await invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status");
         if (pendingResult.error) {
@@ -1088,12 +1104,14 @@
       diarizing = session.diarizing;
       if (session.transcribing) {
         transcribing = true;
+        processingMeetingId = session.selectedAudio?.meetingId ?? processingMeetingId;
         return;
       }
       selectedAudio = session.selectedAudio;
       selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
       transcribing = false;
       diarizing = false;
+      if (wasTranscribing && !summaryGenerating && !transcriptFormatting) processingMeetingId = null;
       transcriptionProgress = null;
       diarizationProgress = null;
       if (wasTranscribing && selectedAudio) {
@@ -1255,6 +1273,7 @@
       return;
     }
     transcribing = true;
+    processingMeetingId = transcriptionMeetingId;
     const diarizationEnabled = diarizationSpeakerCount !== undefined && transcriptionProvider === "local";
     diarizing = diarizationEnabled;
     transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
@@ -1312,6 +1331,7 @@
     } finally {
       transcribing = false;
       diarizing = false;
+      if (processingMeetingId === transcriptionMeetingId) processingMeetingId = null;
       transcriptionProgress = null;
       diarizationProgress = null;
     }
@@ -1400,9 +1420,11 @@
 
   async function generateSummary() {
     if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating || transcriptFormatting) return;
+    const operationMeetingId = selectedMeetingId;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
+    processingMeetingId = operationMeetingId;
     summaryProgress = null;
     try {
       summaryStatus = await invoke<SummaryStatus>("generate_selected_summary", {
@@ -1417,6 +1439,7 @@
       showError(errorText(error));
     } finally {
       summaryGenerating = false;
+      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
       summaryProgress = null;
     }
   }
@@ -1457,6 +1480,7 @@
   async function diarizeTranscript(speakerCount: number | null) {
     const run = selectedTranscriptionRun;
     if (!run || !selectedAudio || diarizing) return;
+    const operationMeetingId = selectedAudio.meetingId;
     if (!diarizationModelStatus?.installed) {
       openDiarizationSettings();
       showWarningToast("話者分離モデルを追加してください。", "設定の「モデルとサービス」から端末内モデルを追加できます。");
@@ -1468,6 +1492,7 @@
       return;
     }
     diarizing = true;
+    processingMeetingId = operationMeetingId;
     diarizationProgress = { stage: "loadingModel", completedChunks: 0, totalChunks: null, processedMs: 0, totalMs: selectedAudio.durationMs };
     try {
       const saved = await invoke<TranscriptionRunDetail>("diarize_selected_transcription", {
@@ -1486,6 +1511,7 @@
       if (!message.includes("キャンセルしました")) showError(message);
     } finally {
       diarizing = false;
+      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
       diarizationProgress = null;
     }
   }
@@ -1586,6 +1612,7 @@
   async function formatTranscript(): Promise<void> {
     const run = selectedTranscriptionRun;
     if (!selectedMeetingId || !run || transcriptFormatting || summaryGenerating) return;
+    const operationMeetingId = selectedMeetingId;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error" || !selectedTranscriptionRun) return;
 
@@ -1598,6 +1625,7 @@
       && Boolean(provider?.models.some((model) => model.id === summaryModelId));
 
     transcriptFormatting = true;
+    processingMeetingId = operationMeetingId;
     try {
       const result = await invoke<TranscriptFormattingResult>("format_selected_transcript", {
         request: {
@@ -1627,6 +1655,7 @@
       showError(errorText(error));
     } finally {
       transcriptFormatting = false;
+      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
     }
   }
 
@@ -1794,7 +1823,11 @@
   <Toaster position={toasterPosition} closeButton />
   <AdminShellFrame
     {pageTitle}
-    contentClass={section === "settings" ? "settings-shell-content p-0 overflow-hidden border-0 rounded-none" : "p-0 overflow-hidden"}
+    contentGutter="auto"
+    contentPadding="none"
+    contentClass={section === "settings"
+      ? "app-shell-frame-content settings-shell-content overflow-hidden border-0 rounded-none"
+      : "app-shell-frame-content overflow-hidden"}
     headerClass={section === "settings" ? "settings-shell-header app-main-header" : "app-main-header"}
   >
     {#snippet headerActions()}
@@ -1836,7 +1869,9 @@
             busy={meetingBusy || busy}
             {recordingDisabled}
             {recordingBusy}
-            allowMeetingNavigation={transcribing || diarizing}
+            allowMeetingNavigation={transcribing || diarizing || transcriptFormatting}
+            {processingMeetingId}
+            processingStatus={processingMeetingStatus}
             {selecting}
             onSelectMeeting={selectMeeting}
             onSelectFile={selectHomeAudioFile}
@@ -1921,7 +1956,10 @@
               <button class:active={settingsPane === "usage"} type="button" aria-current={settingsPane === "usage" ? "page" : undefined} onclick={() => selectSettingsPane("usage")}>利用状況</button>
             </nav>
           {/if}
-          <div class="settings-detail-scroll">
+          <div
+            class="settings-detail-scroll mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+            use:scrollbarVisibility
+          >
             <div class="settings-detail">
               {#if settingsPane === "general" && !summarySettingsPreview}
                 <header class="settings-detail-heading">

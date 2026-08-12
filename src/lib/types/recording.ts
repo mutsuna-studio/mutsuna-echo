@@ -32,6 +32,8 @@ export interface RecordingStatus {
   elapsedMs: number;
   microphoneLevel: number;
   systemLevel: number;
+  microphoneSpectrum?: number[];
+  systemSpectrum?: number[];
   microphone: boolean;
   systemAudio: boolean;
   voiceActivity: VoiceActivityState;

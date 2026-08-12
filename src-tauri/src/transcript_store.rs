@@ -501,6 +501,7 @@ pub(crate) fn apply_diarization(
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     let mut index = ensure_history_in(&directory, meeting_id)?;
     let mut run = read_run(&directory, meeting_id, transcription_id)?;
+    backfill_run_cost_from_history(&mut run, &index.runs);
     if run.document.revision != expected_revision {
         return Err(
             "話者分離中に文字起こしが更新されました。再読み込みしてからやり直してください。".into(),
@@ -695,6 +696,7 @@ pub(crate) fn update_run_segments(
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     let mut index = ensure_history_in(&directory, meeting_id)?;
     let mut run = read_run(&directory, meeting_id, transcription_id)?;
+    backfill_run_cost_from_history(&mut run, &index.runs);
     let learn_correction_segment_ids = learn_correction_segment_ids
         .into_iter()
         .collect::<HashSet<_>>();
@@ -740,6 +742,7 @@ pub(crate) fn reset_run_document(
     let directory = crate::meeting_store::meeting_directory(app, meeting_id)?.join("transcripts");
     let mut index = ensure_history_in(&directory, meeting_id)?;
     let mut run = read_run(&directory, meeting_id, transcription_id)?;
+    backfill_run_cost_from_history(&mut run, &index.runs);
     reset_document_from_source(&mut run, expected_revision, chrono::Utc::now().to_rfc3339())?;
     write_run(&directory, &run)?;
     if let Some(summary) = index
@@ -996,6 +999,19 @@ fn run_summary(run: &StoredTranscriptionRun) -> TranscriptionRunSummary {
         edited: run.document.edited,
         cost_usd: run.cost_usd.clone(),
     }
+}
+
+fn backfill_run_cost_from_history(
+    run: &mut StoredTranscriptionRun,
+    history_runs: &[TranscriptionRunSummary],
+) {
+    if run.cost_usd.is_some() {
+        return;
+    }
+    run.cost_usd = history_runs
+        .iter()
+        .find(|summary| summary.transcription_id == run.transcription_id)
+        .and_then(|summary| summary.cost_usd.clone());
 }
 
 fn run_detail(run: &StoredTranscriptionRun) -> TranscriptionRunDetail {
@@ -1425,12 +1441,12 @@ mod tests {
     use std::{collections::HashSet, fs};
 
     use super::{
-        apply_segment_changes, apply_speaker_label_changes, audio_key, document_from_transcript,
-        ensure_history_in, load_current_in, load_legacy_in, read_run, rebase_document_segments,
-        record_provider_usage, reset_document_from_source, save_in, transcript_path_in,
-        ProviderCostUsage, StoredTranscriptionRun, TranscriptSegmentChange,
-        TranscriptSpeakerLabelChange, TranscriptionSettingsSnapshot, RUN_SCHEMA_VERSION,
-        SCHEMA_VERSION,
+        apply_segment_changes, apply_speaker_label_changes, audio_key,
+        backfill_run_cost_from_history, document_from_transcript, ensure_history_in,
+        load_current_in, load_legacy_in, read_run, rebase_document_segments, record_provider_usage,
+        reset_document_from_source, run_summary, save_in, transcript_path_in, ProviderCostUsage,
+        StoredTranscriptionRun, TranscriptSegmentChange, TranscriptSpeakerLabelChange,
+        TranscriptionSettingsSnapshot, RUN_SCHEMA_VERSION, SCHEMA_VERSION,
     };
 
     #[test]
@@ -1598,7 +1614,7 @@ mod tests {
     }
 
     #[test]
-    fn edits_preserve_source_and_reject_stale_revisions() {
+    fn edits_preserve_source_cost_and_reject_stale_revisions() {
         let transcript = fixture_transcript();
         let transcription_id = uuid::Uuid::now_v7().to_string();
         let meeting_id = uuid::Uuid::now_v7().to_string();
@@ -1617,6 +1633,9 @@ mod tests {
             document: document_from_transcript(&transcript, "2026-08-09T00:00:00Z".into()),
             source: transcript,
         };
+        let mut legacy_summary = run_summary(&run);
+        legacy_summary.cost_usd = Some("0.0081".into());
+        backfill_run_cost_from_history(&mut run, &[legacy_summary]);
         let segment_id = run.document.segments[0].segment_id.clone();
         let learn_ids = HashSet::from([segment_id.clone()]);
         let (changed, learned) = apply_segment_changes(
@@ -1635,6 +1654,7 @@ mod tests {
         assert_eq!(learned[0].to, "Mutsuna Echo");
         assert_eq!(run.source.segments[0].text, "テストです。");
         assert_eq!(run.document.segments[0].text, "Mutsuna Echoです。");
+        assert_eq!(run_summary(&run).cost_usd.as_deref(), Some("0.0081"));
         assert!(apply_speaker_label_changes(
             &mut run,
             0,

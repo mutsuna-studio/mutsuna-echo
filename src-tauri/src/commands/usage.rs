@@ -178,11 +178,11 @@ fn numeric_value(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
+fn used_duration_ms(usage: &UsageResponse) -> Result<u64, String> {
     // The analytics API can omit metric columns entirely when the selected
     // period has no usage. That is a valid zero-usage response.
     if usage.rows.is_empty() {
-        return Ok(0.0);
+        return Ok(0);
     }
 
     let product_index = usage
@@ -190,19 +190,23 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
         .iter()
         .position(|column| column == "product_type")
         .ok_or_else(|| "ElevenLabsの使用量に製品情報が含まれていません。".to_string())?;
+    let minutes_index = usage
+        .columns
+        .iter()
+        .position(|column| column == "total_minutes");
     let credits_index = usage
         .columns
         .iter()
-        .position(|column| column == "credits_used")
-        .ok_or_else(|| {
-            eprintln!(
-                "ElevenLabs usage response did not contain credits_used; columns: {:?}",
-                usage.columns
-            );
-            "ElevenLabsの使用量レスポンス形式を確認できませんでした。".to_string()
-        })?;
+        .position(|column| column == "credits_used");
+    if minutes_index.is_none() && credits_index.is_none() {
+        eprintln!(
+            "ElevenLabs usage response did not contain total_minutes or credits_used; columns: {:?}",
+            usage.columns
+        );
+        return Err("ElevenLabsの使用量レスポンス形式を確認できませんでした。".to_string());
+    }
 
-    Ok(usage
+    let total = usage
         .rows
         .iter()
         .filter(|row| {
@@ -210,9 +214,18 @@ fn used_credits(usage: &UsageResponse) -> Result<f64, String> {
                 .and_then(Value::as_str)
                 .is_some_and(is_speech_to_text_product)
         })
-        .filter_map(|row| row.get(credits_index).and_then(numeric_value))
+        .filter_map(|row| {
+            let metric_index = minutes_index.or(credits_index)?;
+            row.get(metric_index).and_then(numeric_value)
+        })
         .sum::<f64>()
-        .max(0.0))
+        .max(0.0);
+
+    Ok(if minutes_index.is_some() {
+        (total * 60_000.0).round() as u64
+    } else {
+        credits_to_duration_ms(total)
+    })
 }
 
 async fn fetch_used_duration(
@@ -234,10 +247,7 @@ async fn fetch_used_duration(
         .map_err(|error| format!("ElevenLabsの使用量を取得できませんでした: {error}"))?;
 
     match parse_response::<UsageResponse>(response, "使用量").await? {
-        ApiResponse::Data(usage) => {
-            let credits = used_credits(&usage)?;
-            Ok(ApiResponse::Data(credits_to_duration_ms(credits)))
-        }
+        ApiResponse::Data(usage) => Ok(ApiResponse::Data(used_duration_ms(&usage)?)),
         ApiResponse::MissingPermission => Ok(ApiResponse::MissingPermission),
     }
 }
@@ -419,7 +429,7 @@ fn cloudflare_billed_duration_ms(app: &AppHandle, meeting_id: &str) -> Result<u6
 mod tests {
     use super::{
         available_duration_ms, credits_to_duration_ms, is_speech_to_text_product, period_start_ms,
-        used_credits, SubscriptionResponse, UsageResponse,
+        used_duration_ms, SubscriptionResponse, UsageResponse,
     };
     use serde_json::json;
 
@@ -469,8 +479,53 @@ mod tests {
             ],
         };
         assert!(is_speech_to_text_product("Speech_to_Text"));
-        assert_eq!(used_credits(&usage).unwrap(), 1_500.0);
-        assert_eq!(credits_to_duration_ms(1_500.0), 2_454_545);
+        assert_eq!(used_duration_ms(&usage).unwrap(), 2_454_545);
+    }
+
+    #[test]
+    fn reads_total_minutes_from_live_analytics_response() {
+        let usage = UsageResponse {
+            columns: vec![
+                "product_type".into(),
+                "timestamp".into(),
+                "total_usage".into(),
+                "total_minutes".into(),
+                "total_cost".into(),
+                "usage_count".into(),
+                "total_charge_count".into(),
+            ],
+            rows: vec![
+                vec![
+                    json!("speech-to-text"),
+                    json!("2026-08-01"),
+                    json!(1),
+                    json!("1.25"),
+                    json!(0),
+                    json!(1),
+                    json!(1),
+                ],
+                vec![
+                    json!("scribe"),
+                    json!("2026-08-02"),
+                    json!(1),
+                    json!(0.5),
+                    json!(0),
+                    json!(1),
+                    json!(1),
+                ],
+                vec![
+                    json!("text-to-speech"),
+                    json!("2026-08-02"),
+                    json!(1),
+                    json!(99),
+                    json!(0),
+                    json!(1),
+                    json!(1),
+                ],
+            ],
+        };
+
+        assert_eq!(used_duration_ms(&usage).unwrap(), 105_000);
     }
 
     #[test]
@@ -480,7 +535,7 @@ mod tests {
             rows: vec![],
         };
 
-        assert_eq!(used_credits(&usage).unwrap(), 0.0);
+        assert_eq!(used_duration_ms(&usage).unwrap(), 0);
     }
 
     #[test]
@@ -491,7 +546,7 @@ mod tests {
         };
 
         assert_eq!(
-            used_credits(&usage).unwrap_err(),
+            used_duration_ms(&usage).unwrap_err(),
             "ElevenLabsの使用量レスポンス形式を確認できませんでした。"
         );
     }

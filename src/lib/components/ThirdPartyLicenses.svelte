@@ -2,6 +2,7 @@
   import BookOpen from "@lucide/svelte/icons/book-open";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Search from "@lucide/svelte/icons/search";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
 
   type LicenseDocument = {
     id: string;
@@ -164,7 +165,12 @@
         </div>
 
         <div class="license-browser">
-          <div class="component-list" aria-label="ライセンス対象一覧" bind:this={componentListElement}>
+          <div
+            class="component-list mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+            aria-label="ライセンス対象一覧"
+            bind:this={componentListElement}
+            use:scrollbarVisibility
+          >
             {#if ecosystem === "all" && (!query || catalog.project.name.toLocaleLowerCase("ja").includes(query.toLocaleLowerCase("ja")))}
               <button class:selected={selectedId === "project"} type="button" onclick={() => selectedId = "project"}>
                 <strong>{catalog.project.name}</strong>
@@ -186,7 +192,11 @@
             {/if}
           </div>
 
-          <article class="license-document" aria-live="polite">
+          <article
+            class="license-document mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+            aria-live="polite"
+            use:scrollbarVisibility
+          >
             <header>
               <div>
                 <h3>{selectedComponent?.name ?? catalog.project.name}</h3>

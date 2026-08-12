@@ -34,6 +34,13 @@ export type SummaryActionItem = SummaryReference & {
   due: string | null;
 };
 
+export type SummarySourceSelection = {
+  key: string;
+  kind: "decision" | "actionItem";
+  text: string;
+  sourceSegmentIds: string[];
+};
+
 export type MeetingSummary = {
   schemaVersion: number;
   summaryId: string;

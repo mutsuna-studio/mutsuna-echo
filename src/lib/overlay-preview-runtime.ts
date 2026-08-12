@@ -21,6 +21,8 @@ function status(mode: Exclude<OverlayPreviewMode, "detection">): RecordingStatus
     elapsedMs: mode === "finalizing" ? 2_538_000 : 2_537_000,
     microphoneLevel: mode === "recording" ? 0.72 : 0.18,
     systemLevel: mode === "recording" ? 0.48 : 0.12,
+    microphoneSpectrum: [],
+    systemSpectrum: [],
     microphone: true,
     systemAudio: true,
     voiceActivity: mode === "recording" ? "speechDetected" : "listening",

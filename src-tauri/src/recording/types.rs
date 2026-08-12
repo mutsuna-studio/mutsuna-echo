@@ -5,6 +5,7 @@ pub const CHANNELS: u16 = 1;
 pub const FINAL_BITRATE: u32 = 64_000;
 pub const SOURCE_BITRATE: u32 = 96_000;
 pub const MAX_DURATION_MS: u64 = 10 * 60 * 60 * 1_000;
+pub const SPECTRUM_BANDS: usize = 24;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +89,10 @@ pub struct RecordingStatus {
     pub elapsed_ms: u64,
     pub microphone_level: f32,
     pub system_level: f32,
+    #[serde(default)]
+    pub microphone_spectrum: Vec<f32>,
+    #[serde(default)]
+    pub system_spectrum: Vec<f32>,
     pub microphone: bool,
     pub system_audio: bool,
     #[serde(default)]
@@ -113,6 +118,8 @@ impl Default for RecordingStatus {
             elapsed_ms: 0,
             microphone_level: 0.0,
             system_level: 0.0,
+            microphone_spectrum: vec![0.0; SPECTRUM_BANDS],
+            system_spectrum: vec![0.0; SPECTRUM_BANDS],
             microphone: false,
             system_audio: false,
             voice_activity: VoiceActivityState::Unavailable,

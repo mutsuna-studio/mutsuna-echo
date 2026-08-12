@@ -6,7 +6,12 @@
   import { Button } from "@mutsuna/ui/button";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
   import type { EditableTranscript } from "../types/transcript";
-  import type { SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "../types/summary";
+  import type {
+    SummaryProgress,
+    SummaryProviderDefinition,
+    SummarySourceSelection,
+    SummaryStatus
+  } from "../types/summary";
 
   type Props = {
     transcript: EditableTranscript | null;
@@ -18,11 +23,11 @@
     generating: boolean;
     progress: SummaryProgress | null;
     blocked: boolean;
-    playbackAvailable: boolean;
+    selectedSourceKey: string | null;
     onProviderChange: (value: string) => void;
     onModelChange: (value: string) => void;
     onGenerate: () => void;
-    onSeekSource: (positionMs: number) => void;
+    onShowSource: (selection: SummarySourceSelection, trigger: HTMLButtonElement) => void;
   };
 
   let {
@@ -35,11 +40,11 @@
     generating,
     progress,
     blocked,
-    playbackAvailable,
+    selectedSourceKey,
     onProviderChange,
     onModelChange,
     onGenerate,
-    onSeekSource
+    onShowSource
   }: Props = $props();
 
   const provider = $derived(providers.find((candidate) => candidate.id === providerId) ?? providers[0]);
@@ -50,10 +55,14 @@
   const selectedModelLabel = $derived(modelsLoading ? "モデルを取得中…" : (modelOptions.find((option) => option.value === modelId)?.label ?? "モデルを選択"));
   const progressLabel = $derived(progress?.stage === "merging" ? "会議ノートを統合中" : "会議ノートを作成中");
 
-  function seekToFirstSource(ids: readonly string[]) {
-    const id = ids.find((candidate) => transcript?.segments.some((segment) => segment.segmentId === candidate));
-    const segment = transcript?.segments.find((candidate) => candidate.segmentId === id);
-    if (segment) onSeekSource(segment.startMs);
+  function availableSourceIds(ids: readonly string[]): string[] {
+    const availableIds = new Set(transcript?.segments.map((segment) => segment.segmentId) ?? []);
+    return ids.filter((id) => availableIds.has(id));
+  }
+
+  function showSource(event: MouseEvent, selection: SummarySourceSelection) {
+    if (!(event.currentTarget instanceof HTMLButtonElement)) return;
+    onShowSource(selection, event.currentTarget);
   }
 </script>
 
@@ -126,9 +135,21 @@
         {#if summary.content.decisions.length > 0}
           <ul>
             {#each summary.content.decisions as decision, index (`${decision.text}-${index}`)}
-              <li>
+              {@const sourceIds = availableSourceIds(decision.sourceSegmentIds)}
+              {@const sourceKey = `decision-${index}`}
+              <li class:source-selected={selectedSourceKey === sourceKey}>
                 <span>{decision.text}</span>
-                {#if playbackAvailable && decision.sourceSegmentIds.length > 0}<button type="button" onclick={() => seekToFirstSource(decision.sourceSegmentIds)}>原文を確認</button>{/if}
+                {#if sourceIds.length > 0}
+                  <button
+                    type="button"
+                    aria-expanded={selectedSourceKey === sourceKey}
+                    aria-controls="summary-source-sheet"
+                    aria-label={`根拠を見る: ${decision.text}`}
+                    onclick={(event) => showSource(event, { key: sourceKey, kind: "decision", text: decision.text, sourceSegmentIds: sourceIds })}
+                  >
+                    {selectedSourceKey === sourceKey ? "根拠を表示中" : "根拠を見る"}
+                  </button>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -140,9 +161,22 @@
         {#if summary.content.actionItems.length > 0}
           <ul>
             {#each summary.content.actionItems as item, index (`${item.text}-${index}`)}
-              <li>
-                <span>{item.assignee ? `${item.assignee}：` : ""}{item.text}{item.due ? `（${item.due}）` : ""}</span>
-                {#if playbackAvailable && item.sourceSegmentIds.length > 0}<button type="button" onclick={() => seekToFirstSource(item.sourceSegmentIds)}>原文を確認</button>{/if}
+              {@const sourceIds = availableSourceIds(item.sourceSegmentIds)}
+              {@const sourceKey = `action-item-${index}`}
+              {@const itemText = `${item.assignee ? `${item.assignee}：` : ""}${item.text}${item.due ? `（${item.due}）` : ""}`}
+              <li class:source-selected={selectedSourceKey === sourceKey}>
+                <span>{itemText}</span>
+                {#if sourceIds.length > 0}
+                  <button
+                    type="button"
+                    aria-expanded={selectedSourceKey === sourceKey}
+                    aria-controls="summary-source-sheet"
+                    aria-label={`根拠を見る: ${itemText}`}
+                    onclick={(event) => showSource(event, { key: sourceKey, kind: "actionItem", text: itemText, sourceSegmentIds: sourceIds })}
+                  >
+                    {selectedSourceKey === sourceKey ? "根拠を表示中" : "根拠を見る"}
+                  </button>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -200,7 +234,9 @@
   .overview p { margin: 0; color: var(--foreground); font-size: 0.9rem; line-height: 1.8; white-space: pre-wrap; }
   ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
   li { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent); font-size: 0.84rem; line-height: 1.6; }
+  li.source-selected { margin: 0 -10px; padding-right: 10px; padding-left: 10px; border-radius: 8px; background: color-mix(in oklch, var(--primary) 8%, transparent); }
   li button { flex: none; padding: 2px 0; border: 0; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-size: 0.69rem; font-weight: 650; }
+  li button:focus-visible { border-radius: 3px; outline: 2px solid var(--ring); outline-offset: 3px; }
   .empty-section { margin: 0; color: var(--muted-foreground); font-size: 0.8rem; }
   footer { color: var(--muted-foreground); font-size: 0.65rem; }
   .empty-note { display: grid; min-height: 420px; place-items: center; align-content: center; padding: 32px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); text-align: center; }

@@ -139,6 +139,8 @@ impl RecordingService {
             current.system_audio = request.system_audio;
             current.microphone_level = 0.0;
             current.system_level = 0.0;
+            current.microphone_spectrum.fill(0.0);
+            current.system_spectrum.fill(0.0);
             current.warning = None;
         });
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -185,6 +187,8 @@ impl RecordingService {
         set_status(&self.status, |current| {
             current.microphone_level = 0.0;
             current.system_level = 0.0;
+            current.microphone_spectrum.fill(0.0);
+            current.system_spectrum.fill(0.0);
         });
         Ok(())
     }

@@ -61,8 +61,12 @@
     context.clearRect(0, 0, cssWidth, cssHeight);
 
     const style = getComputedStyle(target);
-    const primary = style.getPropertyValue("--primary").trim() || "#16854a";
-    const muted = style.getPropertyValue("--waveform-muted").trim() || "#bdc3bf";
+    const primary = style.getPropertyValue("--audio-microphone").trim()
+      || style.getPropertyValue("--primary").trim()
+      || "#007c72";
+    const muted = style.getPropertyValue("--audio-silent").trim()
+      || style.getPropertyValue("--waveform-muted").trim()
+      || "#d4e2e2";
     const center = cssHeight / 2;
     if (values.length === 0) {
       context.fillStyle = muted;

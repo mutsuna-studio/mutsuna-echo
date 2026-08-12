@@ -1,6 +1,7 @@
 <script lang="ts">
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import { Button } from "@mutsuna/ui/button";
+  import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import type { SelectedAudioFile } from "../types/transcript";
   import RecordingPanel from "./RecordingPanel.svelte";
 
@@ -17,7 +18,10 @@
   let { disabled, busy, onBack, onAudioReady, onBusyChange, onMessage, onError }: Props = $props();
 </script>
 
-<section class="recording-mode-view">
+<section
+  class="recording-mode-view mutsuna-scrollbar mutsuna-scrollbar--both-edges"
+  use:scrollbarVisibility
+>
   <header>
     <span class="desktop-back"><Button size="sm" variant="ghost" type="button" icon={ArrowLeft} onclick={onBack} disabled={busy}>会議一覧へ</Button></span>
     <button class="mobile-back" type="button" onclick={onBack} disabled={busy} aria-label="会議一覧へ戻る"><ArrowLeft aria-hidden="true" /></button>
@@ -34,8 +38,8 @@
     .recording-mode-view { width: 100%; padding: 8px 20px calc(50vw + 18px); }
     header { margin-bottom: 0; }
     .desktop-back { display: none; }
-    .mobile-back { display: grid; width: 44px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: #243129; background: transparent; }
-    .mobile-back:active:not(:disabled) { background: #edf2ee; }
+    .mobile-back { display: grid; width: 44px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: var(--foreground); background: transparent; }
+    .mobile-back:active:not(:disabled) { background: var(--accent); }
     .mobile-back:disabled { opacity: 0.45; }
     .mobile-back :global(svg) { width: 25px; height: 25px; }
   }
