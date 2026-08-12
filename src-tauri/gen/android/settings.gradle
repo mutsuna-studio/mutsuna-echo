@@ -1,4 +1,8 @@
 include ':app'
 include ':local_ai_runtime'
 
-apply from: 'tauri.settings.gradle'
+// Tauri creates this ignored file for app builds. Credential contract tests run
+// Gradle directly and do not need its generated project wiring.
+if (file('tauri.settings.gradle').exists()) {
+    apply from: 'tauri.settings.gradle'
+}

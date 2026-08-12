@@ -82,7 +82,7 @@ impl MutsunaCloudStatus {
 #[serde(rename_all = "camelCase")]
 struct DeviceStartRequest {
     client_id: &'static str,
-    scopes: [&'static str; 5],
+    scopes: [&'static str; 3],
 }
 
 #[derive(Deserialize)]
@@ -575,6 +575,7 @@ async fn poll_for_access_token(
                 if token_type != "Bearer"
                     || !scopes.iter().any(|scope| scope == "cloud:transcribe")
                     || !scopes.iter().any(|scope| scope == "billing:read")
+                    || !scopes.iter().any(|scope| scope == "billing:checkout")
                 {
                     return Err("Mutsuna Cloudの認証権限が不足しています。".into());
                 }
@@ -593,11 +594,9 @@ async fn connect_flow(app: &AppHandle) -> Result<MutsunaCloudStatus, String> {
         &DeviceStartRequest {
             client_id: "mutsuna-echo-native",
             scopes: [
-                "openid",
-                "profile",
-                "offline_access",
                 "cloud:transcribe",
                 "billing:read",
+                "billing:checkout",
             ],
         },
         "端末認証開始",
@@ -826,7 +825,7 @@ mod tests {
     #[test]
     fn device_poll_facade_returns_a_valid_scoped_token() {
         let (base_url, server) = serve_json_once(
-            r#"{"status":"authorized","tokenType":"Bearer","accessToken":"synthetic-authorized-token-1234","scopes":["cloud:transcribe","billing:read"]}"#,
+            r#"{"status":"authorized","tokenType":"Bearer","accessToken":"synthetic-authorized-token-1234","scopes":["cloud:transcribe","billing:read","billing:checkout"]}"#,
         );
         let client = http_client().expect("client");
         let device_code = SecretString::from("synthetic-device-code-1234".to_string());
