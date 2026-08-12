@@ -98,6 +98,11 @@ struct PendingFlow {
     created_at: Instant,
 }
 
+struct OAuthCallback {
+    url: Url,
+    stream: std::net::TcpStream,
+}
+
 trait CredentialStorage {
     fn save(&mut self, id: CredentialId, value: &SecretString) -> Result<(), String>;
     fn has(&self, id: CredentialId) -> Result<bool, String>;
@@ -200,7 +205,7 @@ fn write_callback_page(stream: &mut std::net::TcpStream, success: bool) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn wait_for_callback(listener: TcpListener) -> Result<Url, String> {
+fn wait_for_callback(listener: TcpListener) -> Result<OAuthCallback, String> {
     listener
         .set_nonblocking(true)
         .map_err(|_| "OAuth callbackの待受を開始できませんでした。".to_string())?;
@@ -233,10 +238,13 @@ fn wait_for_callback(listener: TcpListener) -> Result<Url, String> {
                 let callback = Url::parse(&format!("http://127.0.0.1{target}"))
                     .map_err(|_| "OAuth callbackの形式が正しくありません。".to_string())?;
                 let valid_path = callback.path() == "/oauth/cloudflare/callback";
-                write_callback_page(&mut stream, valid_path);
                 if valid_path {
-                    return Ok(callback);
+                    return Ok(OAuthCallback {
+                        url: callback,
+                        stream,
+                    });
                 }
+                write_callback_page(&mut stream, false);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -595,50 +603,55 @@ pub(crate) async fn start_cloudflare_oauth(
     let auth_url = authorization_url(client_id, &flow, &challenge)?;
     tauri_plugin_opener::open_url(&auth_url, None::<&str>)
         .map_err(|_| "システムブラウザでCloudflareを開けませんでした。".to_string())?;
-    let callback = tauri::async_runtime::spawn_blocking(move || wait_for_callback(listener))
+    let mut callback = tauri::async_runtime::spawn_blocking(move || wait_for_callback(listener))
         .await
         .map_err(|_| "OAuth callback処理が停止しました。".to_string())??;
-    let code = validate_callback(&callback, &flow)?;
-    let client = oauth_http_client()?;
-    let token = exchange_authorization_code(&client, client_id, &code, &flow.verifier).await?;
-    let refresh_token = token
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Cloudflareからrefresh tokenを受け取れませんでした。".to_string())?;
-    let access = SecretString::from(token.access_token.trim().to_owned());
-    let refresh = SecretString::from(refresh_token.to_owned());
-    let expires = expiration_from_now(token.expires_in);
-    let accounts = fetch_accounts(&client, &access).await?;
-    for account in &accounts {
-        crate::transcription::cloudflare::validate_credentials(
-            &SecretString::from(account.id.clone()),
-            &access,
-        )
-        .await?;
+    let result = async {
+        let code = validate_callback(&callback.url, &flow)?;
+        let client = oauth_http_client()?;
+        let token = exchange_authorization_code(&client, client_id, &code, &flow.verifier).await?;
+        let refresh_token = token
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Cloudflareからrefresh tokenを受け取れませんでした。".to_string())?;
+        let access = SecretString::from(token.access_token.trim().to_owned());
+        let refresh = SecretString::from(refresh_token.to_owned());
+        let expires = expiration_from_now(token.expires_in);
+        let accounts = fetch_accounts(&client, &access).await?;
+        for account in &accounts {
+            crate::transcription::cloudflare::validate_credentials(
+                &SecretString::from(account.id.clone()),
+                &access,
+            )
+            .await?;
+        }
+        let accounts_json = serialize_accounts(&accounts)?;
+        let mut values = vec![
+            (CredentialId::CloudflareOAuthAccessToken, &access),
+            (CredentialId::CloudflareOAuthRefreshToken, &refresh),
+            (CredentialId::CloudflareOAuthExpiresAt, &expires),
+            (CredentialId::CloudflareOAuthAccounts, &accounts_json),
+        ];
+        let selected_id;
+        let selected_name;
+        if accounts.len() == 1 {
+            selected_id = SecretString::from(accounts[0].id.clone());
+            selected_name = SecretString::from(accounts[0].name.clone());
+            values.push((CredentialId::CloudflareOAuthAccountId, &selected_id));
+            values.push((CredentialId::CloudflareOAuthAccountName, &selected_name));
+        }
+        persist_verified(&mut AppCredentialStorage(&app), &values)?;
+        if accounts.len() > 1 {
+            crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountId)?;
+            crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountName)?;
+        }
+        connection_status(&app)
     }
-    let accounts_json = serialize_accounts(&accounts)?;
-    let mut values = vec![
-        (CredentialId::CloudflareOAuthAccessToken, &access),
-        (CredentialId::CloudflareOAuthRefreshToken, &refresh),
-        (CredentialId::CloudflareOAuthExpiresAt, &expires),
-        (CredentialId::CloudflareOAuthAccounts, &accounts_json),
-    ];
-    let selected_id;
-    let selected_name;
-    if accounts.len() == 1 {
-        selected_id = SecretString::from(accounts[0].id.clone());
-        selected_name = SecretString::from(accounts[0].name.clone());
-        values.push((CredentialId::CloudflareOAuthAccountId, &selected_id));
-        values.push((CredentialId::CloudflareOAuthAccountName, &selected_name));
-    }
-    persist_verified(&mut AppCredentialStorage(&app), &values)?;
-    if accounts.len() > 1 {
-        crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountId)?;
-        crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountName)?;
-    }
-    connection_status(&app)
+    .await;
+    write_callback_page(&mut callback.stream, result.is_ok());
+    result
 }
 
 #[tauri::command]
@@ -817,6 +830,45 @@ mod tests {
         assert!(validate_callback(&callback, &flow)
             .expect_err("cancelled")
             .contains("キャンセル"));
+    }
+
+    #[test]
+    fn callback_page_waits_for_the_oauth_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind callback server");
+        let address = listener.local_addr().expect("callback address");
+        let waiter =
+            std::thread::spawn(move || wait_for_callback(listener).expect("receive callback"));
+        let mut browser = std::net::TcpStream::connect(address).expect("connect callback server");
+        browser
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .expect("set browser timeout");
+        write!(
+            browser,
+            "GET /oauth/cloudflare/callback?code=synthetic&state=synthetic HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        .expect("send callback");
+
+        let mut callback = waiter.join().expect("callback waiter");
+        let mut before_result = [0_u8; 1];
+        let read_error = browser
+            .read(&mut before_result)
+            .expect_err("response must wait for OAuth completion");
+        assert!(matches!(
+            read_error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+
+        write_callback_page(&mut callback.stream, true);
+        drop(callback);
+        browser
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("extend browser timeout");
+        let mut response = String::new();
+        browser
+            .read_to_string(&mut response)
+            .expect("read callback page");
+        assert!(response.contains("Cloudflareへの接続を確認しました"));
+        assert!(!response.contains("接続を完了できませんでした"));
     }
 
     #[test]

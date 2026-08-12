@@ -12,6 +12,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Public OAuth identifier compiled into every platform binary. Configure this
+  # as a repository variable; Cloudflare PKCE clients do not use a client secret.
+  MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID: ${{ vars.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID }}
+
 jobs:
   validate-release:
     name: Validate release version
@@ -28,6 +33,10 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+
+      - name: Verify Cloudflare OAuth build configuration
+        run: >-
+          node -e "if (!process.env.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID?.trim()) throw new Error('Missing repository variable: MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID')"
 
       - name: Verify tag and application versions
         id: release-version

@@ -117,6 +117,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 45
+    env:
+      MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID: ${{ vars.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -165,6 +167,10 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Cloudflare OAuth build configuration
+        run: >-
+          node -e "if (!process.env.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID?.trim()) throw new Error('Missing repository variable: MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID')"
+
       - name: Warm release build cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: pnpm tauri build ${{ matrix.build-args }}
@@ -174,6 +180,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID: ${{ vars.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -196,6 +204,10 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Cloudflare OAuth build configuration
+        run: >-
+          node -e "if (!process.env.MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID?.trim()) throw new Error('Missing repository variable: MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID')"
 
       - name: Warm Android release build cache
         run: pnpm tauri android build --aab --target aarch64

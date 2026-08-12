@@ -37,8 +37,12 @@
       <strong>Cloudflare Free</strong>
       <p>Cloudflare Workers AIの無料枠を利用できます。</p>
     </div>
-    {#if status?.connected}
-      <span class="connected"><CircleCheck aria-hidden="true" />接続済み</span>
+    {#if status?.authMethod === "oauth"}
+      <span class="connected"><CircleCheck aria-hidden="true" />OAuth接続済み</span>
+    {:else if status?.authMethod === "apiToken"}
+      <span class="connected"><CircleCheck aria-hidden="true" />APIトークン接続済み</span>
+    {:else if status?.accountSelectionRequired}
+      <span class="connected"><CircleCheck aria-hidden="true" />OAuth認証済み</span>
     {:else}
       <span class="muted">未接続</span>
     {/if}

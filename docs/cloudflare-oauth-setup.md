@@ -49,6 +49,16 @@ pnpm tauri build
 
 Rust の `option_env!` で compile-time public configuration として取り込まれます。未設定ビルドは panic せず、設定画面に「このビルドにはCloudflare OAuth Client IDが設定されていません」と表示します。fork は独自の Public OAuth Client を作成し、同じ環境変数へ独自 Client ID を設定してください。Client Secret は追加しないでください。
 
+### GitHub Actions の本番リリース
+
+リポジトリの **Settings > Secrets and variables > Actions > Variables** で、次の Repository variable を登録します。
+
+| Name | Value |
+| --- | --- |
+| `MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID` | Cloudflare Dashboard で発行された本番用 Client ID |
+
+Client ID は公開 identifier のため Variable として管理し、Secret や Client Secret は使用しません。リリースワークフローはこの値をWindows、macOS、Androidの全ビルドへ渡します。値が未設定または空白だけの場合は、OAuthを利用できない成果物を公開しないよう、バージョン検証の段階でリリース全体を失敗させます。通常CIのリリースキャッシュ生成も同じ値を使用し、未設定時は失敗します。
+
 ## Callback と platform 設定
 
 Windows、macOS、Android はすべて固定 loopback callback を使います。

@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "mutsuna-echo"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "avassetwriter",
  "base64 0.22.1",
