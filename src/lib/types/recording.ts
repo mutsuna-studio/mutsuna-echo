@@ -58,6 +58,7 @@ export interface RecordedAudioSummary {
   meetingId: string;
   fileName: string;
   sizeBytes: number;
+  durationMs: number | null;
   recordedAtUnixMs: number;
   transcriptProviders: string[];
 }
@@ -67,6 +68,7 @@ export interface RecentMeetingSummary {
   title: string;
   fileName: string;
   sizeBytes: number;
+  durationMs: number | null;
   occurredAtUnixMs: number;
   updatedAtUnixMs: number;
   audioAvailable: boolean;

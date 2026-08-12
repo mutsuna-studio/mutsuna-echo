@@ -7,6 +7,7 @@ export type TranscriptSegment = {
 
 export type EditableTranscriptSegment = TranscriptSegment & {
   segmentId: string;
+  originalText: string;
   edited: boolean;
 };
 

@@ -24,49 +24,37 @@ export type SummaryAgentInstallStatus = {
   statusMessage: string;
 };
 
-export type SummaryReference = {
-  text: string;
-  sourceSegmentIds: string[];
-};
-
-export type SummaryActionItem = SummaryReference & {
-  assignee: string | null;
-  due: string | null;
-};
-
 export type SummarySourceSelection = {
   key: string;
-  kind: "decision" | "actionItem";
+  kind: "keyPoint" | "topic" | "decision" | "actionItem" | "openIssue" | "question" | "note";
   text: string;
   sourceSegmentIds: string[];
-};
-
-export type MeetingSummary = {
-  schemaVersion: number;
-  summaryId: string;
-  meetingId: string;
-  transcriptionId: string;
-  sourceRevision: number;
-  provider: string;
-  model: string;
-  generatedAt: string;
-  content: {
-    overview: string;
-    decisions: SummaryReference[];
-    actionItems: SummaryActionItem[];
-  };
-};
-
-export type SummaryStatus = {
-  summary: MeetingSummary | null;
-  transcriptionId: string | null;
-  currentRevision: number | null;
-  stale: boolean;
 };
 
 export type SummaryProgress = {
   meetingId: string;
   completedSteps: number;
   totalSteps: number;
-  stage: "summarizing" | "merging" | "complete";
+  stage: "summarizing" | "waiting" | "streaming" | "retrying" | "merging" | "checking" | "complete";
+  activeStep?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  retryDelaySeconds?: number;
+  receivedBytes?: number;
+  activityKind?: "thought" | "plan" | "tool";
+  activityText?: string;
+  activityStatus?: string;
+};
+
+export type GenerationAttemptSummary = {
+  attemptId: string;
+  transcriptionId: string;
+  sourceRevision: number;
+  provider: string;
+  model: string;
+  startedAt: string;
+  status: "generating" | "failed" | "completed";
+  stage: string;
+  error: string | null;
+  canRevalidate: boolean;
 };

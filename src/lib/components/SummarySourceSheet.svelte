@@ -34,7 +34,7 @@
     const sourceIds = new Set(selection.sourceSegmentIds);
     return transcript.segments.filter((segment) => sourceIds.has(segment.segmentId));
   });
-  const kindLabel = $derived(selection?.kind === "decision" ? "決定事項" : "アクション項目");
+  const kindLabel = $derived(({ keyPoint: "要点", topic: "議題", decision: "決定事項", actionItem: "アクション項目", openIssue: "未解決事項", question: "質問", note: "ノート" } as const)[selection?.kind ?? "note"]);
   const firstPositionMs = $derived(sourceSegments[0]?.startMs ?? 0);
 
   function speakerLabel(speaker: string): string {

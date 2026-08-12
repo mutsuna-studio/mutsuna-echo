@@ -13,6 +13,7 @@ mod local_ai_protocol;
 mod local_ai_runtime;
 #[cfg(desktop)]
 mod meeting_detection;
+mod meeting_schema;
 mod meeting_store;
 mod pcm_cache;
 mod pending_action;
@@ -121,8 +122,11 @@ pub fn run() {
             summary::list_summary_agent_install_status,
             summary::install_summary_agent,
             summary::delete_summary_agent,
-            summary::get_selected_summary,
-            summary::generate_selected_summary,
+            summary::get_selected_meeting_document,
+            summary::save_edited_meeting_document,
+            summary::get_latest_generation_attempt,
+            summary::generate_selected_meeting_document,
+            summary::revalidate_generation_attempt,
             summary::format_selected_transcript,
             commands::usage::get_transcription_usage,
             commands::usage::get_soniox_usage,

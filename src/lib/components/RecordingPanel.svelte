@@ -14,10 +14,12 @@
   } from "@mutsuna/ui/alert-dialog";
   import { Button } from "@mutsuna/ui/button";
   import { Checkbox } from "@mutsuna/ui/checkbox";
+  import { Popover, PopoverContent, PopoverTrigger } from "@mutsuna/ui/popover";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
   import Info from "@lucide/svelte/icons/info";
   import Mic from "@lucide/svelte/icons/mic";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
+  import SlidersHorizontal from "@lucide/svelte/icons/sliders-horizontal";
   import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import { VAD_PRESET_OPTIONS, type LocalVadModelStatus, type VadPreset } from "../providers";
@@ -33,7 +35,6 @@
   interface Props {
     disabled?: boolean;
     preview?: boolean;
-    mobileExpanded?: boolean;
     consumeMobileAction?: () => boolean;
     onAudioReady: (audio: SelectedAudioFile) => void;
     onBusyChange: (busy: boolean) => void;
@@ -44,7 +45,6 @@
   let {
     disabled = false,
     preview = false,
-    mobileExpanded = false,
     consumeMobileAction = () => false,
     onAudioReady,
     onBusyChange = () => {},
@@ -108,6 +108,7 @@
   let vadModel = $state.raw<LocalVadModelStatus | null>(null);
   let previewRecordingStartedAt = 0;
   let previewMicrophoneLevel = $state(0.18);
+  let settingsPopoverOpen = $state(false);
 
   $effect(() => {
     if (!preview) return;
@@ -193,6 +194,17 @@
   const selectedVadLabel = $derived(
     VAD_PRESET_OPTIONS.find((option) => option.value === vadPreset)?.label ?? "標準"
   );
+  const inputSettingsSummary = $derived.by(() => {
+    const sources = [
+      microphone ? "マイク ON" : "マイク OFF",
+      systemAudio ? "システム音声 ON" : "システム音声 OFF"
+    ];
+    return `${sources.join(" · ")} · 無音停止 ${selectedVadLabel}`;
+  });
+
+  $effect(() => {
+    if (active) settingsPopoverOpen = false;
+  });
 
   function toDeviceSelectValue(value: string): string {
     return value === "" ? defaultDeviceSelectValue : value;
@@ -264,9 +276,9 @@
     await acceptStatus(nextStatus);
   }
 
-  async function acceptStatus(nextStatus: RecordingStatus) {
+  async function acceptStatus(nextStatus: RecordingStatus, deliverCompletion = true) {
     status = nextStatus;
-    await deliverCompletedRecording(nextStatus);
+    if (deliverCompletion) await deliverCompletedRecording(nextStatus);
     if (nextStatus.phase === "failed" && nextStatus.error) onError(nextStatus.error);
   }
 
@@ -314,7 +326,12 @@
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
         vadPreset = nextVadPreset;
         vadModel = nextVadModel;
-        await acceptStatus(nextStatus);
+        // 画面の再表示時に残っている前回のcompleted状態は、新しい録音完了ではない。
+        // 初回同期では表示状態だけを復元し、通知と音声の再引き渡しを行わない。
+        if (nextStatus.phase === "completed" && nextStatus.outputPath) {
+          deliveredOutput = nextStatus.outputPath;
+        }
+        await acceptStatus(nextStatus, false);
       } catch (error) {
         onError(errorText(error));
       } finally {
@@ -526,7 +543,7 @@
     </Alert>
   {/if}
 
-  <div class:active class:mobile-expanded={mobileExpanded} class="recording-console">
+  <div class:active class="recording-console">
   <section class="desktop-recording-hero" aria-label="録音操作">
     <div class:active class="desktop-recording-status" role="status">
       {#if active}
@@ -574,6 +591,26 @@
   </div>
   {/if}
 
+  <Popover bind:open={settingsPopoverOpen}>
+    <PopoverTrigger>
+      {#snippet child({ props })}
+        <button
+          {...props}
+          class="recording-settings-summary"
+          type="button"
+          disabled={active || disabled}
+        >
+          <SlidersHorizontal class="settings-summary-icon" aria-hidden="true" />
+          <span class="settings-summary-copy">
+            <strong>入力設定</strong>
+            <small>{inputSettingsSummary}</small>
+          </span>
+          <span class="settings-summary-action">設定を変更</span>
+        </button>
+      {/snippet}
+    </PopoverTrigger>
+    <PopoverContent class="recording-settings-popover" align="center" sideOffset={8}>
+      <div class="recording-input-settings" aria-label="入力設定">
   <div class="sources" aria-disabled={active || disabled}>
     <div class="source">
       <label class="source-toggle">
@@ -648,14 +685,14 @@
   </div>
 
   <div class:unavailable={vadAvailability === "unavailable"} class="vad-setting">
-    <span>無音自動停止</span>
+    <span class="setting-title">無音自動停止</span>
     <Select
       type="single"
       value={vadPreset}
       onValueChange={changeVadPreset}
       disabled={vadAvailability !== "available" || active || disabled || vadPresetBusy}
     >
-      <SelectTrigger aria-label="録音中の音声検出感度" class="source-select">
+      <SelectTrigger aria-label="録音中の音声検出感度" class="source-select vad-select">
         <span class="select-value" title={selectedVadLabel}>{selectedVadLabel}</span>
       </SelectTrigger>
       <SelectContent>
@@ -670,6 +707,9 @@
       <small>この端末では無音自動停止を利用できません</small>
     {/if}
   </div>
+      </div>
+    </PopoverContent>
+  </Popover>
 
   </div>
 
@@ -740,19 +780,34 @@
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
   .recording-console { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.72fr); align-items: stretch; }
-  .desktop-recording-hero { grid-column: 1 / -1; min-width: 0; padding: 16px 24px 21px; border-bottom: 1px solid var(--border); }
-  .desktop-recording-status { display: flex; min-height: 24px; align-items: center; justify-content: center; gap: 9px; color: var(--muted-foreground); font-size: 0.8rem; font-weight: 680; }
+  .desktop-recording-hero { grid-column: 1 / -1; min-width: 0; padding: 10px 24px 12px; }
+  .recording-console.active .desktop-recording-hero { padding: 16px 24px 21px; }
+  .desktop-recording-status { display: flex; min-height: 0; align-items: center; justify-content: center; gap: 9px; color: var(--muted-foreground); font-size: 0.8rem; font-weight: 680; }
   .desktop-recording-status.active { color: var(--foreground); }
+  .desktop-recording-status.active { min-height: 24px; }
   .desktop-recording-status strong { margin-left: 3px; font-size: 0.83rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
-  .waveform-stage { position: relative; min-height: 119px; margin-top: 2px; padding: 13px 0 22px; }
+  .waveform-stage { position: relative; min-height: 94px; margin-top: 2px; padding: 8px 0 14px; }
+  .recording-console.active .waveform-stage { min-height: 119px; padding: 13px 0 22px; }
   .desktop-record-controls { position: absolute; z-index: 1; top: 2px; left: 50%; display: flex; width: 142px; align-items: center; flex-direction: column; gap: 7px; transform: translateX(-50%); color: var(--foreground); font-size: 0.78rem; font-weight: 720; }
   .desktop-discard { padding: 0; border: 0; color: var(--muted-foreground); background: transparent; font: inherit; font-size: 0.72rem; cursor: pointer; }
   .desktop-discard:hover:not(:disabled) { color: var(--destructive); }
-  .sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .source { display: grid; align-content: center; gap: 10px; min-width: 0; padding: 18px 24px; border-right: 1px solid var(--border); background: transparent; }
-  .source-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; font-weight: 750; }
+  .recording-settings-summary { display: grid; grid-column: 1 / -1; width: 100%; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 10px 14px; border: 0; border-radius: var(--radius-control); color: var(--foreground); background: color-mix(in oklch, var(--card) 82%, transparent); cursor: pointer; font: inherit; text-align: left; }
+  .recording-settings-summary:hover { background: color-mix(in oklch, var(--muted) 48%, transparent); }
+  .recording-settings-summary:disabled { cursor: not-allowed; opacity: 0.58; }
+  .settings-summary-copy { display: flex; min-width: 0; align-items: baseline; gap: 14px; }
+  .recording-settings-summary strong { flex: none; font-size: 0.8rem; font-weight: 730; }
+  .recording-settings-summary small { overflow: hidden; color: var(--muted-foreground); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+  .recording-settings-summary :global(.settings-summary-icon) { width: 17px; height: 17px; color: var(--primary); }
+  .settings-summary-action { padding: 4px 8px; border-radius: 999px; color: var(--primary); background: color-mix(in oklch, var(--primary) 9%, transparent); font-size: 0.68rem; font-weight: 700; white-space: nowrap; }
+  .recording-input-settings { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)) 176px; }
+  :global(.recording-settings-popover) { width: min(656px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 32px)); padding: 0; overflow-x: hidden; overflow-y: auto; }
+  .sources { display: contents; }
+  .source { display: grid; align-content: start; gap: 10px; min-width: 0; padding: 18px; border-right: 1px solid var(--border); background: transparent; }
+  .source-toggle,
+  .setting-title { display: flex; min-height: 32px; align-items: center; gap: 8px; margin: 0; font-size: 0.82rem; font-weight: 700; line-height: 1.3; }
   .source-toggle :global(> svg) { width: 17px; height: 17px; color: var(--muted-foreground); }
   :global(.source-select) { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; }
+  :global(.vad-select) { width: 140px; max-width: 100%; justify-self: start; }
   .select-value { display: block; min-width: 0; max-width: 100%; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meter { --meter-color: var(--audio-microphone); --meter-gradient: linear-gradient(90deg, color-mix(in oklch, var(--meter-color) 42%, var(--card)) 0%, color-mix(in oklch, var(--meter-color) 76%, var(--card)) 52%, var(--meter-color) 100%); height: 5px; overflow: hidden; border-radius: 99px; background: var(--audio-silent); }
   .meter.system-meter { --meter-color: var(--audio-system); }
@@ -760,14 +815,15 @@
   .meter span { display: block; height: 100%; border-radius: inherit; background: var(--meter-gradient); transition: width 90ms linear; }
   .monitor-note { color: var(--muted-foreground); font-size: 0.7rem; }
   .recorder { display: flex; align-items: center; gap: 9px; margin: 0; padding: 16px 20px 16px 4px; background: transparent; }
-  .vad-setting { display: grid; grid-template-columns: 1fr; align-content: center; gap: 7px; min-width: 0; margin: 0; padding: 18px 24px; color: var(--foreground); font-size: 0.78rem; font-weight: 680; }
+  .vad-setting { display: grid; box-sizing: border-box; grid-template-columns: 1fr; align-content: start; gap: 10px; min-width: 0; margin: 0; padding: 18px; color: var(--foreground); border: 0; }
   .vad-setting.unavailable { color: var(--muted-foreground); }
   .vad-setting small { color: var(--muted-foreground); font-size: 0.68rem; font-weight: 500; line-height: 1.4; }
   .recorder strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
   .record-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--audio-microphone); }
   .recorder.active .record-dot { background: var(--audio-recording); box-shadow: 0 0 0 5px color-mix(in oklch, var(--audio-recording) 14%, transparent); }
   .capture-warning { margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius-control); color: var(--warning-foreground); background: color-mix(in oklch, var(--warning) 16%, var(--background)); font-size: 0.84rem; }
-  .desktop-start { display: grid; width: 82px; height: 82px; place-items: center; padding: 0; border: 7px solid var(--card); border-radius: 50%; color: var(--primary-foreground); background: var(--gradient-primary); box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 22%, var(--border)), var(--shadow-active); cursor: pointer; }
+  .desktop-start { display: grid; width: 72px; height: 72px; place-items: center; padding: 0; border: 7px solid var(--card); border-radius: 50%; color: var(--primary-foreground); background: var(--gradient-primary); box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 22%, var(--border)), var(--shadow-active); cursor: pointer; }
+  .recording-console.active .desktop-start { width: 82px; height: 82px; }
   .desktop-start.active { background: var(--audio-recording); box-shadow: 0 0 0 1px color-mix(in oklch, var(--audio-recording) 26%, var(--border)), var(--shadow-active); }
   .desktop-start:hover:not(:disabled) { background: var(--gradient-primary-hover); }
   .desktop-start.active:hover:not(:disabled) { background: color-mix(in oklch, var(--audio-recording) 88%, black); }
@@ -782,35 +838,34 @@
     .limitation { display: none; }
     .recording-console { --settings-motion: 300ms cubic-bezier(0.22, 1, 0.36, 1); display: block; }
     .desktop-recording-hero { display: none; }
+    .recording-settings-summary { min-height: 48px; padding: 9px 14px; }
+    .settings-summary-copy { display: grid; gap: 2px; }
+    .recording-settings-summary strong { font-size: 0.82rem; }
+    .recording-settings-summary small { font-size: 0.64rem; }
+    .recording-input-settings { grid-template-columns: 1fr; }
     .mobile-recorder { display: flex; min-height: 52px; flex-direction: row; justify-content: flex-start; gap: 9px; margin: 0; padding: 8px 2px; background: transparent; }
     .mobile-recorder strong { font-size: clamp(2.55rem, 13vw, 3.35rem); font-weight: 760; line-height: 1; letter-spacing: 0.025em; }
     .mobile-recording-state { display: flex; align-items: center; gap: 7px; color: var(--muted-foreground); font-size: 0.82rem; }
     .mobile-recording-state .record-dot { width: 8px; height: 8px; background: var(--audio-microphone); }
     .mobile-recorder.active .record-dot { background: var(--audio-recording); }
-    .sources { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: 0; }
+    .sources { display: contents; }
     .source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 42%); align-items: center; gap: 9px 12px; min-height: 58px; padding: 9px 2px; border: 0; border-bottom: 1px solid var(--border); background: transparent; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion); }
     .source:first-child,
     .source:last-child { grid-area: auto; }
-    .source-toggle { gap: 10px; font-size: 0.88rem; transition: min-height var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
+    .source-toggle,
+    .setting-title { min-height: 34px; gap: 10px; font-size: 0.88rem; font-weight: 720; transition: min-height var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
     .source-toggle :global(button) { width: 34px; height: 34px; border-radius: 7px; transition: width var(--settings-motion), height var(--settings-motion), border-radius var(--settings-motion); }
     .source-toggle :global(svg) { width: 20px; height: 20px; transition: width var(--settings-motion), height var(--settings-motion); }
     .source-toggle :global(> svg) { display: none; }
-    :global(.source-select) { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
+    .source :global(.source-select) { width: calc(100% - 44px); grid-column: 1 / -1; margin-left: 44px; transition: width var(--settings-motion), margin-left var(--settings-motion), font-size var(--settings-motion); }
     .meter { height: 6px; margin-left: 0; background: repeating-linear-gradient(90deg, var(--audio-silent) 0 9px, transparent 9px 13px); transition: width var(--settings-motion), height var(--settings-motion); }
     .meter.live { background: repeating-linear-gradient(90deg, color-mix(in oklch, var(--meter-color) 18%, var(--audio-silent)) 0 9px, transparent 9px 13px); }
     .meter span { background: var(--meter-gradient); -webkit-mask: repeating-linear-gradient(90deg, #000 0 9px, transparent 9px 13px); mask: repeating-linear-gradient(90deg, #000 0 9px, transparent 9px 13px); }
     .monitor-note { grid-column: 1 / -1; margin-left: 44px; transition: margin-left var(--settings-motion), font-size var(--settings-motion); }
-    .vad-setting { grid-template-columns: 1fr minmax(108px, 132px); justify-content: stretch; min-height: 54px; margin: 0; padding: 7px 2px; border: 0; color: var(--foreground); font-size: 0.86rem; font-weight: 720; transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion), font-size var(--settings-motion); }
+    .vad-setting { grid-template-columns: minmax(0, 1fr) 132px; align-items: center; justify-content: stretch; gap: 9px 12px; min-height: 58px; margin: 0; padding: 9px 2px; border: 0; color: var(--foreground); transition: min-height var(--settings-motion), padding var(--settings-motion), gap var(--settings-motion); }
+    :global(.vad-select) { width: 132px; justify-self: end; }
     .vad-setting small { grid-column: 1 / -1; padding-bottom: 4px; transition: padding var(--settings-motion), font-size var(--settings-motion), line-height var(--settings-motion); }
-    .recording-console.mobile-expanded .source { min-height: 112px; grid-template-columns: 1fr; align-content: center; gap: 16px; padding: 18px 4px; }
-    .recording-console.mobile-expanded .source-toggle { min-height: 54px; gap: 14px; font-size: 1.12rem; }
-    .recording-console.mobile-expanded .source-toggle :global(button) { width: 52px; height: 52px; border-radius: 11px; }
-    .recording-console.mobile-expanded .source-toggle :global(svg) { width: 29px; height: 29px; }
-    .recording-console.mobile-expanded :global(.source-select) { grid-column: 1; margin-left: 66px; font-size: 0.95rem; }
-    .recording-console.mobile-expanded .meter { width: 100%; height: 14px; }
-    .recording-console.mobile-expanded .monitor-note { grid-column: 1; margin-left: 66px; font-size: 0.8rem; }
-    .recording-console.mobile-expanded .vad-setting { min-height: 96px; grid-template-columns: 1fr; align-content: center; gap: 12px; padding: 16px 4px; font-size: 1.1rem; }
-    .recording-console.mobile-expanded .vad-setting small { grid-column: 1; padding-bottom: 0; font-size: 0.8rem; line-height: 1.55; }
+    :global(.recording-settings-popover) { width: calc(100vw - 24px); max-height: min(70vh, 560px); }
     .desktop-start { display: none; }
     .mobile-record-toggle { display: flex; position: fixed; z-index: 30; left: 0; bottom: 0; width: 100vw; height: 50vw; align-items: center; justify-content: center; padding: 0 0 env(safe-area-inset-bottom, 0px); overflow: hidden; border: 0; border-radius: 50vw 50vw 0 0; color: var(--primary-foreground); background: var(--gradient-primary); box-shadow: 0 -12px 34px color-mix(in oklch, var(--primary) 24%, transparent); cursor: pointer; transition: background 360ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease; -webkit-tap-highlight-color: transparent; }
     .mobile-record-toggle:active:not(:disabled) { background: var(--gradient-primary-hover); }

@@ -27,6 +27,7 @@ pub(crate) const NEURONS_PER_AUDIO_MINUTE: f64 = 46.63;
 pub(crate) const FREE_DAILY_NEURONS: f64 = 10_000.0;
 const API_BASE_URL: &str = "https://api.cloudflare.com/client/v4/accounts";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const TEXT_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const CHUNK_CORE_MS: u64 = 5 * 60 * 1_000;
 const CHUNK_OVERLAP_MS: u64 = 2_000;
 const CHUNK_SAMPLE_RATE: u32 = 16_000;
@@ -35,6 +36,8 @@ const MAX_PARALLEL_CHUNKS: usize = 2;
 #[cfg(not(target_os = "android"))]
 const MAX_PARALLEL_CHUNKS: usize = 4;
 const MAX_CHUNK_ATTEMPTS: u32 = 3;
+const MAX_TEXT_GENERATION_ATTEMPTS: u32 = 3;
+const TEXT_GENERATION_MAX_TOKENS: u32 = 32_768;
 
 #[derive(Serialize)]
 struct TranscriptionRequest {
@@ -84,6 +87,7 @@ struct TextGenerationRequest<'a> {
     messages: [TextGenerationMessage<'a>; 1],
     max_tokens: u32,
     temperature: f32,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -118,6 +122,7 @@ struct WorkersAiTranscript {
     transcription_info: Option<TranscriptionInfo>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct WorkersAiTextGeneration {
     #[serde(default)]
@@ -126,17 +131,20 @@ struct WorkersAiTextGeneration {
     choices: Vec<WorkersAiTextChoice>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct WorkersAiTextChoice {
     message: WorkersAiTextMessage,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct WorkersAiTextMessage {
     #[serde(default)]
     content: String,
 }
 
+#[cfg(test)]
 impl WorkersAiTextGeneration {
     fn into_text(self) -> Option<String> {
         if !self.response.trim().is_empty() {
@@ -234,57 +242,255 @@ pub(crate) async fn validate_credentials(
     Err(api_error(status, body.as_ref()))
 }
 
-pub(crate) async fn generate_text(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextGenerationProgress {
+    AttemptStarted {
+        attempt: u32,
+        max_attempts: u32,
+    },
+    StreamStarted {
+        attempt: u32,
+        max_attempts: u32,
+    },
+    RetryScheduled {
+        next_attempt: u32,
+        max_attempts: u32,
+        delay_seconds: u64,
+    },
+}
+
+pub(crate) async fn generate_text<F>(
     account: &SecretString,
     api_token: &SecretString,
     model_id: &str,
     prompt: &str,
-) -> Result<String, String> {
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(TextGenerationProgress),
+{
     let account = account_id(account)?;
+    let http_client = client()?;
+    let mut last_error = None;
+    let mut attempts_used = 0;
+    for attempt in 1..=MAX_TEXT_GENERATION_ATTEMPTS {
+        attempts_used = attempt;
+        on_progress(TextGenerationProgress::AttemptStarted {
+            attempt,
+            max_attempts: MAX_TEXT_GENERATION_ATTEMPTS,
+        });
+        match request_text_generation(&http_client, account, api_token, model_id, prompt, || {
+            on_progress(TextGenerationProgress::StreamStarted {
+                attempt,
+                max_attempts: MAX_TEXT_GENERATION_ATTEMPTS,
+            });
+        })
+        .await
+        {
+            Ok(text) => return Ok(text),
+            Err(error) => {
+                let retryable = error.retryable;
+                last_error = Some(error.message);
+                if !retryable || attempt == MAX_TEXT_GENERATION_ATTEMPTS {
+                    break;
+                }
+                let delay_seconds = 1 << attempt;
+                on_progress(TextGenerationProgress::RetryScheduled {
+                    next_attempt: attempt + 1,
+                    max_attempts: MAX_TEXT_GENERATION_ATTEMPTS,
+                    delay_seconds,
+                });
+                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+            }
+        }
+    }
+    Err(format!(
+        "会議ノート生成を{}回試行しましたが完了できませんでした: {}",
+        attempts_used,
+        last_error.unwrap_or_else(|| "詳細不明".into())
+    ))
+}
+
+#[derive(Debug)]
+struct TextGenerationError {
+    message: String,
+    retryable: bool,
+}
+
+async fn request_text_generation<F>(
+    http_client: &reqwest::Client,
+    account: &str,
+    api_token: &SecretString,
+    model_id: &str,
+    prompt: &str,
+    on_stream_started: F,
+) -> Result<String, TextGenerationError>
+where
+    F: FnOnce(),
+{
     let request = TextGenerationRequest {
         messages: [TextGenerationMessage {
             role: "user",
             content: prompt,
         }],
-        max_tokens: 8_192,
+        max_tokens: TEXT_GENERATION_MAX_TOKENS,
         temperature: 0.1,
+        stream: true,
     };
-    let response = client()?
-        .post(endpoint(account, &format!("run/{model_id}")))
-        .bearer_auth(api_token.expose_secret())
-        .json(&request)
-        .send()
-        .await
-        .map_err(|error| format!("Cloudflareへ会議ノートを送信できませんでした: {error}"))?;
+    let response = tokio::time::timeout(
+        TEXT_GENERATION_IDLE_TIMEOUT,
+        http_client
+            .post(endpoint(account, &format!("run/{model_id}")))
+            .bearer_auth(api_token.expose_secret())
+            .json(&request)
+            .send(),
+    )
+    .await
+    .map_err(|_| TextGenerationError {
+        message: format!(
+            "Cloudflare Workers AIから{}秒間応答がありませんでした。",
+            TEXT_GENERATION_IDLE_TIMEOUT.as_secs()
+        ),
+        retryable: true,
+    })?
+    .map_err(|error| TextGenerationError {
+        message: format!("Cloudflareへ会議ノートを送信できませんでした: {error}"),
+        retryable: error.is_timeout() || error.is_connect() || error.is_request(),
+    })?;
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Cloudflareの応答を読み取れませんでした: {error}"))?;
     if !status.is_success() {
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| TextGenerationError {
+                message: format!("Cloudflareのエラー応答を読み取れませんでした: {error}"),
+                retryable: true,
+            })?;
         let body = serde_json::from_slice::<ApiEnvelope<serde_json::Value>>(&bytes).ok();
-        return Err(api_error(status, body.as_ref()));
+        return Err(TextGenerationError {
+            message: api_error(status, body.as_ref()),
+            retryable: retryable_text_generation_status(status),
+        });
     }
-    let envelope: ApiEnvelope<WorkersAiTextGeneration> =
-        serde_json::from_slice(&bytes).map_err(|error| {
-            eprintln!("Could not parse Cloudflare Workers AI text response: {error}");
-            "Cloudflare Workers AIの応答形式を読み取れませんでした。".to_string()
+    on_stream_started();
+    read_text_generation_stream(response).await
+}
+
+async fn read_text_generation_stream(
+    response: reqwest::Response,
+) -> Result<String, TextGenerationError> {
+    let mut stream = response.bytes_stream();
+    let mut pending = Vec::<u8>::new();
+    let mut event_data = Vec::<String>::new();
+    let mut output = String::new();
+    loop {
+        let next = tokio::time::timeout(TEXT_GENERATION_IDLE_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| TextGenerationError {
+                message: format!(
+                    "Cloudflare Workers AIから{}秒間データを受信できませんでした。",
+                    TEXT_GENERATION_IDLE_TIMEOUT.as_secs()
+                ),
+                retryable: true,
+            })?;
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| TextGenerationError {
+            message: format!("Cloudflareのストリームを読み取れませんでした: {error}"),
+            retryable: true,
         })?;
-    if !envelope.success {
-        let message = envelope
-            .errors
-            .first()
-            .map(|error| error.message.as_str())
-            .unwrap_or("詳細不明");
-        return Err(format!("Cloudflare Workers AI: {message}"));
+        pending.extend_from_slice(&chunk);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut line = pending.drain(..=newline).collect::<Vec<_>>();
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            let line = std::str::from_utf8(&line).map_err(|_| TextGenerationError {
+                message: "CloudflareのストリームがUTF-8ではありません。".into(),
+                retryable: true,
+            })?;
+            if line.is_empty() {
+                if consume_text_generation_event(&mut event_data, &mut output)? {
+                    return Ok(output);
+                }
+            } else if let Some(data) = line.strip_prefix("data:") {
+                event_data.push(data.trim_start().to_string());
+            }
+        }
     }
-    let response = envelope
-        .result
-        .and_then(WorkersAiTextGeneration::into_text)
-        .ok_or_else(|| {
-            "Cloudflare Workers AIから会議ノート本文を受け取れませんでした。".to_string()
+    if !pending.is_empty() {
+        let line = std::str::from_utf8(&pending).map_err(|_| TextGenerationError {
+            message: "CloudflareのストリームがUTF-8ではありません。".into(),
+            retryable: true,
         })?;
-    Ok(response)
+        if let Some(data) = line.trim_end_matches(['\r', '\n']).strip_prefix("data:") {
+            event_data.push(data.trim_start().to_string());
+        }
+    }
+    consume_text_generation_event(&mut event_data, &mut output)?;
+    if output.trim().is_empty() {
+        Err(TextGenerationError {
+            message: "Cloudflare Workers AIから会議ノート本文を受信できませんでした。".into(),
+            retryable: true,
+        })
+    } else {
+        Ok(output)
+    }
+}
+
+fn consume_text_generation_event(
+    event_data: &mut Vec<String>,
+    output: &mut String,
+) -> Result<bool, TextGenerationError> {
+    if event_data.is_empty() {
+        return Ok(false);
+    }
+    let data = event_data.join("\n");
+    event_data.clear();
+    if data.trim() == "[DONE]" {
+        return Ok(true);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&data).map_err(|error| TextGenerationError {
+            message: format!("CloudflareのSSEデータを解析できませんでした: {error}"),
+            retryable: true,
+        })?;
+    if let Some(message) = value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(TextGenerationError {
+            message: format!("Cloudflare Workers AI: {message}"),
+            retryable: true,
+        });
+    }
+    let text = value
+        .get("response")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/choices/0/delta/content")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .pointer("/choices/0/text")
+                .and_then(serde_json::Value::as_str)
+        });
+    if let Some(text) = text {
+        output.push_str(text);
+    }
+    Ok(false)
+}
+
+fn retryable_text_generation_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status.is_server_error()
 }
 
 fn prompt(context: Option<&TranscriptionContext>) -> Option<String> {
@@ -797,8 +1003,10 @@ fn format_cost_usd(audio_duration_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_windows, format_cost_usd, merge_chunks, normalize, ChunkSpec,
+        chunk_windows, consume_text_generation_event, format_cost_usd, merge_chunks, normalize,
+        retryable_text_generation_status, ChunkSpec, TextGenerationMessage, TextGenerationRequest,
         WorkersAiTextGeneration, WorkersAiTranscript, CHUNK_CORE_MS, CHUNK_OVERLAP_MS, MODEL_ID,
+        TEXT_GENERATION_MAX_TOKENS,
     };
     use crate::transcription::{TokenTimeSource, Transcript, TranscriptToken};
     use std::path::PathBuf;
@@ -845,6 +1053,53 @@ mod tests {
         }))
         .expect("OpenAI-compatible response");
         assert_eq!(compatible.into_text().as_deref(), Some("compatible"));
+    }
+
+    #[test]
+    fn text_generation_reserves_enough_output_for_structured_meeting_json() {
+        let request = TextGenerationRequest {
+            messages: [TextGenerationMessage {
+                role: "user",
+                content: "prompt",
+            }],
+            max_tokens: TEXT_GENERATION_MAX_TOKENS,
+            temperature: 0.1,
+            stream: true,
+        };
+        let value = serde_json::to_value(request).expect("request");
+        assert_eq!(value["max_tokens"], 32_768);
+        assert_eq!(value["stream"], true);
+    }
+
+    #[test]
+    fn streaming_events_preserve_native_and_openai_text_deltas() {
+        let mut output = String::new();
+        let mut native = vec![r#"{"response":"前半"}"#.to_string()];
+        let mut compatible = vec![r#"{"choices":[{"delta":{"content":"後半"}}]}"#.to_string()];
+        let mut done = vec!["[DONE]".to_string()];
+
+        assert!(!consume_text_generation_event(&mut native, &mut output).expect("native"));
+        assert!(!consume_text_generation_event(&mut compatible, &mut output).expect("compatible"));
+        assert!(consume_text_generation_event(&mut done, &mut output).expect("done"));
+        assert_eq!(output, "前半後半");
+    }
+
+    #[test]
+    fn text_generation_retries_only_transient_http_failures() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(retryable_text_generation_status(status));
+        }
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            assert!(!retryable_text_generation_status(status));
+        }
     }
 
     #[test]

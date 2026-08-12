@@ -117,9 +117,7 @@ impl LiveSpectrumAnalyzer {
             .iter()
             .enumerate()
             .map(|(index, sample)| {
-                let window = 0.5
-                    - 0.5
-                        * (std::f32::consts::TAU * index as f32 / denominator).cos();
+                let window = 0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / denominator).cos();
                 window_sum += window;
                 sample * window
             })
@@ -771,9 +769,7 @@ mod tests {
         let frequency = 440.0f32;
         let samples = (0..SPECTRUM_WINDOW_SAMPLES)
             .map(|index| {
-                (std::f32::consts::TAU * frequency * index as f32
-                    / super::SAMPLE_RATE as f32)
-                    .sin()
+                (std::f32::consts::TAU * frequency * index as f32 / super::SAMPLE_RATE as f32).sin()
                     * 0.5
             })
             .collect::<Vec<_>>();

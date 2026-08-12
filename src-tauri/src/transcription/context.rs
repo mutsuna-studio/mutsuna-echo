@@ -97,6 +97,20 @@ pub(crate) struct GlobalTranscriptionContextSettings {
     pub(crate) corrections: Vec<TextCorrection>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextGenerationContext {
+    pub(crate) background: String,
+    pub(crate) terms: Vec<String>,
+    pub(crate) corrections: Vec<TextCorrection>,
+}
+
+impl TextGenerationContext {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.background.is_empty() && self.terms.is_empty() && self.corrections.is_empty()
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -522,6 +536,60 @@ pub(crate) fn effective_corrections(
     Ok(normalize_corrections(corrections))
 }
 
+fn merged_text_generation_context(
+    global: &GlobalTranscriptionContextSettings,
+    meeting: &MeetingTranscriptionContext,
+    learned: Vec<TextCorrection>,
+) -> TextGenerationContext {
+    let global_background = meeting.use_global.then_some(global.background.as_str());
+    let background = [global_background, Some(meeting.background.as_str())]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut terms = if meeting.use_global {
+        global.terms.clone()
+    } else {
+        Vec::new()
+    };
+    terms.extend(meeting.terms.clone());
+    let mut corrections = if meeting.use_global {
+        global.corrections.clone()
+    } else {
+        Vec::new()
+    };
+    corrections.extend(meeting.corrections.clone());
+    corrections.extend(learned);
+    let normalized = normalize_context(TranscriptionContext { background, terms });
+    TextGenerationContext {
+        background: normalized.background,
+        terms: normalized.terms,
+        corrections: normalize_corrections(corrections),
+    }
+}
+
+pub(crate) fn effective_text_generation_context(
+    app: &AppHandle,
+    meeting_id: &str,
+) -> Result<TextGenerationContext, String> {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| "テキスト生成用コンテキストを読み込めませんでした。".to_string())?;
+    let global = read_global_settings(app)?;
+    let meeting = crate::meeting_store::transcription_context(app, meeting_id)?;
+    let learned = read_learned_corrections(app)?
+        .corrections
+        .into_iter()
+        .map(|correction| TextCorrection {
+            from: correction.from,
+            to: correction.to,
+        })
+        .collect();
+    Ok(merged_text_generation_context(&global, &meeting, learned))
+}
+
 fn prepare_for_provider(
     mut context: Option<TranscriptionContext>,
     provider: TranscriptionProvider,
@@ -669,8 +737,9 @@ pub(crate) fn set_meeting_transcription_context(
 #[cfg(test)]
 mod tests {
     use super::{
-        correction_from_manual_edit, merged_context, prepare_for_provider, validate_for_provider,
-        GlobalTranscriptionContextSettings, MeetingTranscriptionContext, TranscriptionContext,
+        correction_from_manual_edit, merged_context, merged_text_generation_context,
+        prepare_for_provider, validate_for_provider, GlobalTranscriptionContextSettings,
+        MeetingTranscriptionContext, TextCorrection, TranscriptionContext,
     };
     use crate::transcription::TranscriptionProvider;
 
@@ -691,6 +760,50 @@ mod tests {
     #[test]
     fn global_context_is_disabled_by_default() {
         assert!(!GlobalTranscriptionContextSettings::default().context_enabled);
+    }
+
+    #[test]
+    fn text_generation_uses_context_even_when_transcription_context_is_disabled() {
+        let global = GlobalTranscriptionContextSettings {
+            context_enabled: false,
+            background: "会社の情報".into(),
+            terms: vec!["Mutsuna".into()],
+            corrections: vec![TextCorrection {
+                from: "むつな".into(),
+                to: "Mutsuna".into(),
+            }],
+        };
+
+        let context = merged_text_generation_context(
+            &global,
+            &MeetingTranscriptionContext::default(),
+            Vec::new(),
+        );
+
+        assert_eq!(context.background, "会社の情報");
+        assert_eq!(context.terms, ["Mutsuna"]);
+        assert_eq!(context.corrections[0].to, "Mutsuna");
+    }
+
+    #[test]
+    fn text_generation_respects_meeting_global_context_opt_out() {
+        let global = GlobalTranscriptionContextSettings {
+            context_enabled: false,
+            background: "会社の情報".into(),
+            terms: vec!["Mutsuna".into()],
+            corrections: Vec::new(),
+        };
+        let meeting = MeetingTranscriptionContext {
+            background: "個別会議".into(),
+            terms: vec!["限定用語".into()],
+            corrections: Vec::new(),
+            use_global: false,
+        };
+
+        let context = merged_text_generation_context(&global, &meeting, Vec::new());
+
+        assert_eq!(context.background, "個別会議");
+        assert_eq!(context.terms, ["限定用語"]);
     }
 
     #[test]

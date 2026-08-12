@@ -38,6 +38,7 @@ pub(crate) struct RecentMeetingSummary {
     title: String,
     file_name: String,
     size_bytes: u64,
+    duration_ms: Option<u64>,
     occurred_at_unix_ms: u64,
     updated_at_unix_ms: u64,
     audio_available: bool,
@@ -328,6 +329,7 @@ fn list_recent_meetings_sync(app: &AppHandle) -> Result<Vec<RecentMeetingSummary
             title: stored.title,
             file_name: stored.file_name,
             size_bytes: stored.size_bytes,
+            duration_ms: stored.duration_ms,
             occurred_at_unix_ms,
             updated_at_unix_ms: stored.updated_at_unix_ms.max(occurred_at_unix_ms),
             audio_available: stored.audio_available,
@@ -492,6 +494,179 @@ pub(crate) fn rename_meeting_audio(
     }
 }
 
+pub(crate) fn rename_default_meeting_audio(
+    app: &AppHandle,
+    meeting_id: &str,
+    title: &str,
+) -> Result<Option<String>, String> {
+    crate::meeting_store::validate_meeting_id(meeting_id)?;
+    let stem = safe_generated_file_stem(title)?;
+    if is_default_recording_file_name(&format!("{stem}.m4a")) {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let recordings = recording::completed_recordings(app)?;
+        let Some(recording) = recordings.iter().find(|recording| {
+            recording::completed_recording_path(app, &recording.id)
+                .ok()
+                .and_then(|path| crate::meeting_store::resolve_or_create(app, &path).ok())
+                .as_deref()
+                == Some(meeting_id)
+        }) else {
+            return Ok(None);
+        };
+        if !is_default_recording_file_name(&recording.file_name) {
+            return Ok(None);
+        }
+        let existing = recordings
+            .iter()
+            .map(|recording| recording.file_name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let new_file_name =
+            unique_generated_file_name(&stem, "m4a", |candidate| existing.contains(candidate));
+        recording::android::rename_completed_recording(&recording.id, &new_file_name)?;
+        crate::meeting_store::rename_audio_metadata(app, meeting_id, &new_file_name)?;
+        if let Ok(path) = recording::completed_recording_path(app, &recording.id) {
+            crate::commands::transcribe::refresh_selected_audio_after_rename(
+                app, meeting_id, path,
+            )?;
+        }
+        return Ok(Some(new_file_name));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let Ok(current) = crate::meeting_store::local_audio_path(app, meeting_id) else {
+            return Ok(None);
+        };
+        let owned_recording = recording::completed_recordings_with_paths(app)?
+            .into_iter()
+            .any(|(_, path)| std::fs::canonicalize(path).is_ok_and(|path| path == current));
+        if !owned_recording {
+            return Ok(None);
+        }
+        let current_name = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !is_default_recording_file_name(current_name) {
+            return Ok(None);
+        }
+        let extension = current
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("m4a");
+        let new_file_name = unique_generated_file_name(&stem, extension, |candidate| {
+            current.with_file_name(candidate).exists()
+        });
+        let destination = current.with_file_name(&new_file_name);
+        std::fs::rename(&current, &destination).map_err(|error| {
+            format!("生成した会議名へ音声ファイルを変更できませんでした: {error}")
+        })?;
+        if let Err(error) = crate::meeting_store::link_existing(app, meeting_id, &destination)
+            .and_then(|_| {
+                crate::meeting_store::rename_audio_metadata(app, meeting_id, &new_file_name)
+            })
+            .and_then(|_| {
+                crate::commands::transcribe::refresh_selected_audio_after_rename(
+                    app,
+                    meeting_id,
+                    destination.clone(),
+                )
+            })
+        {
+            let _ = std::fs::rename(&destination, &current);
+            return Err(error);
+        }
+        Ok(Some(new_file_name))
+    }
+}
+
+fn is_default_recording_file_name(file_name: &str) -> bool {
+    let path = std::path::Path::new(file_name);
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+    {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let bytes = stem.as_bytes();
+    if bytes.len() < 19 {
+        return false;
+    }
+    let (timestamp, suffix) = bytes.split_at(19);
+    timestamp
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'_',
+            13 | 16 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+        && (suffix.is_empty()
+            || (suffix.first() == Some(&b'_')
+                && suffix.len() > 1
+                && suffix[1..].iter().all(u8::is_ascii_digit)))
+}
+
+fn safe_generated_file_stem(title: &str) -> Result<String, String> {
+    let mut output = String::new();
+    let mut pending_space = false;
+    for character in title.trim().chars() {
+        if character.is_control() || "<>:\"/\\|?*".contains(character) || character.is_whitespace()
+        {
+            pending_space = !output.is_empty();
+            continue;
+        }
+        if pending_space {
+            output.push(' ');
+            pending_space = false;
+        }
+        if output.chars().count() >= 100 {
+            break;
+        }
+        output.push(character);
+    }
+    let output = output.trim_matches([' ', '.']).to_string();
+    if output.is_empty() {
+        return Err("生成した会議タイトルをファイル名に使用できません。".into());
+    }
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if reserved
+        .iter()
+        .any(|name| output.eq_ignore_ascii_case(name))
+    {
+        Ok(format!("会議_{output}"))
+    } else {
+        Ok(output)
+    }
+}
+
+fn unique_generated_file_name(
+    stem: &str,
+    extension: &str,
+    exists: impl Fn(&str) -> bool,
+) -> String {
+    let initial = format!("{stem}.{extension}");
+    if !exists(&initial) {
+        return initial;
+    }
+    (2..=999)
+        .map(|suffix| format!("{stem}_{suffix}.{extension}"))
+        .find(|candidate| !exists(candidate))
+        .unwrap_or_else(|| format!("{stem}_{}.{}", uuid::Uuid::now_v7(), extension))
+}
+
 fn validate_audio_file_name(value: &str, expected_extension: &str) -> Result<String, String> {
     let value = value.trim();
     let path = std::path::Path::new(value);
@@ -636,4 +811,33 @@ fn cache_android_recorded_waveform(
 #[tauri::command]
 pub(crate) fn discard_recording(app: AppHandle, session_id: String) -> Result<(), String> {
     recording::discard(&app, &session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_default_recording_file_name, safe_generated_file_stem, unique_generated_file_name,
+    };
+
+    #[test]
+    fn default_recording_name_recognizes_only_timestamp_names() {
+        assert!(is_default_recording_file_name("2026-08-12_16-30-45.m4a"));
+        assert!(is_default_recording_file_name("2026-08-12_16-30-45_2.m4a"));
+        assert!(!is_default_recording_file_name("プロダクト定例.m4a"));
+        assert!(!is_default_recording_file_name("2026-08-12_16-30-45.wav"));
+        assert!(!is_default_recording_file_name("2026-08-12_16-30.m4a"));
+    }
+
+    #[test]
+    fn generated_title_is_sanitized_and_collision_safe() {
+        assert_eq!(
+            safe_generated_file_stem("  製品/開発: 定例  ").expect("safe title"),
+            "製品 開発 定例"
+        );
+        assert_eq!(
+            unique_generated_file_name("製品定例", "m4a", |name| name == "製品定例.m4a"),
+            "製品定例_2.m4a"
+        );
+        assert!(safe_generated_file_stem("<>:/\\|?*").is_err());
+    }
 }

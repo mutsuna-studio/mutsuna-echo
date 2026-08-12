@@ -4,7 +4,10 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -16,11 +19,10 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::transcript_store::SummaryTranscriptSnapshot;
 
-const SCHEMA_VERSION: u8 = 1;
 const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
-const SUMMARY_CHUNK_DURATION_MS: u64 = 15 * 60 * 1_000;
-const MAX_SUMMARY_CHUNK_BYTES: usize = 192 * 1024;
+const SUMMARY_PROMPT_RESERVE_TOKENS: usize = 8_192;
+const SUMMARY_OUTPUT_RESERVE_TOKENS: usize = 32_768;
 #[cfg(target_os = "android")]
 const MAX_PARALLEL_SUMMARY_CHUNKS: usize = 2;
 #[cfg(not(target_os = "android"))]
@@ -122,53 +124,24 @@ pub(crate) struct SummaryProviderDefinition {
     models: Vec<SummaryModelDefinition>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SummaryReference {
-    text: String,
-    #[serde(default)]
-    source_segment_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SummaryActionItem {
-    assignee: Option<String>,
-    text: String,
-    due: Option<String>,
-    #[serde(default)]
-    source_segment_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SummaryContent {
-    overview: String,
-    decisions: Vec<SummaryReference>,
-    action_items: Vec<SummaryActionItem>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct MeetingSummary {
-    schema_version: u8,
-    summary_id: String,
+pub(crate) struct SaveMeetingDocumentRequest {
     meeting_id: String,
-    transcription_id: String,
-    source_revision: u64,
-    provider: String,
-    model: String,
-    generated_at: String,
-    content: SummaryContent,
+    expected_revision: u64,
+    document: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SummaryStatus {
-    summary: Option<MeetingSummary>,
-    transcription_id: Option<String>,
-    current_revision: Option<u64>,
-    stale: bool,
+type MeetingExtractionCandidate = serde_json::Value;
+
+pub(crate) struct GeneratedCandidate {
+    pub(crate) meeting_id: String,
+    pub(crate) transcription_id: String,
+    pub(crate) source_revision: u64,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) generated_at: String,
+    pub(crate) candidate: MeetingExtractionCandidate,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -177,7 +150,32 @@ struct SummaryProgress {
     meeting_id: String,
     completed_steps: u32,
     total_steps: u32,
-    stage: &'static str,
+    stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_step: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_delay_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    received_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity_status: Option<String>,
+}
+
+enum AcpLiveUpdate {
+    ResponseBytes(usize),
+    Activity {
+        kind: &'static str,
+        text: String,
+        status: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,6 +184,13 @@ pub(crate) struct GenerateSummaryRequest {
     meeting_id: String,
     provider_id: String,
     model_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevalidateGenerationAttemptRequest {
+    meeting_id: String,
+    attempt_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,18 +346,95 @@ pub(crate) async fn delete_summary_agent(
 }
 
 #[tauri::command]
-pub(crate) fn get_selected_summary(
+pub(crate) fn get_selected_meeting_document(
     app: AppHandle,
     meeting_id: String,
-) -> Result<SummaryStatus, String> {
-    status(&app, &meeting_id)
+) -> Result<Option<crate::meeting_schema::MeetingDocument>, String> {
+    crate::meeting_schema::selected(&app, &meeting_id)
 }
 
 #[tauri::command]
-pub(crate) async fn generate_selected_summary(
+pub(crate) fn save_edited_meeting_document(
+    app: AppHandle,
+    request: SaveMeetingDocumentRequest,
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    crate::meeting_schema::save_user_edit(
+        &app,
+        &request.meeting_id,
+        request.expected_revision,
+        &request.document,
+    )
+}
+
+#[tauri::command]
+pub(crate) fn get_latest_generation_attempt(
+    app: AppHandle,
+    meeting_id: String,
+) -> Result<Option<crate::meeting_schema::GenerationAttemptSummary>, String> {
+    crate::meeting_store::validate_meeting_id(&meeting_id)?;
+    crate::meeting_schema::latest_generation_attempt(&app, &meeting_id)
+}
+
+#[tauri::command]
+pub(crate) async fn revalidate_generation_attempt(
+    app: AppHandle,
+    request: RevalidateGenerationAttemptRequest,
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
+    let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
+        .ok_or_else(|| "再検証する文字起こしがありません。".to_string())?;
+    let (saved, mut candidate) = crate::meeting_schema::load_attempt_final_candidate(
+        &app,
+        &request.meeting_id,
+        &request.attempt_id,
+    )?;
+    let attempt = crate::meeting_schema::generation_attempt_for(
+        &app,
+        &request.meeting_id,
+        &request.attempt_id,
+    )?;
+    if saved.transcription_id != current.transcription_id
+        || saved.source_revision != current.revision
+    {
+        let error = "保存後に文字起こしが変更されたため、この生成結果は再検証できません。";
+        attempt.fail("source_changed", error)?;
+        return Err(format!(
+            "{error}\n生成結果は試行 {} に保存されています。",
+            attempt.attempt_id()
+        ));
+    }
+    crate::meeting_schema::normalize_candidate(&mut candidate, Some(&current.language));
+    normalize_evidence_segment_ids(&mut candidate, &current);
+    let revalidation_stage = format!("revalidation-{}", uuid::Uuid::now_v7());
+    attempt.record_candidate(&revalidation_stage, &candidate, true)?;
+    if let Err(error) = validate_content(&candidate, &current) {
+        attempt.fail("validation_failed", &error)?;
+        return Err(format!(
+            "{error}\n生成結果は試行 {} に保存されています。",
+            attempt.attempt_id()
+        ));
+    }
+    let generated = GeneratedCandidate {
+        meeting_id: request.meeting_id,
+        transcription_id: current.transcription_id.clone(),
+        source_revision: current.revision,
+        provider: saved.provider,
+        model: saved.model.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        candidate,
+    };
+    let document = crate::meeting_schema::persist_candidate(&app, &generated, &current)
+        .map_err(|error| fail_generation_attempt(&attempt, "persistence_failed", error))?;
+    let document = finish_meeting_document(&app, &generated, &attempt, document).await;
+    attempt.complete(&saved.model)?;
+    Ok(document)
+}
+
+#[tauri::command]
+pub(crate) async fn generate_selected_meeting_document(
     app: AppHandle,
     request: GenerateSummaryRequest,
-) -> Result<SummaryStatus, String> {
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
     let _power_guard = crate::processing_power::acquire(&app, "会議ノートを生成中")?;
     generate(app, request).await
 }
@@ -366,33 +448,10 @@ pub(crate) async fn format_selected_transcript(
     format_transcript(app, request).await
 }
 
-pub(crate) fn status(app: &AppHandle, meeting_id: &str) -> Result<SummaryStatus, String> {
-    crate::meeting_store::validate_meeting_id(meeting_id)?;
-    let snapshot = crate::transcript_store::selected_summary_snapshot(app, meeting_id)?;
-    let Some(snapshot) = snapshot else {
-        return Ok(SummaryStatus {
-            summary: None,
-            transcription_id: None,
-            current_revision: None,
-            stale: false,
-        });
-    };
-    let summary = read_summary(app, meeting_id, &snapshot.transcription_id)?;
-    let stale = summary
-        .as_ref()
-        .is_some_and(|summary| summary.source_revision != snapshot.revision);
-    Ok(SummaryStatus {
-        summary,
-        transcription_id: Some(snapshot.transcription_id),
-        current_revision: Some(snapshot.revision),
-        stale,
-    })
-}
-
 pub(crate) async fn generate(
     app: AppHandle,
     request: GenerateSummaryRequest,
-) -> Result<SummaryStatus, String> {
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
     crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
     validate_model_id(&request.model_id)?;
     let snapshot = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
@@ -400,43 +459,100 @@ pub(crate) async fn generate(
     if snapshot.segments.is_empty() {
         return Err("要約できる文字起こしがありません。".into());
     }
-    let generated = if request.provider_id == CLOUDFLARE_PROVIDER_ID {
-        generate_with_cloudflare(&app, &snapshot, &request.model_id).await?
+    let text_context = crate::transcription::context::effective_text_generation_context(
+        &app,
+        &request.meeting_id,
+    )?;
+    let attempt = crate::meeting_schema::begin_generation_attempt(
+        &app,
+        &snapshot,
+        &request.provider_id,
+        &request.model_id,
+    )?;
+    let generation = if request.provider_id == CLOUDFLARE_PROVIDER_ID {
+        generate_with_cloudflare(&app, &snapshot, &text_context, &request.model_id, &attempt).await
     } else {
-        let agent = ACP_AGENTS
+        let agent = match ACP_AGENTS
             .iter()
             .find(|agent| agent.id == request.provider_id)
             .copied()
-            .ok_or_else(|| "選択した要約プロバイダーには対応していません。".to_string())?;
+        {
+            Some(agent) => agent,
+            None => {
+                let error = "選択した要約プロバイダーには対応していません。".to_string();
+                return Err(fail_generation_attempt(&attempt, "provider_failed", error));
+            }
+        };
         let model_id = request.model_id.clone();
-        let executable =
-            resolve_agent_executable(&app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
+        let executable = match resolve_agent_executable(&app, &agent) {
+            Some(executable) => executable,
+            None => {
+                return Err(fail_generation_attempt(
+                    &attempt,
+                    "provider_failed",
+                    agent.install_hint.to_string(),
+                ));
+            }
+        };
         let node_bin = managed_node_bin_directory(&app);
         let generation_app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        let blocking_attempt = attempt.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
             generate_with_acp(
                 &generation_app,
                 &snapshot,
-                agent,
-                executable,
-                node_bin,
+                &text_context,
+                (agent, executable, node_bin),
                 &model_id,
+                &blocking_attempt,
             )
         })
         .await
-        .map_err(|_| "ACPエージェントの要約処理を完了できませんでした。".to_string())??
+        {
+            Ok(result) => result,
+            Err(_) => Err("ACPエージェントの要約処理を完了できませんでした。".to_string()),
+        }
     };
+    let generated = generation
+        .map_err(|error| fail_generation_attempt(&attempt, "generation_failed", error))?;
     let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
-        .ok_or_else(|| "要約中に文字起こしが削除されました。".to_string())?;
+        .ok_or_else(|| {
+            fail_generation_attempt(
+                &attempt,
+                "source_changed",
+                "要約中に文字起こしが削除されました。".to_string(),
+            )
+        })?;
     if current.transcription_id != generated.transcription_id
         || current.revision != generated.source_revision
     {
-        return Err(
+        return Err(fail_generation_attempt(
+            &attempt,
+            "source_changed",
             "要約中に文字起こしが変更されました。内容を確認して、もう一度要約してください。".into(),
-        );
+        ));
     }
-    write_summary(&app, &generated)?;
-    status(&app, &request.meeting_id)
+    let document = crate::meeting_schema::persist_candidate(&app, &generated, &current)
+        .map_err(|error| fail_generation_attempt(&attempt, "persistence_failed", error))?;
+    let document = finish_meeting_document(&app, &generated, &attempt, document).await;
+    attempt.complete(&generated.model).map_err(|error| {
+        format!("会議ノートは生成されましたが、生成試行を完了できませんでした: {error}")
+    })?;
+    Ok(document)
+}
+
+fn fail_generation_attempt(
+    attempt: &crate::meeting_schema::GenerationAttempt,
+    stage: &str,
+    error: String,
+) -> String {
+    let attempt_id = attempt.attempt_id();
+    match attempt.fail_if_active(stage, &error) {
+        Ok(()) => format!("{error}\n生成結果は試行 {attempt_id} に保存されています。"),
+        Err(save_error) => {
+            format!("{error}\n生成試行 {attempt_id} の診断情報を更新できませんでした: {save_error}")
+        }
+    }
 }
 
 async fn format_transcript(
@@ -527,7 +643,7 @@ async fn generate_transcript_formatting_with_acp(
         if prompt.len() > MAX_PROMPT_BYTES {
             return Err("文字起こしが大きすぎるため整形できません。".into());
         }
-        let output = generate_cloudflare_text(app, model_id, &prompt).await?;
+        let output = generate_cloudflare_text_silent(app, model_id, &prompt).await?;
         let changes = parse_transcript_formatting_content(&output, snapshot)?;
         return Ok((changes, model_id.to_string()));
     }
@@ -554,11 +670,18 @@ async fn generate_transcript_formatting_with_acp(
         ));
         fs::create_dir(&work_dir)
             .map_err(|error| format!("整形用の一時領域を作成できませんでした: {error}"))?;
-        let result = run_acp_agent(agent, executable, node_bin, &work_dir, &model_id, &prompt)
-            .and_then(|(output, model)| {
-                parse_transcript_formatting_content(&output, &snapshot)
-                    .map(|changes| (changes, model))
-            });
+        let result = run_acp_agent(
+            agent,
+            executable,
+            node_bin,
+            &work_dir,
+            &model_id,
+            &prompt,
+            |_| {},
+        )
+        .and_then(|(output, model)| {
+            parse_transcript_formatting_content(&output, &snapshot).map(|changes| (changes, model))
+        });
         let _ = fs::remove_dir_all(&work_dir);
         result
     })
@@ -650,7 +773,7 @@ fn run_acp_model_discovery(
                 "clientInfo": { "name": "mutsuna-echo", "title": "Mutsuna Echo", "version": env!("CARGO_PKG_VERSION") }
             }),
         )?;
-        let initialized = wait_for_response(&receiver, &mut stdin, 0, deadline, None)?;
+        let initialized = wait_for_response(&receiver, &mut stdin, 0, deadline, None, None)?;
         ensure_rpc_success(&initialized, agent.label)?;
         send_rpc(
             &mut stdin,
@@ -658,7 +781,7 @@ fn run_acp_model_discovery(
             "session/new",
             serde_json::json!({ "cwd": work_dir, "mcpServers": [] }),
         )?;
-        let session_response = wait_for_response(&receiver, &mut stdin, 1, deadline, None)?;
+        let session_response = wait_for_response(&receiver, &mut stdin, 1, deadline, None, None)?;
         let session_result = ensure_rpc_success(&session_response, agent.label)?;
         Ok(model_definitions_from_session(session_result, agent.label))
     })();
@@ -779,6 +902,62 @@ fn validate_cloudflare_model_id(model_id: &str) -> Result<(), String> {
 
 async fn generate_cloudflare_text(
     app: &AppHandle,
+    meeting_id: &str,
+    model_id: &str,
+    prompt: &str,
+    completed_steps: Arc<AtomicU32>,
+    total_steps: u32,
+    active_step: u32,
+) -> Result<String, String> {
+    validate_cloudflare_model_id(model_id)?;
+    let api_token =
+        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareApiToken)?;
+    let account_id =
+        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareAccountId)?;
+    crate::transcription::cloudflare::generate_text(
+        &account_id,
+        &api_token,
+        model_id,
+        prompt,
+        |progress| {
+            use crate::transcription::cloudflare::TextGenerationProgress;
+            let (stage, attempt, max_attempts, retry_delay_seconds) = match progress {
+                TextGenerationProgress::AttemptStarted {
+                    attempt,
+                    max_attempts,
+                } => ("waiting", attempt, max_attempts, None),
+                TextGenerationProgress::StreamStarted {
+                    attempt,
+                    max_attempts,
+                } => ("streaming", attempt, max_attempts, None),
+                TextGenerationProgress::RetryScheduled {
+                    next_attempt,
+                    max_attempts,
+                    delay_seconds,
+                } => ("retrying", next_attempt, max_attempts, Some(delay_seconds)),
+            };
+            emit_summary_progress_detail(
+                app,
+                meeting_id,
+                completed_steps.load(Ordering::Relaxed),
+                total_steps,
+                stage,
+                Some(active_step),
+                Some(attempt),
+                Some(max_attempts),
+                retry_delay_seconds,
+                None,
+                None,
+                None,
+                None,
+            );
+        },
+    )
+    .await
+}
+
+async fn generate_cloudflare_text_silent(
+    app: &AppHandle,
     model_id: &str,
     prompt: &str,
 ) -> Result<String, String> {
@@ -787,41 +966,225 @@ async fn generate_cloudflare_text(
         crate::credentials::load(app, crate::credentials::CredentialId::CloudflareApiToken)?;
     let account_id =
         crate::credentials::load(app, crate::credentials::CredentialId::CloudflareAccountId)?;
-    crate::transcription::cloudflare::generate_text(&account_id, &api_token, model_id, prompt).await
+    crate::transcription::cloudflare::generate_text(
+        &account_id,
+        &api_token,
+        model_id,
+        prompt,
+        |_| {},
+    )
+    .await
+}
+
+async fn run_quality_check(
+    app: &AppHandle,
+    document: &serde_json::Value,
+    provider_id: &str,
+    model_id: &str,
+    attempt: &crate::meeting_schema::GenerationAttempt,
+) -> Result<serde_json::Value, String> {
+    let meeting_id = document["documentId"]
+        .as_str()
+        .and_then(|id| id.strip_prefix("mtg_"))
+        .ok_or_else(|| "仕上げ対象のMeeting IDが不正です。".to_string())?;
+    let prompt = build_quality_check_prompt(document)?;
+    ensure_prompt_size(&prompt)?;
+    emit_summary_progress(app, meeting_id, 0, 1, "checking");
+    let output = if provider_id == CLOUDFLARE_PROVIDER_ID {
+        generate_cloudflare_text(
+            app,
+            meeting_id,
+            model_id,
+            &prompt,
+            Arc::new(AtomicU32::new(0)),
+            1,
+            1,
+        )
+        .await?
+    } else {
+        let agent = ACP_AGENTS
+            .iter()
+            .find(|agent| agent.id == provider_id)
+            .copied()
+            .ok_or_else(|| "仕上げ確認に使うACPプロバイダーが不正です。".to_string())?;
+        let executable =
+            resolve_agent_executable(app, &agent).ok_or_else(|| agent.install_hint.to_string())?;
+        let node_bin = managed_node_bin_directory(app);
+        let work_dir = std::env::temp_dir().join(format!(
+            "mutsuna-echo-quality-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir(&work_dir)
+            .map_err(|error| format!("仕上げ確認用の一時領域を作成できませんでした: {error}"))?;
+        let progress_app = app.clone();
+        let progress_meeting_id = meeting_id.to_string();
+        let prompt = prompt.clone();
+        let model_id = model_id.to_string();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_acp_agent(
+                agent,
+                executable,
+                node_bin,
+                &work_dir,
+                &model_id,
+                &prompt,
+                |update| {
+                    let (received_bytes, kind, text, status) = match &update {
+                        AcpLiveUpdate::ResponseBytes(bytes) => (Some(*bytes), None, None, None),
+                        AcpLiveUpdate::Activity { kind, text, status } => {
+                            (None, Some(*kind), Some(text.as_str()), status.as_deref())
+                        }
+                    };
+                    emit_summary_progress_detail(
+                        &progress_app,
+                        &progress_meeting_id,
+                        0,
+                        1,
+                        "checking",
+                        Some(1),
+                        None,
+                        None,
+                        None,
+                        received_bytes,
+                        kind,
+                        text,
+                        status,
+                    );
+                },
+            )
+            .map(|(output, _)| output)
+            .inspect(|_| {
+                let _ = fs::remove_dir_all(&work_dir);
+            })
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&work_dir);
+            })
+        })
+        .await
+        .map_err(|_| "ACPの仕上げ確認を完了できませんでした。".to_string())?;
+        result?
+    };
+    attempt.record_response("quality-check", &output, false)?;
+    let result = parse_quality_check_output(&output)?;
+    attempt.record_candidate("quality-check", &result, false)?;
+    emit_summary_progress(app, meeting_id, 1, 1, "complete");
+    Ok(result)
+}
+
+async fn finish_meeting_document(
+    app: &AppHandle,
+    generated: &GeneratedCandidate,
+    attempt: &crate::meeting_schema::GenerationAttempt,
+    document: serde_json::Value,
+) -> serde_json::Value {
+    let check = match run_quality_check(
+        app,
+        &document,
+        &generated.provider,
+        &generated.model,
+        attempt,
+    )
+    .await
+    {
+        Ok(check) => check,
+        Err(error) => serde_json::json!({
+            "consistency": {"status":"failed", "findings":[]},
+            "error": error.chars().take(2_000).collect::<String>()
+        }),
+    };
+    let Some(meeting_id) = document["documentId"]
+        .as_str()
+        .and_then(|id| id.strip_prefix("mtg_"))
+    else {
+        return document;
+    };
+    let revision = document["revision"].as_u64().unwrap_or(0);
+    let finished = match crate::meeting_schema::apply_quality_check(
+        app,
+        meeting_id,
+        revision,
+        &generated.provider,
+        &generated.model,
+        &check,
+    ) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("Could not save meeting quality check: {error}");
+            return document;
+        }
+    };
+    if let Some(title) = check.get("title").and_then(serde_json::Value::as_str) {
+        if let Err(error) =
+            crate::commands::recording::rename_default_meeting_audio(app, meeting_id, title)
+        {
+            eprintln!("Could not apply generated meeting title to default file name: {error}");
+        }
+    }
+    finished
 }
 
 async fn generate_with_cloudflare(
     app: &AppHandle,
     snapshot: &SummaryTranscriptSnapshot,
+    text_context: &crate::transcription::context::TextGenerationContext,
     model_id: &str,
-) -> Result<MeetingSummary, String> {
-    let chunks = split_summary_snapshot(snapshot);
+    attempt: &crate::meeting_schema::GenerationAttempt,
+) -> Result<GeneratedCandidate, String> {
+    let chunks = split_cloudflare_summary_snapshot(snapshot, model_id);
     let total_steps = summary_total_steps(chunks.len());
+    let completed_steps = Arc::new(AtomicU32::new(0));
     emit_summary_progress(app, &snapshot.meeting_id, 0, total_steps, "summarizing");
 
     let content = if chunks.len() == 1 {
-        let prompt = build_prompt(snapshot)?;
+        let prompt = build_prompt(snapshot, text_context)?;
         ensure_prompt_size(&prompt)?;
-        let output = generate_cloudflare_text(app, model_id, &prompt).await?;
-        let content = parse_generated_content(&output, snapshot)?;
+        let output = generate_cloudflare_text(
+            app,
+            &snapshot.meeting_id,
+            model_id,
+            &prompt,
+            Arc::clone(&completed_steps),
+            total_steps,
+            1,
+        )
+        .await?;
+        let content = parse_generated_content(&output, snapshot, attempt, "single", true)?;
         emit_summary_progress(app, &snapshot.meeting_id, 1, total_steps, "complete");
         content
     } else {
         let requests = futures_util::stream::iter(chunks.into_iter().enumerate())
-            .map(|(index, chunk)| async move {
-                let prompt = build_prompt(&chunk)?;
-                ensure_prompt_size(&prompt)?;
-                let output = generate_cloudflare_text(app, model_id, &prompt).await?;
-                let content = parse_generated_content(&output, &chunk)?;
-                Ok::<_, String>((index, content))
+            .map(|(index, chunk)| {
+                let attempt = attempt.clone();
+                let app = app.clone();
+                let meeting_id = snapshot.meeting_id.clone();
+                let completed_steps = Arc::clone(&completed_steps);
+                let text_context = text_context.clone();
+                async move {
+                    let prompt = build_prompt(&chunk, &text_context)?;
+                    ensure_prompt_size(&prompt)?;
+                    let output = generate_cloudflare_text(
+                        &app,
+                        &meeting_id,
+                        model_id,
+                        &prompt,
+                        completed_steps,
+                        total_steps,
+                        index.saturating_add(1).min(u32::MAX as usize) as u32,
+                    )
+                    .await?;
+                    let stage = format!("chunk-{index:03}");
+                    let content =
+                        parse_generated_content(&output, &chunk, &attempt, &stage, false)?;
+                    Ok::<_, String>((index, content))
+                }
             })
-            .buffer_unordered(MAX_PARALLEL_SUMMARY_CHUNKS);
+            .buffer_unordered(cloudflare_summary_parallelism(model_id));
         futures_util::pin_mut!(requests);
-        let mut completed = 0u32;
         let mut partials = Vec::new();
         while let Some(result) = requests.next().await {
             partials.push(result?);
-            completed += 1;
+            let completed = completed_steps.fetch_add(1, Ordering::Relaxed) + 1;
             emit_summary_progress(
                 app,
                 &snapshot.meeting_id,
@@ -832,11 +1195,21 @@ async fn generate_with_cloudflare(
         }
         partials.sort_by_key(|(index, _)| *index);
         let partials: Vec<_> = partials.into_iter().map(|(_, content)| content).collect();
+        let completed = completed_steps.load(Ordering::Relaxed);
         let merge_prompt = build_summary_merge_prompt(&partials)?;
         ensure_prompt_size(&merge_prompt)?;
         emit_summary_progress(app, &snapshot.meeting_id, completed, total_steps, "merging");
-        let output = generate_cloudflare_text(app, model_id, &merge_prompt).await?;
-        let content = parse_generated_content(&output, snapshot)?;
+        let output = generate_cloudflare_text(
+            app,
+            &snapshot.meeting_id,
+            model_id,
+            &merge_prompt,
+            Arc::clone(&completed_steps),
+            total_steps,
+            total_steps,
+        )
+        .await?;
+        let content = parse_generated_content(&output, snapshot, attempt, "merge", true)?;
         emit_summary_progress(
             app,
             &snapshot.meeting_id,
@@ -846,27 +1219,34 @@ async fn generate_with_cloudflare(
         );
         content
     };
-    Ok(MeetingSummary {
-        schema_version: SCHEMA_VERSION,
-        summary_id: uuid::Uuid::now_v7().to_string(),
+    Ok(GeneratedCandidate {
         meeting_id: snapshot.meeting_id.clone(),
         transcription_id: snapshot.transcription_id.clone(),
         source_revision: snapshot.revision,
         provider: CLOUDFLARE_PROVIDER_ID.into(),
         model: model_id.into(),
         generated_at: chrono::Utc::now().to_rfc3339(),
-        content,
+        candidate: content,
     })
+}
+
+fn cloudflare_summary_parallelism(model_id: &str) -> usize {
+    if model_id == CLOUDFLARE_GEMMA_MODEL_ID {
+        1
+    } else {
+        MAX_PARALLEL_SUMMARY_CHUNKS.min(2)
+    }
 }
 
 fn generate_with_acp(
     app: &AppHandle,
     snapshot: &SummaryTranscriptSnapshot,
-    agent: AcpAgentDefinition,
-    executable: PathBuf,
-    node_bin: Option<PathBuf>,
+    text_context: &crate::transcription::context::TextGenerationContext,
+    runtime: (AcpAgentDefinition, PathBuf, Option<PathBuf>),
     model_id: &str,
-) -> Result<MeetingSummary, String> {
+    attempt: &crate::meeting_schema::GenerationAttempt,
+) -> Result<GeneratedCandidate, String> {
+    let (agent, executable, node_bin) = runtime;
     let work_dir = std::env::temp_dir().join(format!(
         "mutsuna-echo-summary-{}-{}",
         std::process::id(),
@@ -874,55 +1254,24 @@ fn generate_with_acp(
     ));
     fs::create_dir(&work_dir)
         .map_err(|error| format!("要約用の一時領域を作成できませんでした: {error}"))?;
-    let chunks = split_summary_snapshot(snapshot);
-    let total_steps = summary_total_steps(chunks.len());
-    emit_summary_progress(app, &snapshot.meeting_id, 0, total_steps, "summarizing");
-    let result: Result<(SummaryContent, String), String> = (|| {
-        if chunks.len() == 1 {
-            let prompt = build_prompt(snapshot)?;
-            ensure_prompt_size(&prompt)?;
-            let (output, model) = run_acp_agent(
-                agent,
-                executable.clone(),
-                node_bin.clone(),
-                &work_dir,
-                model_id,
-                &prompt,
-            )?;
-            let content = parse_generated_content(&output, snapshot)?;
-            emit_summary_progress(app, &snapshot.meeting_id, 1, total_steps, "complete");
-            return Ok((content, model));
-        }
-
-        let mut partials = Vec::with_capacity(chunks.len());
-        for (index, chunk) in chunks.iter().enumerate() {
-            let prompt = build_prompt(chunk)?;
-            ensure_prompt_size(&prompt)?;
-            let (output, _) = run_acp_agent(
-                agent,
-                executable.clone(),
-                node_bin.clone(),
-                &work_dir,
-                model_id,
-                &prompt,
-            )?;
-            partials.push(parse_generated_content(&output, chunk)?);
-            emit_summary_progress(
-                app,
-                &snapshot.meeting_id,
-                (index + 1) as u32,
-                total_steps,
-                "summarizing",
-            );
-        }
-        let merge_prompt = build_summary_merge_prompt(&partials)?;
-        ensure_prompt_size(&merge_prompt)?;
-        emit_summary_progress(
+    emit_summary_progress(app, &snapshot.meeting_id, 0, 1, "summarizing");
+    let result: Result<(MeetingExtractionCandidate, String), String> = (|| {
+        let prompt = build_prompt(snapshot, text_context)?;
+        ensure_prompt_size(&prompt)?;
+        emit_summary_progress_detail(
             app,
             &snapshot.meeting_id,
-            partials.len() as u32,
-            total_steps,
-            "merging",
+            0,
+            1,
+            "waiting",
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         let (output, model) = run_acp_agent(
             agent,
@@ -930,41 +1279,61 @@ fn generate_with_acp(
             node_bin,
             &work_dir,
             model_id,
-            &merge_prompt,
+            &prompt,
+            |update| {
+                let (received_bytes, kind, text, status) = match &update {
+                    AcpLiveUpdate::ResponseBytes(bytes) => (Some(*bytes), None, None, None),
+                    AcpLiveUpdate::Activity { kind, text, status } => {
+                        (None, Some(*kind), Some(text.as_str()), status.as_deref())
+                    }
+                };
+                emit_summary_progress_detail(
+                    app,
+                    &snapshot.meeting_id,
+                    0,
+                    1,
+                    "streaming",
+                    Some(1),
+                    None,
+                    None,
+                    None,
+                    received_bytes,
+                    kind,
+                    text,
+                    status,
+                );
+            },
         )?;
-        let content = parse_generated_content(&output, snapshot)?;
-        emit_summary_progress(
-            app,
-            &snapshot.meeting_id,
-            total_steps,
-            total_steps,
-            "complete",
-        );
+        let content = parse_generated_content(&output, snapshot, attempt, "single", true)?;
+        emit_summary_progress(app, &snapshot.meeting_id, 1, 1, "complete");
         Ok((content, model))
     })();
     let _ = fs::remove_dir_all(&work_dir);
     let (content, resolved_model) = result?;
-    Ok(MeetingSummary {
-        schema_version: SCHEMA_VERSION,
-        summary_id: uuid::Uuid::now_v7().to_string(),
+    attempt.set_resolved_model(&resolved_model)?;
+    Ok(GeneratedCandidate {
         meeting_id: snapshot.meeting_id.clone(),
         transcription_id: snapshot.transcription_id.clone(),
         source_revision: snapshot.revision,
         provider: agent.id.into(),
         model: resolved_model,
         generated_at: chrono::Utc::now().to_rfc3339(),
-        content,
+        candidate: content,
     })
 }
 
-fn run_acp_agent(
+fn run_acp_agent<F>(
     agent: AcpAgentDefinition,
     executable: PathBuf,
     node_bin: Option<PathBuf>,
     work_dir: &Path,
     model_id: &str,
     prompt: &str,
-) -> Result<(String, String), String> {
+    mut on_output: F,
+) -> Result<(String, String), String>
+where
+    F: FnMut(AcpLiveUpdate),
+{
     let mut command = Command::new(executable);
     command.current_dir(work_dir).args(agent.args);
     configure_background_command(&mut command);
@@ -1026,7 +1395,7 @@ fn run_acp_agent(
                 "clientInfo": { "name": "mutsuna-echo", "title": "Mutsuna Echo", "version": env!("CARGO_PKG_VERSION") }
             }),
         )?;
-        let initialized = wait_for_response(&receiver, &mut stdin, 0, deadline, None)?;
+        let initialized = wait_for_response(&receiver, &mut stdin, 0, deadline, None, None)?;
         ensure_rpc_success(&initialized, agent.label)?;
         send_rpc(
             &mut stdin,
@@ -1034,7 +1403,7 @@ fn run_acp_agent(
             "session/new",
             serde_json::json!({ "cwd": work_dir, "mcpServers": [] }),
         )?;
-        let session_response = wait_for_response(&receiver, &mut stdin, 1, deadline, None)?;
+        let session_response = wait_for_response(&receiver, &mut stdin, 1, deadline, None, None)?;
         let session_result = ensure_rpc_success(&session_response, agent.label)?;
         let session_id = session_result
             .get("sessionId")
@@ -1084,7 +1453,7 @@ fn run_acp_agent(
                 "session/set_config_option",
                 serde_json::json!({ "sessionId": session_id, "configId": config_id, "value": model_id }),
             )?;
-            let configured = wait_for_response(&receiver, &mut stdin, 2, deadline, None)?;
+            let configured = wait_for_response(&receiver, &mut stdin, 2, deadline, None, None)?;
             ensure_rpc_success(&configured, agent.label)?;
             resolved_model = model_id.to_string();
         }
@@ -1098,7 +1467,14 @@ fn run_acp_agent(
             }),
         )?;
         let mut output = String::new();
-        let completed = wait_for_response(&receiver, &mut stdin, 3, deadline, Some(&mut output))?;
+        let completed = wait_for_response(
+            &receiver,
+            &mut stdin,
+            3,
+            deadline,
+            Some(&mut output),
+            Some(&mut on_output),
+        )?;
         ensure_rpc_success(&completed, agent.label)?;
         if output.trim().is_empty() {
             return Err(format!(
@@ -1151,7 +1527,9 @@ fn wait_for_response(
     expected_id: u64,
     deadline: Instant,
     mut output: Option<&mut String>,
+    mut on_output: Option<&mut dyn FnMut(AcpLiveUpdate)>,
 ) -> Result<serde_json::Value, String> {
+    let mut thought_text = String::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -1166,22 +1544,100 @@ fn wait_for_response(
             return Ok(message);
         }
         if message.get("method").and_then(serde_json::Value::as_str) == Some("session/update") {
-            if let Some(text) = message
-                .pointer("/params/update/content/text")
-                .and_then(serde_json::Value::as_str)
-            {
-                if message
-                    .pointer("/params/update/sessionUpdate")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("agent_message_chunk")
-                {
-                    if let Some(output) = output.as_deref_mut() {
-                        if output.len().saturating_add(text.len()) > MAX_SUMMARY_BYTES as usize {
-                            return Err("ACPエージェントの応答が大きすぎます。".into());
+            let update = &message["params"]["update"];
+            let update_type = update
+                .get("sessionUpdate")
+                .and_then(serde_json::Value::as_str);
+            match update_type {
+                Some("agent_message_chunk") => {
+                    if let Some(text) = update
+                        .pointer("/content/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        if let Some(output) = output.as_deref_mut() {
+                            if output.len().saturating_add(text.len()) > MAX_SUMMARY_BYTES as usize
+                            {
+                                return Err("ACPエージェントの応答が大きすぎます。".into());
+                            }
+                            output.push_str(text);
+                            if let Some(on_output) = on_output.as_deref_mut() {
+                                on_output(AcpLiveUpdate::ResponseBytes(output.len()));
+                            }
                         }
-                        output.push_str(text);
                     }
                 }
+                Some("agent_thought_chunk") => {
+                    if let Some(text) = update
+                        .pointer("/content/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        if thought_text.len().saturating_add(text.len()) > 4_096 {
+                            thought_text.clear();
+                        }
+                        thought_text.push_str(text);
+                        if let Some(on_output) = on_output.as_deref_mut() {
+                            on_output(AcpLiveUpdate::Activity {
+                                kind: "thought",
+                                text: thought_text.clone(),
+                                status: None,
+                            });
+                        }
+                    }
+                }
+                Some("tool_call" | "tool_call_update") => {
+                    let title = update
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| update.get("kind").and_then(serde_json::Value::as_str))
+                        .unwrap_or("ツールを実行しています");
+                    let status = update
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if let Some(on_output) = on_output.as_deref_mut() {
+                        on_output(AcpLiveUpdate::Activity {
+                            kind: "tool",
+                            text: title.to_string(),
+                            status,
+                        });
+                    }
+                }
+                Some("plan" | "plan_update") => {
+                    let entry = update
+                        .get("entries")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|entries| {
+                            entries
+                                .iter()
+                                .find(|entry| {
+                                    entry.get("status").and_then(serde_json::Value::as_str)
+                                        == Some("in_progress")
+                                })
+                                .or_else(|| {
+                                    entries.iter().find(|entry| {
+                                        entry.get("status").and_then(serde_json::Value::as_str)
+                                            == Some("pending")
+                                    })
+                                })
+                        });
+                    if let Some(text) = entry
+                        .and_then(|entry| entry.get("content"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        let status = entry
+                            .and_then(|entry| entry.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string);
+                        if let Some(on_output) = on_output.as_deref_mut() {
+                            on_output(AcpLiveUpdate::Activity {
+                                kind: "plan",
+                                text: text.to_string(),
+                                status,
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
             continue;
         }
@@ -1218,20 +1674,148 @@ fn ensure_rpc_success<'a>(
         .ok_or_else(|| format!("{label}からACP結果を受け取れませんでした。"))
 }
 
-fn build_prompt(snapshot: &SummaryTranscriptSnapshot) -> Result<String, String> {
+fn build_prompt(
+    snapshot: &SummaryTranscriptSnapshot,
+    text_context: &crate::transcription::context::TextGenerationContext,
+) -> Result<String, String> {
     let transcript = serde_json::to_string(snapshot)
         .map_err(|error| format!("文字起こしを要約用に変換できませんでした: {error}"))?;
-    Ok(format!(
-        "あなたは会議記録の編集者です。次の修正版文字起こしだけを根拠に、日本語の会議ノートを作成してください。外部情報、ファイル、Web、ツールを使わず、推測で事実を補わないでください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"overview\":\"簡潔な概要\",\"decisions\":[{{\"text\":\"決定事項\",\"sourceSegmentIds\":[\"segment id\"]}}],\"actionItems\":[{{\"assignee\":nullまたは文字列,\"text\":\"作業\",\"due\":nullまたは文字列,\"sourceSegmentIds\":[\"segment id\"]}}]}} とします。決定事項とアクション項目には根拠となる実在のsourceSegmentIdsを付け、該当項目がなければ空配列にしてください。\n\n文字起こしJSON:\n{transcript}"
+    let context_section = if text_context.is_empty() {
+        String::new()
+    } else {
+        let context = serde_json::to_string(text_context)
+            .map_err(|error| format!("補助コンテキストを要約用に変換できませんでした: {error}"))?;
+        format!(
+            "\n\n補助コンテキストJSON:\n{context}\n補助コンテキストは固有名詞・表記・会議背景の解釈だけに使用し、そこにある情報だけを会議中の発言・決定・アクションとして生成しないでください。Evidenceは必ず文字起こしJSONから取得してください。"
+        )
+    };
+    let prompt = format!(
+        "あなたは会議情報抽出器です。次の文字起こしだけを根拠にMeetingExtractionCandidate v1 JSONを返してください。外部情報を使わず、明示・正規化・推論を区別してください。永続ID、作成日時、revision、ハッシュ、編集ロックは生成しないでください。JSON以外は出力しないでください。必須トップレベルはmeeting, participants, summary, topics, decisions, actionItems, openIssues, questions, notesです。summaryはmeetingの子ではなく、meetingと同じトップレベルに置いてください。enum値は必ず英字のまま使用してください。meetingType=internal|client|sales|interview|standup|retrospective|workshop|other|unknown、Topic status=discussed|open|deferred、Decision status=active|tentative|superseded|revoked、Action status=open|in_progress|blocked|done|cancelled、Issue status=open|resolved|deferred|cancelled、Question status=open|answered|deferredです。各レコードには一時keyを必ず含め、participant=p1, topic=t1, decision=d1, action=a1, issue=i1, question=q1, note=n1形式にし、参照は対応するkeyを使います。名前がKeysで終わる参照フィールドは、参照が1件でも必ずJSON配列にし、参照なしは空配列にしてください。すべてのレコードにevidence:[{{relation:\"direct\"|\"contextual\",spans:[{{segmentId:\"実在ID\",startMs:0,endMs:0}}],quote:\"根拠\"}}]とfieldBasisを含めます。evidenceは根拠が1件でも必ずJSON配列にし、object単体にはしないでください。fieldBasisは文字列ではなく、JSON Pointerからbasisへのobjectにしてください（例: {{\"/title\":\"explicit\",\"/status\":\"inferred\"}}）。basisはexplicit|normalized|inferredのみです。各レコードのevidenceは最も直接的な1件に絞り、quoteは80文字以内にしてください。meetingはtitle,meetingType,timeZone,languageCodes,fieldBasisを必ず含め、タイムゾーン不明時もtimeZoneを省略せず\"unknown\"にしてください。summaryはoverview,keyPoints,fieldBasisを必須とします。overviewは会議全体の内容と結論を過不足なくまとめた非空文字列にしてください。keyPointsの各項目は文字列ではなくkey,text,evidence,fieldBasisを持つobjectです。Participantはkey,displayName,kind,attendance,speakerIds,identityStatus,evidence,fieldBasis、Topicはkey,title,order,status,participantKeys,evidence,fieldBasisを持ちます。決定事項はstatement/status/topicKeys/ownerParticipantKeys/supersedesDecisionKeys、Actionはtitle/status/assigneeParticipantKeys/topicKeys/relatedDecisionKeys/blockerIssueKeys、Issueはtitle/status/ownerParticipantKeys/topicKeys/relatedDecisionKeys/relatedActionItemKeys、Questionはtext,status,directedToParticipantKeys,topicKeys,relatedIssueKeys、Noteはbody,topicKeysを持ちます。同じ事実を表すレコードは統合してください。任意情報がなければ省略し、該当レコードがなければ空配列にしてください。{context_section}\n\n文字起こしJSON:\n{transcript}"
+    );
+    Ok(prompt.replace(
+        "meetingはtitle,meetingType,timeZone,languageCodes,fieldBasisを必ず含め、",
+        "meetingはmeetingType,timeZone,languageCodes,fieldBasisを必ず含め、titleは生成せず省略してください。タイトルは会議ノート完成後の別工程で生成します。",
     ))
 }
 
-fn build_summary_merge_prompt(partials: &[SummaryContent]) -> Result<String, String> {
+fn build_summary_merge_prompt(partials: &[MeetingExtractionCandidate]) -> Result<String, String> {
     let summaries = serde_json::to_string(partials)
         .map_err(|error| format!("部分要約を統合用に変換できませんでした: {error}"))?;
-    Ok(format!(
-        "あなたは会議記録の編集者です。時系列順の部分要約を、一つの日本語の会議ノートへ統合してください。部分要約だけを根拠にし、重複する内容をまとめ、決定事項とアクション項目を漏らさないでください。sourceSegmentIdsは入力に実在するIDだけをそのまま維持してください。JSON以外の文字、説明、Markdownコードフェンスは一切出力しないでください。形式は厳密に {{\"overview\":\"簡潔な概要\",\"decisions\":[{{\"text\":\"決定事項\",\"sourceSegmentIds\":[\"segment id\"]}}],\"actionItems\":[{{\"assignee\":nullまたは文字列,\"text\":\"作業\",\"due\":nullまたは文字列,\"sourceSegmentIds\":[\"segment id\"]}}]}} とします。\n\n部分要約JSON:\n{summaries}"
+    let prompt = format!(
+        "時系列順のMeetingExtractionCandidate v1を一つに統合してください。全カテゴリを維持し、同じ事実を表すレコードは必ず統合し、全レコードの一時keyと全参照を付け直してください。名前がKeysで終わる参照フィールドは、1件でも必ずJSON配列にし、参照なしは空配列にしてください。各レコードのevidenceは最も直接的な1件に絞り、根拠が1件でもobject単体ではなくJSON配列にし、quoteは80文字以内にしてください。fieldBasisは文字列ではなく、JSON Pointerをキー、explicit|normalized|inferredを値にしたobjectを維持してください。evidenceのsegmentIdは入力値だけを維持してください。必須トップレベルmeeting,participants,summary,topics,decisions,actionItems,openIssues,questions,notesを含むJSON以外は出力しないでください。\n\nCandidate JSON配列:\n{summaries}"
+    );
+    Ok(prompt.replace(
+        "一つに統合してください。",
+        "一つに統合してください。meeting.titleは生成せず省略してください。",
     ))
+}
+
+fn build_quality_check_prompt(document: &serde_json::Value) -> Result<String, String> {
+    let mut note = document.clone();
+    if let Some(root) = note.as_object_mut() {
+        root.remove("qualityChecks");
+        root.remove("latestQualityCheckId");
+    }
+    let note = serde_json::to_string(&note)
+        .map_err(|error| format!("会議ノートを仕上げ確認用に変換できませんでした: {error}"))?;
+    Ok(format!(
+        "あなたは完成済み会議ノートの仕上げ担当です。入力は会議ノートJSONだけです。文字起こしや外部情報を要求・推測せず、会議ノート内部だけを読んでください。会議の内容を具体的に表す簡潔な日本語タイトルを1つ作り、決定事項・アクション項目・未解決事項・質問の間に意味的な矛盾がないか確認してください。現在のmeeting.titleは録音時の仮名なのでタイトル判断には使わないでください。タイトルは5〜60文字を目安にし、「会議」「ミーティング」だけの一般的な名前や、内容にない固有名詞を避けてください。JSON以外は出力しないでください。形式は厳密に {{\"title\":\"タイトル\",\"consistency\":{{\"status\":\"passed\"|\"warning\",\"findings\":[{{\"code\":\"contradiction\"|\"ambiguous\"|\"broken_relation\"|\"other\",\"message\":\"指摘\",\"relatedRecordIds\":[\"関連する永続ID\"]}}]}}}} とします。問題がなければstatusはpassed、findingsは空配列にしてください。\n\n会議ノートJSON:\n{note}"
+    ))
+}
+
+fn parse_quality_check_output(output: &str) -> Result<serde_json::Value, String> {
+    let trimmed = output.trim();
+    let without_prefix = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let json = without_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_prefix)
+        .trim();
+    let mut value = serde_json::from_str::<serde_json::Value>(json)
+        .or_else(|direct_error| {
+            for (index, character) in json.char_indices() {
+                if character != '{' {
+                    continue;
+                }
+                let mut values = serde_json::Deserializer::from_str(&json[index..])
+                    .into_iter::<serde_json::Value>();
+                if let Some(Ok(value)) = values.next() {
+                    if value.get("title").is_some() && value.get("consistency").is_some() {
+                        return Ok(value);
+                    }
+                }
+            }
+            Err(direct_error)
+        })
+        .map_err(|error| format!("仕上げ結果をJSONとして解析できませんでした: {error}"))?;
+    let title = value["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.chars().count() <= 120)
+        .ok_or_else(|| "仕上げ結果のtitleが不正です。".to_string())?
+        .to_string();
+    let consistency = value["consistency"]
+        .as_object_mut()
+        .ok_or_else(|| "仕上げ結果のconsistencyが不正です。".to_string())?;
+    let requested_status = consistency
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("warning")
+        .to_string();
+    let findings = consistency
+        .get_mut("findings")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| "仕上げ結果のfindingsが不正です。".to_string())?;
+    if findings.len() > 20 {
+        return Err("仕上げ結果のfindingsが多すぎます。".into());
+    }
+    for finding in findings.iter_mut() {
+        let finding = finding
+            .as_object_mut()
+            .ok_or_else(|| "仕上げ結果のfindingが不正です。".to_string())?;
+        let message = finding
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty() && message.chars().count() <= 1_000)
+            .ok_or_else(|| "仕上げ結果のfinding.messageが不正です。".to_string())?;
+        finding.insert("message".into(), serde_json::Value::String(message.into()));
+        let code = finding
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "contradiction" | "ambiguous" | "broken_relation" | "other"
+                )
+            })
+            .unwrap_or("other");
+        finding.insert("code".into(), serde_json::Value::String(code.into()));
+        let related = finding
+            .entry("relatedRecordIds")
+            .or_insert_with(|| serde_json::json!([]));
+        let related = related
+            .as_array()
+            .filter(|ids| ids.len() <= 50 && ids.iter().all(serde_json::Value::is_string))
+            .ok_or_else(|| "仕上げ結果のrelatedRecordIdsが不正です。".to_string())?;
+        if related
+            .iter()
+            .any(|id| id.as_str().is_some_and(|id| id.chars().count() > 128))
+        {
+            return Err("仕上げ結果のrelatedRecordIdsが長すぎます。".into());
+        }
+    }
+    let status =
+        if findings.is_empty() && matches!(requested_status.as_str(), "passed" | "pass" | "ok") {
+            "passed"
+        } else {
+            "warning"
+        };
+    consistency.insert("status".into(), serde_json::Value::String(status.into()));
+    value["title"] = serde_json::Value::String(title);
+    Ok(value)
 }
 
 fn ensure_prompt_size(prompt: &str) -> Result<(), String> {
@@ -1250,31 +1834,53 @@ fn summary_total_steps(chunk_count: usize) -> u32 {
     }
 }
 
-fn split_summary_snapshot(snapshot: &SummaryTranscriptSnapshot) -> Vec<SummaryTranscriptSnapshot> {
+fn cloudflare_model_context_tokens(model_id: &str) -> usize {
+    match model_id {
+        CLOUDFLARE_GLM_MODEL_ID => 131_072,
+        CLOUDFLARE_GRANITE_MODEL_ID => 131_000,
+        CLOUDFLARE_GEMMA_MODEL_ID => 256_000,
+        _ => 131_000,
+    }
+}
+
+fn summary_input_token_budget(model_id: &str) -> usize {
+    let safe_context = cloudflare_model_context_tokens(model_id).saturating_mul(4) / 5;
+    safe_context
+        .saturating_sub(SUMMARY_OUTPUT_RESERVE_TOKENS)
+        .saturating_sub(SUMMARY_PROMPT_RESERVE_TOKENS)
+        .max(4_096)
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for character in value.chars() {
+        if character.is_ascii() {
+            ascii = ascii.saturating_add(1);
+        } else {
+            non_ascii = non_ascii.saturating_add(1);
+        }
+    }
+    ascii.saturating_add(3) / 4 + non_ascii
+}
+
+fn split_cloudflare_summary_snapshot(
+    snapshot: &SummaryTranscriptSnapshot,
+    model_id: &str,
+) -> Vec<SummaryTranscriptSnapshot> {
     let mut chunks = Vec::new();
     let mut current = Vec::new();
-    let mut current_bytes = 0usize;
-    let mut chunk_start_ms = 0u64;
+    let mut current_tokens = 0usize;
+    let token_budget = summary_input_token_budget(model_id);
 
     for segment in &snapshot.segments {
-        let segment_bytes = segment
-            .text
-            .len()
-            .saturating_add(segment.speaker.len())
-            .saturating_add(segment.segment_id.len())
-            .saturating_add(64);
-        let exceeds_duration = !current.is_empty()
-            && segment.end_ms.saturating_sub(chunk_start_ms) > SUMMARY_CHUNK_DURATION_MS;
-        let exceeds_size = !current.is_empty()
-            && current_bytes.saturating_add(segment_bytes) > MAX_SUMMARY_CHUNK_BYTES;
-        if exceeds_duration || exceeds_size {
+        let serialized = serde_json::to_string(segment).unwrap_or_else(|_| segment.text.clone());
+        let segment_tokens = estimate_tokens(&serialized).saturating_add(16);
+        if !current.is_empty() && current_tokens.saturating_add(segment_tokens) > token_budget {
             chunks.push(summary_chunk(snapshot, std::mem::take(&mut current)));
-            current_bytes = 0;
+            current_tokens = 0;
         }
-        if current.is_empty() {
-            chunk_start_ms = segment.start_ms;
-        }
-        current_bytes = current_bytes.saturating_add(segment_bytes);
+        current_tokens = current_tokens.saturating_add(segment_tokens);
         current.push(segment.clone());
     }
     if !current.is_empty() {
@@ -1303,13 +1909,54 @@ fn emit_summary_progress(
     total_steps: u32,
     stage: &'static str,
 ) {
+    emit_summary_progress_detail(
+        app,
+        meeting_id,
+        completed_steps,
+        total_steps,
+        stage,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_summary_progress_detail(
+    app: &AppHandle,
+    meeting_id: &str,
+    completed_steps: u32,
+    total_steps: u32,
+    stage: &str,
+    active_step: Option<u32>,
+    attempt: Option<u32>,
+    max_attempts: Option<u32>,
+    retry_delay_seconds: Option<u64>,
+    received_bytes: Option<usize>,
+    activity_kind: Option<&str>,
+    activity_text: Option<&str>,
+    activity_status: Option<&str>,
+) {
     let _ = app.emit(
         "summary-progress",
         SummaryProgress {
             meeting_id: meeting_id.to_string(),
             completed_steps,
             total_steps,
-            stage,
+            stage: stage.to_string(),
+            active_step,
+            attempt,
+            max_attempts,
+            retry_delay_seconds,
+            received_bytes,
+            activity_kind: activity_kind.map(str::to_string),
+            activity_text: activity_text.map(str::to_string),
+            activity_status: activity_status.map(str::to_string),
         },
     );
 }
@@ -1470,7 +2117,85 @@ fn apply_formatting_changes(
 fn parse_generated_content(
     output: &str,
     snapshot: &SummaryTranscriptSnapshot,
-) -> Result<SummaryContent, String> {
+    attempt: &crate::meeting_schema::GenerationAttempt,
+    stage: &str,
+    final_output: bool,
+) -> Result<MeetingExtractionCandidate, String> {
+    attempt.record_response(stage, output, final_output)?;
+    let mut content: MeetingExtractionCandidate = match parse_generated_json(output) {
+        Ok(content) => content,
+        Err(error) => {
+            let message = if error.classify() == serde_json::error::Category::Eof {
+                format!(
+                    "AIの生成結果がJSONの途中で終了しました。出力上限に達した可能性があります: {error}"
+                )
+            } else {
+                format!("AIの要約結果をJSONとして解析できませんでした: {error}")
+            };
+            attempt.fail("parse_failed", &message)?;
+            return Err(message);
+        }
+    };
+    crate::meeting_schema::normalize_candidate(&mut content, Some(&snapshot.language));
+    normalize_evidence_segment_ids(&mut content, snapshot);
+    attempt.record_candidate(stage, &content, final_output)?;
+    if let Err(error) = validate_content(&content, snapshot) {
+        attempt.fail("validation_failed", &error)?;
+        return Err(error);
+    }
+    Ok(content)
+}
+
+fn normalize_evidence_segment_ids(
+    candidate: &mut serde_json::Value,
+    snapshot: &SummaryTranscriptSnapshot,
+) {
+    let known_ids: HashSet<&str> = snapshot
+        .segments
+        .iter()
+        .map(|segment| segment.segment_id.as_str())
+        .collect();
+
+    fn visit(
+        value: &mut serde_json::Value,
+        snapshot: &SummaryTranscriptSnapshot,
+        known_ids: &HashSet<&str>,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let supplied_id = object.get("segmentId").and_then(serde_json::Value::as_str);
+                if supplied_id.is_some_and(|id| !known_ids.contains(id)) {
+                    let start_ms = object.get("startMs").and_then(serde_json::Value::as_u64);
+                    let end_ms = object.get("endMs").and_then(serde_json::Value::as_u64);
+                    if let (Some(start_ms), Some(end_ms)) = (start_ms, end_ms) {
+                        let mut matches = snapshot.segments.iter().filter(|segment| {
+                            segment.start_ms == start_ms && segment.end_ms == end_ms
+                        });
+                        if let (Some(segment), None) = (matches.next(), matches.next()) {
+                            object.insert(
+                                "segmentId".into(),
+                                serde_json::Value::String(segment.segment_id.clone()),
+                            );
+                        }
+                    }
+                }
+                for child in object.values_mut() {
+                    visit(child, snapshot, known_ids);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, snapshot, known_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    visit(candidate, snapshot, &known_ids);
+}
+
+fn parse_generated_json(output: &str) -> Result<serde_json::Value, serde_json::Error> {
     let trimmed = output.trim();
     let without_prefix = trimmed
         .strip_prefix("```json")
@@ -1480,114 +2205,49 @@ fn parse_generated_content(
         .strip_suffix("```")
         .unwrap_or(without_prefix)
         .trim();
-    let content: SummaryContent = serde_json::from_str(json)
-        .map_err(|error| format!("AIの要約結果をJSONとして解析できませんでした: {error}"))?;
-    validate_content(&content, snapshot)?;
-    Ok(content)
+
+    match serde_json::from_str(json) {
+        Ok(value) => Ok(value),
+        Err(direct_error) => {
+            // ACP agents can publish startup notices or status text as agent message
+            // chunks before their actual answer. Preserve the complete raw response for
+            // diagnostics, but parse the first complete meeting-document object in it.
+            for (index, character) in json.char_indices() {
+                if character != '{' {
+                    continue;
+                }
+                let mut values = serde_json::Deserializer::from_str(&json[index..])
+                    .into_iter::<serde_json::Value>();
+                let Some(Ok(value)) = values.next() else {
+                    continue;
+                };
+                let Some(object) = value.as_object() else {
+                    continue;
+                };
+                if [
+                    "meeting",
+                    "summary",
+                    "participants",
+                    "topics",
+                    "decisions",
+                    "actionItems",
+                ]
+                .iter()
+                .any(|key| object.contains_key(*key))
+                {
+                    return Ok(value);
+                }
+            }
+            Err(direct_error)
+        }
+    }
 }
 
 fn validate_content(
-    content: &SummaryContent,
+    content: &MeetingExtractionCandidate,
     snapshot: &SummaryTranscriptSnapshot,
 ) -> Result<(), String> {
-    if content.overview.trim().is_empty() || content.overview.len() > 100_000 {
-        return Err("要約本文が空か、長すぎます。".into());
-    }
-    if content.decisions.len() > 500 || content.action_items.len() > 500 {
-        return Err("要約項目が多すぎます。".into());
-    }
-    let ids: HashSet<&str> = snapshot
-        .segments
-        .iter()
-        .map(|segment| segment.segment_id.as_str())
-        .collect();
-    let references = content
-        .decisions
-        .iter()
-        .flat_map(|item| item.source_segment_ids.iter())
-        .chain(
-            content
-                .action_items
-                .iter()
-                .flat_map(|item| item.source_segment_ids.iter()),
-        );
-    if references.into_iter().any(|id| !ids.contains(id.as_str())) {
-        return Err("要約に存在しない文字起こし区間への参照が含まれています。".into());
-    }
-    Ok(())
-}
-
-fn summaries_directory(app: &AppHandle, meeting_id: &str) -> Result<PathBuf, String> {
-    Ok(crate::meeting_store::meeting_directory(app, meeting_id)?.join("summaries"))
-}
-
-fn summary_path(
-    app: &AppHandle,
-    meeting_id: &str,
-    transcription_id: &str,
-) -> Result<PathBuf, String> {
-    validate_identifier(transcription_id)?;
-    Ok(summaries_directory(app, meeting_id)?.join(format!("{transcription_id}.json")))
-}
-
-fn read_summary(
-    app: &AppHandle,
-    meeting_id: &str,
-    transcription_id: &str,
-) -> Result<Option<MeetingSummary>, String> {
-    let path = summary_path(app, meeting_id, transcription_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let metadata = fs::metadata(&path)
-        .map_err(|error| format!("保存済みの要約を確認できませんでした: {error}"))?;
-    if !metadata.is_file() || metadata.len() > MAX_SUMMARY_BYTES {
-        return Err("保存済みの要約ファイルが不正です。".into());
-    }
-    let summary: MeetingSummary = serde_json::from_slice(
-        &fs::read(&path)
-            .map_err(|error| format!("保存済みの要約を読み込めませんでした: {error}"))?,
-    )
-    .map_err(|error| format!("保存済みの要約が壊れています: {error}"))?;
-    if summary.schema_version != SCHEMA_VERSION
-        || summary.meeting_id != meeting_id
-        || summary.transcription_id != transcription_id
-    {
-        return Err("保存済みの要約形式または識別子が一致しません。".into());
-    }
-    Ok(Some(summary))
-}
-
-fn write_summary(app: &AppHandle, summary: &MeetingSummary) -> Result<(), String> {
-    let directory = summaries_directory(app, &summary.meeting_id)?;
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("要約の保存先を作成できませんでした: {error}"))?;
-    let path = summary_path(app, &summary.meeting_id, &summary.transcription_id)?;
-    let temporary = directory.join(format!(
-        ".{}.{}.tmp",
-        summary.transcription_id,
-        uuid::Uuid::now_v7()
-    ));
-    let bytes = serde_json::to_vec_pretty(summary)
-        .map_err(|error| format!("要約を保存形式へ変換できませんでした: {error}"))?;
-    if bytes.len() as u64 > MAX_SUMMARY_BYTES {
-        return Err("要約が大きすぎるため保存できません。".into());
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|error| format!("要約を書き込めませんでした: {error}"))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("要約を安全に書き込めませんでした: {error}"))?;
-    drop(file);
-    if path.exists() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("以前の要約を更新できませんでした: {error}"))?;
-    }
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("要約の保存を確定できませんでした: {error}"))
+    crate::meeting_schema::validate_candidate(content, snapshot)
 }
 
 fn resolve_agent_executable(app: &AppHandle, agent: &AcpAgentDefinition) -> Option<PathBuf> {
@@ -2101,12 +2761,6 @@ fn validate_model_id(model_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_identifier(value: &str) -> Result<(), String> {
-    uuid::Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| "要約の識別子が不正です。".into())
-}
-
 fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -2132,16 +2786,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prompt_uses_corrected_transcript_and_labels() {
-        let prompt = build_prompt(&snapshot()).expect("prompt");
-        assert!(prompt.contains("修正版です"));
-        assert!(prompt.contains("岡本"));
-        assert!(prompt.contains("segment-1"));
+    fn candidate(segment_id: &str) -> MeetingExtractionCandidate {
+        serde_json::json!({
+            "meeting": {"title":"定例","meetingType":"unknown","timeZone":"Asia/Tokyo","languageCodes":["ja"],"fieldBasis":{"title":"explicit"}},
+            "participants": [],
+            "summary": {"overview":"概要","keyPoints":[],"fieldBasis":{"overview":"explicit"}},
+            "topics": [],
+            "decisions": [{"key":"d1","statement":"決定","status":"active","topicKeys":[],"ownerParticipantKeys":[],"supersedesDecisionKeys":[],"evidence":[{"relation":"direct","spans":[{"segmentId":segment_id}]}],"fieldBasis":{"statement":"explicit"}}],
+            "actionItems": [], "openIssues": [], "questions": [], "notes": []
+        })
     }
 
     #[test]
-    fn splits_two_hour_transcript_into_fifteen_minute_chunks() {
+    fn prompt_uses_corrected_transcript_and_labels() {
+        let prompt = build_prompt(
+            &snapshot(),
+            &crate::transcription::context::TextGenerationContext::default(),
+        )
+        .expect("prompt");
+        assert!(prompt.contains("修正版です"));
+        assert!(prompt.contains("岡本"));
+        assert!(prompt.contains("segment-1"));
+        assert!(prompt.contains("summaryはoverview,keyPoints,fieldBasisを必須"));
+        assert!(prompt.contains("overviewは会議全体の内容と結論"));
+        assert!(prompt.contains("titleは生成せず省略"));
+    }
+
+    #[test]
+    fn quality_check_uses_only_completed_meeting_note() {
+        let document = serde_json::json!({
+            "documentId": format!("mtg_{}", uuid::Uuid::now_v7()),
+            "meeting":{"title":"2026-08-12_16-30-45"},
+            "summary":{"overview":"製品方針を確認した"},
+            "decisions":[],"actionItems":[],"openIssues":[],"questions":[]
+        });
+        let prompt = build_quality_check_prompt(&document).expect("quality prompt");
+
+        assert!(prompt.contains("製品方針を確認した"));
+        assert!(prompt.contains("入力は会議ノートJSONだけ"));
+        assert!(!prompt.contains("修正版です"));
+    }
+
+    #[test]
+    fn quality_check_parser_normalizes_status_and_validates_title() {
+        let parsed = parse_quality_check_output(
+            r#"{"title":"製品方針レビュー","consistency":{"status":"ok","findings":[]}}"#,
+        )
+        .expect("quality result");
+        assert_eq!(parsed["title"], "製品方針レビュー");
+        assert_eq!(parsed["consistency"]["status"], "passed");
+        assert!(parse_quality_check_output(
+            r#"{"title":"","consistency":{"status":"passed","findings":[]}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn prompt_includes_text_generation_context_as_non_evidence_guidance() {
+        let context = crate::transcription::context::TextGenerationContext {
+            background: "Mutsuna Echoの製品会議".into(),
+            terms: vec!["Mutsuna Reserve".into()],
+            corrections: vec![crate::transcription::context::TextCorrection {
+                from: "むつな".into(),
+                to: "Mutsuna".into(),
+            }],
+        };
+
+        let prompt = build_prompt(&snapshot(), &context).expect("prompt");
+
+        assert!(prompt.contains("Mutsuna Echoの製品会議"));
+        assert!(prompt.contains("Mutsuna Reserve"));
+        assert!(prompt.contains("Evidenceは必ず文字起こしJSONから取得"));
+    }
+
+    #[test]
+    fn short_transcripts_are_not_split_by_elapsed_time() {
         let mut transcript = snapshot();
         transcript.segments = (0..120)
             .map(|minute| SummaryTranscriptSegment {
@@ -2153,10 +2872,10 @@ mod tests {
             })
             .collect();
 
-        let chunks = split_summary_snapshot(&transcript);
+        let chunks = split_cloudflare_summary_snapshot(&transcript, CLOUDFLARE_GLM_MODEL_ID);
 
-        assert_eq!(chunks.len(), 8);
-        assert_eq!(summary_total_steps(chunks.len()), 9);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(summary_total_steps(chunks.len()), 1);
         assert_eq!(
             chunks
                 .iter()
@@ -2166,26 +2885,102 @@ mod tests {
         );
         assert_eq!(chunks[0].segments[0].segment_id, "segment-0");
         assert_eq!(
-            chunks[7].segments.last().expect("last").segment_id,
+            chunks[0].segments.last().expect("last").segment_id,
             "segment-119"
         );
     }
 
     #[test]
+    fn large_transcripts_use_model_specific_context_budgets() {
+        let mut transcript = snapshot();
+        transcript.segments = (0..80)
+            .map(|index| SummaryTranscriptSegment {
+                segment_id: format!("segment-{index}"),
+                speaker: "話者".into(),
+                start_ms: index * 1_000,
+                end_ms: (index + 1) * 1_000,
+                text: "あ".repeat(2_000),
+            })
+            .collect();
+
+        let glm = split_cloudflare_summary_snapshot(&transcript, CLOUDFLARE_GLM_MODEL_ID);
+        let gemma = split_cloudflare_summary_snapshot(&transcript, CLOUDFLARE_GEMMA_MODEL_ID);
+
+        assert!(glm.len() > 1);
+        assert!(gemma.len() < glm.len());
+        assert_eq!(
+            glm.iter().map(|chunk| chunk.segments.len()).sum::<usize>(),
+            transcript.segments.len()
+        );
+    }
+
+    #[test]
     fn merge_prompt_preserves_source_segment_ids() {
-        let partials = vec![SummaryContent {
-            overview: "概要".into(),
-            decisions: vec![SummaryReference {
-                text: "決定".into(),
-                source_segment_ids: vec!["segment-1".into()],
-            }],
-            action_items: Vec::new(),
-        }];
+        let partials = vec![candidate("segment-1")];
 
         let prompt = build_summary_merge_prompt(&partials).expect("merge prompt");
 
         assert!(prompt.contains("segment-1"));
-        assert!(prompt.contains("重複する内容をまとめ"));
+        assert!(prompt.contains("同じ事実を表すレコードは必ず統合"));
+    }
+
+    #[test]
+    fn acp_session_updates_report_response_and_live_activity() {
+        let (sender, receiver) = mpsc::channel();
+        for update in [
+            serde_json::json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"内容を整理中"}}),
+            serde_json::json!({"sessionUpdate":"plan","entries":[{"content":"決定事項を抽出","status":"in_progress"}]}),
+            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"文字起こしを確認","status":"in_progress"}),
+        ] {
+            sender
+                .send(
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"update":update}})
+                        .to_string(),
+                )
+                .expect("activity update");
+        }
+        for text in ["前半", "後半"] {
+            sender
+                .send(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}
+                    })
+                    .to_string(),
+                )
+                .expect("update");
+        }
+        sender
+            .send(serde_json::json!({"jsonrpc": "2.0", "id": 3, "result": {}}).to_string())
+            .expect("completion");
+        let mut stdin = Vec::new();
+        let mut output = String::new();
+        let mut received = Vec::new();
+        let mut activities = Vec::new();
+        let mut on_output = |update| match update {
+            AcpLiveUpdate::ResponseBytes(bytes) => received.push(bytes),
+            AcpLiveUpdate::Activity { kind, text, status } => {
+                activities.push((kind, text, status));
+            }
+        };
+
+        wait_for_response(
+            &receiver,
+            &mut stdin,
+            3,
+            Instant::now() + Duration::from_secs(1),
+            Some(&mut output),
+            Some(&mut on_output),
+        )
+        .expect("ACP completion");
+
+        assert_eq!(output, "前半後半");
+        assert_eq!(received, vec!["前半".len(), "前半後半".len()]);
+        assert_eq!(activities[0].0, "thought");
+        assert_eq!(activities[1].1, "決定事項を抽出");
+        assert_eq!(activities[2].0, "tool");
+        assert_eq!(activities[2].2.as_deref(), Some("in_progress"));
     }
 
     #[test]
@@ -2267,27 +3062,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_segment_reference() {
-        let content = SummaryContent {
-            overview: "要約".into(),
-            decisions: vec![SummaryReference {
-                text: "決定".into(),
-                source_segment_ids: vec!["unknown".into()],
-            }],
-            action_items: vec![],
-        };
+        let content = candidate("unknown");
         assert!(validate_content(&content, &snapshot()).is_err());
     }
 
     #[test]
     fn accepts_known_segment_reference() {
-        let content = SummaryContent {
-            overview: "要約".into(),
-            decisions: vec![SummaryReference {
-                text: "決定".into(),
-                source_segment_ids: vec!["segment-1".into()],
-            }],
-            action_items: vec![],
-        };
+        let content = candidate("segment-1");
         assert!(validate_content(&content, &snapshot()).is_ok());
     }
 
@@ -2336,5 +3117,73 @@ mod tests {
             .iter()
             .all(|model| validate_cloudflare_model_id(&model.id).is_ok()));
         assert!(validate_cloudflare_model_id("@cf/unknown/model").is_err());
+    }
+
+    #[test]
+    fn gemma_summary_requests_are_serialized_to_avoid_provider_timeouts() {
+        assert_eq!(cloudflare_summary_parallelism(CLOUDFLARE_GEMMA_MODEL_ID), 1);
+        assert!(cloudflare_summary_parallelism(CLOUDFLARE_GLM_MODEL_ID) <= 2);
+    }
+
+    #[test]
+    fn generated_json_ignores_acp_notice_before_meeting_document() {
+        let output = concat!(
+            "Warning: Skill descriptions were shortened to fit the context budget.\n",
+            r#"{"meeting":{"title":"定例会"},"summary":{"body":"概要"}}"#,
+        );
+
+        let parsed = parse_generated_json(output).expect("meeting document after notice");
+
+        assert_eq!(parsed["meeting"]["title"], "定例会");
+        assert_eq!(parsed["summary"]["body"], "概要");
+    }
+
+    #[test]
+    fn generated_json_does_not_accept_unrelated_object_in_acp_notice() {
+        let output = concat!(
+            "Notice metadata: {\"level\":\"warning\"}\n",
+            r#"{"meeting":{"title":"定例会"},"summary":{"body":"概要"}}"#,
+        );
+
+        let parsed = parse_generated_json(output).expect("meeting document after metadata");
+
+        assert_eq!(parsed["meeting"]["title"], "定例会");
+    }
+
+    #[test]
+    fn repairs_unknown_evidence_segment_id_from_exact_unique_times() {
+        let mut content = serde_json::json!({
+            "evidence": [{
+                "spans": [{
+                    "segmentId": "hallucinated-segment",
+                    "startMs": 1000,
+                    "endMs": 2000
+                }]
+            }]
+        });
+
+        normalize_evidence_segment_ids(&mut content, &snapshot());
+
+        assert_eq!(content["evidence"][0]["spans"][0]["segmentId"], "segment-1");
+    }
+
+    #[test]
+    fn keeps_unknown_evidence_segment_id_when_times_do_not_match() {
+        let mut content = serde_json::json!({
+            "evidence": [{
+                "spans": [{
+                    "segmentId": "hallucinated-segment",
+                    "startMs": 1001,
+                    "endMs": 2000
+                }]
+            }]
+        });
+
+        normalize_evidence_segment_ids(&mut content, &snapshot());
+
+        assert_eq!(
+            content["evidence"][0]["spans"][0]["segmentId"],
+            "hallucinated-segment"
+        );
     }
 }

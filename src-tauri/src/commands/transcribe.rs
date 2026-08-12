@@ -212,12 +212,43 @@ pub(crate) fn set_selected_audio_with_meeting(
     set_selected_audio(app, path, meeting_id)
 }
 
+pub(crate) fn refresh_selected_audio_after_rename(
+    app: &AppHandle,
+    meeting_id: &str,
+    path: PathBuf,
+) -> Result<(), String> {
+    let state = app.state::<AudioSelectionState>();
+    let selected_meeting_id = state
+        .meeting_id
+        .lock()
+        .map_err(|_| "選択したMeetingの状態を確認できませんでした。".to_string())?
+        .clone();
+    if selected_meeting_id.as_deref() != Some(meeting_id) {
+        return Ok(());
+    }
+    let descriptor = describe_audio_path(&path, meeting_id.to_string())?;
+    *state
+        .selected
+        .lock()
+        .map_err(|_| "選択した音声の名前を更新できませんでした。".to_string())? =
+        Some(SelectedAudio { path, descriptor });
+    Ok(())
+}
+
 pub(crate) fn restore_selected_meeting(
     app: &AppHandle,
     meeting_id: &str,
 ) -> Result<SelectedAudioFile, String> {
     let path = crate::meeting_store::local_audio_path(app, meeting_id)?;
-    set_selected_audio(app, path, meeting_id.to_string())
+    let descriptor = set_selected_audio(app, path, meeting_id.to_string())?;
+    if let Err(error) = crate::meeting_store::cache_audio_duration(
+        app,
+        &descriptor.meeting_id,
+        descriptor.duration_ms,
+    ) {
+        eprintln!("Could not cache meeting audio duration: {error}");
+    }
+    Ok(descriptor)
 }
 
 pub(crate) fn selected_meeting_id(app: &AppHandle) -> Result<String, String> {

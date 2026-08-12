@@ -41,6 +41,8 @@ struct MeetingAudio {
     content_sha256: String,
     file_name: String,
     size_bytes: u64,
+    #[serde(default)]
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,6 +63,7 @@ pub(crate) struct StoredMeetingSummary {
     pub(crate) title: String,
     pub(crate) file_name: String,
     pub(crate) size_bytes: u64,
+    pub(crate) duration_ms: Option<u64>,
     pub(crate) updated_at_unix_ms: u64,
     pub(crate) audio_available: bool,
 }
@@ -174,6 +177,25 @@ pub(crate) fn local_audio_path(app: &AppHandle, meeting_id: &str) -> Result<Path
     Ok(canonical)
 }
 
+pub(crate) fn cache_audio_duration(
+    app: &AppHandle,
+    meeting_id: &str,
+    duration_ms: u64,
+) -> Result<(), String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meetingの長さを保存できませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let mut document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    if document.audio.duration_ms == Some(duration_ms) {
+        return Ok(());
+    }
+    document.audio.duration_ms = Some(duration_ms);
+    write_json_atomic(&path, &document)
+}
+
 pub(crate) fn list_stored_meetings(app: &AppHandle) -> Result<Vec<StoredMeetingSummary>, String> {
     let _guard = STORE_LOCK
         .lock()
@@ -191,6 +213,17 @@ pub(crate) fn mark_updated(app: &AppHandle, meeting_id: &str) -> Result<(), Stri
     validate_document(&document)?;
     document.updated_at = chrono::Utc::now().to_rfc3339();
     write_json_atomic(&path, &document)
+}
+
+pub(crate) fn meeting_title(app: &AppHandle, meeting_id: &str) -> Result<String, String> {
+    let _guard = STORE_LOCK
+        .lock()
+        .map_err(|_| "Meeting名を読み込めませんでした。".to_string())?;
+    validate_meeting_id(meeting_id)?;
+    let path = meeting_directory_in(&meetings_directory(app)?, meeting_id)?.join(MEETING_FILE);
+    let document: MeetingDocument = read_json(&path)?;
+    validate_document(&document)?;
+    Ok(document.title)
 }
 
 pub(crate) fn transcription_context(
@@ -441,6 +474,7 @@ fn create_document(
             content_sha256,
             file_name,
             size_bytes: metadata.len(),
+            duration_ms: crate::commands::transcribe::audio_duration_ms(audio_path).ok(),
         },
         transcription_context: Default::default(),
     };
@@ -573,6 +607,7 @@ fn list_stored_meetings_in(
             title: document.title,
             file_name: document.audio.file_name,
             size_bytes: document.audio.size_bytes,
+            duration_ms: document.audio.duration_ms,
             updated_at_unix_ms: rfc3339_unix_ms(&document.updated_at),
             audio_available,
         });

@@ -75,6 +75,18 @@ pub(crate) struct EditableTranscriptSegment {
     pub(crate) edited: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditableTranscriptViewSegment {
+    segment_id: String,
+    speaker: String,
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+    original_text: String,
+    edited: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TranscriptDocument {
@@ -145,7 +157,7 @@ pub(crate) struct EditableTranscript {
     language: String,
     tokens: Vec<crate::transcription::TranscriptToken>,
     speaker_labels: Vec<TranscriptSpeakerLabel>,
-    segments: Vec<EditableTranscriptSegment>,
+    segments: Vec<EditableTranscriptViewSegment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -712,7 +724,8 @@ pub(crate) fn update_run_segments(
         let now = chrono::Utc::now().to_rfc3339();
         run.document.revision = run.document.revision.saturating_add(1);
         run.document.updated_at = now;
-        run.document.edited = true;
+        run.document.edited = run.document.segments.iter().any(|segment| segment.edited)
+            || !run.document.speaker_labels.is_empty();
         write_run(&directory, &run)?;
         if let Some(summary) = index
             .runs
@@ -794,6 +807,12 @@ fn apply_segment_changes(
         if change.text.len() > MAX_SEGMENT_TEXT_BYTES {
             return Err("1つの発話区間に保存できる文字数を超えています。".into());
         }
+        let original_text = run
+            .document
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == change.segment_id)
+            .and_then(|segment| original_text_for_segment(&run.source, segment));
         let segment = run
             .document
             .segments
@@ -810,11 +829,52 @@ fn apply_segment_changes(
                 }
             }
             segment.text = change.text;
-            segment.edited = true;
+            segment.edited = original_text.as_deref() != Some(segment.text.as_str());
             changed = true;
         }
     }
     Ok((changed, learned_corrections))
+}
+
+fn original_text_for_segment(
+    source: &Transcript,
+    segment: &EditableTranscriptSegment,
+) -> Option<String> {
+    if let Some(source_segment) = source.segments.iter().find(|source_segment| {
+        source_segment.start_ms == segment.start_ms && source_segment.end_ms == segment.end_ms
+    }) {
+        return Some(source_segment.text.clone());
+    }
+
+    let token_text = source
+        .tokens
+        .iter()
+        .filter(|token| {
+            token.start_ms.is_some_and(|start_ms| {
+                let end_ms = token.end_ms.unwrap_or(start_ms).max(start_ms);
+                if end_ms == start_ms {
+                    start_ms >= segment.start_ms && start_ms < segment.end_ms
+                } else {
+                    end_ms > segment.start_ms && start_ms < segment.end_ms
+                }
+            })
+        })
+        .map(|token| token.text.as_str())
+        .collect::<String>();
+    if !token_text.is_empty() {
+        return Some(token_text);
+    }
+
+    let segment_text = source
+        .segments
+        .iter()
+        .filter(|source_segment| {
+            source_segment.end_ms.min(segment.end_ms)
+                > source_segment.start_ms.max(segment.start_ms)
+        })
+        .map(|source_segment| source_segment.text.as_str())
+        .collect::<String>();
+    (!segment_text.is_empty()).then_some(segment_text)
 }
 
 fn apply_speaker_label_changes(
@@ -1052,7 +1112,24 @@ fn run_detail(run: &StoredTranscriptionRun) -> TranscriptionRunDetail {
                     }
                 })
                 .collect(),
-            segments: run.document.segments.clone(),
+            segments: run
+                .document
+                .segments
+                .iter()
+                .map(|segment| {
+                    let original_text = original_text_for_segment(&run.source, segment)
+                        .unwrap_or_else(|| segment.text.clone());
+                    EditableTranscriptViewSegment {
+                        segment_id: segment.segment_id.clone(),
+                        speaker: segment.speaker.clone(),
+                        start_ms: segment.start_ms,
+                        end_ms: segment.end_ms,
+                        text: segment.text.clone(),
+                        edited: segment.text != original_text,
+                        original_text,
+                    }
+                })
+                .collect(),
         },
     }
 }
@@ -1076,7 +1153,128 @@ fn validate_transcription_id(value: &str) -> Result<(), String> {
 }
 
 fn write_run(directory: &Path, run: &StoredTranscriptionRun) -> Result<(), String> {
+    persist_transcript_document_revision(directory, run)?;
     write_json_atomically(&run_path(directory, &run.transcription_id)?, run)
+}
+
+fn persist_transcript_document_revision(
+    directory: &Path,
+    run: &StoredTranscriptionRun,
+) -> Result<(), String> {
+    let revision = run.document.revision.saturating_add(1);
+    let documents = directory.join("documents").join(&run.transcription_id);
+    fs::create_dir_all(&documents)
+        .map_err(|error| format!("文字起こしrevisionの保存先を作成できませんでした: {error}"))?;
+    let path = documents.join(format!("revision-{revision}.json"));
+    let mut speaker_ids = BTreeMap::<String, String>::new();
+    for segment in &run.document.segments {
+        speaker_ids
+            .entry(segment.speaker.clone())
+            .or_insert_with(|| {
+                let digest = format!("{:x}", Sha256::digest(segment.speaker.as_bytes()));
+                format!("spk_{}", &digest[..16])
+            });
+    }
+    let speakers = speaker_ids
+        .iter()
+        .map(|(speaker, speaker_id)| {
+            serde_json::json!({
+                "speakerId": speaker_id,
+                "label": run.document.speaker_labels.get(speaker).unwrap_or(speaker),
+                "source": if run.document.speaker_labels.contains_key(speaker) {
+                    "user"
+                } else if run.diarization.is_some() {
+                    "diarization"
+                } else {
+                    "import"
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let segments = run
+        .document
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "segmentId": format!("seg_{}", segment.segment_id),
+                "startMs": segment.start_ms,
+                "endMs": segment.end_ms,
+                "speakerId": speaker_ids.get(&segment.speaker),
+                "text": segment.text,
+                "languageCode": normalize_schema_language(&run.language)
+            })
+        })
+        .collect::<Vec<_>>();
+    let duration_ms = run
+        .document
+        .segments
+        .iter()
+        .map(|segment| segment.end_ms)
+        .max()
+        .unwrap_or(0);
+    let document = serde_json::json!({
+        "schemaVersion": "1.0.0",
+        "documentType": "transcript",
+        "documentId": format!("trn_{}", run.transcription_id),
+        "revision": revision,
+        "createdAt": run.created_at,
+        "updatedAt": run.document.updated_at,
+        "locale": normalize_schema_language(&run.language),
+        "timeZone": "Asia/Tokyo",
+        "audio": {
+            "assetId": format!("aud_{}", run.meeting_id),
+            "durationMs": duration_ms,
+            "sampleRateHz": 16000,
+            "channels": 1
+        },
+        "speakers": speakers,
+        "segments": segments,
+        "processingRuns": [{
+            "runId": format!("stt_{}", run.transcription_id),
+            "stage": "stt",
+            "engine": run.provider,
+            "provider": run.provider,
+            "model": run.model,
+            "status": "succeeded",
+            "startedAt": run.created_at,
+            "completedAt": run.created_at
+        }]
+    });
+    if path.exists() {
+        let existing: serde_json::Value = read_bounded_json(&path)?;
+        return if existing == document {
+            Ok(())
+        } else {
+            Err("同じ文字起こしrevisionに異なる内容が保存されています。".into())
+        };
+    }
+    let bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("文字起こしrevisionを変換できませんでした: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("文字起こしrevisionを書き込めませんでした: {error}"))?;
+    use std::io::Write;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("文字起こしrevisionを安全に保存できませんでした: {error}"))
+}
+
+fn normalize_schema_language(language: &str) -> &str {
+    let language = language.trim();
+    let mut parts = language.split('-');
+    let valid = parts.next().is_some_and(|primary| {
+        (2..=3).contains(&primary.len()) && primary.bytes().all(|byte| byte.is_ascii_alphabetic())
+    }) && parts.all(|part| {
+        (2..=8).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    });
+    if valid {
+        language
+    } else {
+        "ja"
+    }
 }
 
 fn read_run(
@@ -1120,7 +1318,7 @@ fn read_run(
     {
         let mut transcript = run.source.clone();
         normalize_transcript_for_display(&mut transcript);
-        let revision = run.document.revision;
+        let revision = run.document.revision.saturating_add(1);
         let updated_at = run.document.updated_at.clone();
         run.document = document_from_transcript(&transcript, updated_at);
         run.document.revision = revision;
@@ -1443,8 +1641,9 @@ mod tests {
     use super::{
         apply_segment_changes, apply_speaker_label_changes, audio_key,
         backfill_run_cost_from_history, document_from_transcript, ensure_history_in,
-        load_current_in, load_legacy_in, read_run, rebase_document_segments, record_provider_usage,
-        reset_document_from_source, run_summary, save_in, transcript_path_in, ProviderCostUsage,
+        load_current_in, load_legacy_in, original_text_for_segment, read_run,
+        rebase_document_segments, record_provider_usage, reset_document_from_source, run_summary,
+        save_in, transcript_path_in, write_run, EditableTranscriptSegment, ProviderCostUsage,
         StoredTranscriptionRun, TranscriptSegmentChange, TranscriptSpeakerLabelChange,
         TranscriptionSettingsSnapshot, RUN_SCHEMA_VERSION, SCHEMA_VERSION,
     };
@@ -1553,6 +1752,62 @@ mod tests {
     }
 
     #[test]
+    fn original_text_rebuilds_all_tokens_overlapping_a_display_segment() {
+        let mut source = fixture_transcript();
+        source.tokens = vec![
+            TranscriptToken {
+                text: "前半、".into(),
+                start_ms: Some(100),
+                end_ms: Some(300),
+                start_time_source: Some(TokenTimeSource::Provider),
+                end_time_source: Some(TokenTimeSource::Provider),
+                speaker: Some("Speaker 1".into()),
+                speaker_source: Some(TokenSpeakerSource::Provider),
+                confidence: None,
+                utterance_id: None,
+            },
+            TranscriptToken {
+                text: "後半です。".into(),
+                start_ms: Some(300),
+                end_ms: Some(700),
+                start_time_source: Some(TokenTimeSource::Provider),
+                end_time_source: Some(TokenTimeSource::Provider),
+                speaker: Some("Speaker 1".into()),
+                speaker_source: Some(TokenSpeakerSource::Provider),
+                confidence: None,
+                utterance_id: None,
+            },
+        ];
+        source.segments = vec![
+            TranscriptSegment {
+                speaker: "Speaker 1".into(),
+                start_ms: 100,
+                end_ms: 300,
+                text: "前半、".into(),
+            },
+            TranscriptSegment {
+                speaker: "Speaker 1".into(),
+                start_ms: 300,
+                end_ms: 700,
+                text: "後半です。".into(),
+            },
+        ];
+        let displayed = EditableTranscriptSegment {
+            segment_id: uuid::Uuid::now_v7().to_string(),
+            speaker: "Speaker 1".into(),
+            start_ms: 100,
+            end_ms: 700,
+            text: "編集後の長い文章".into(),
+            edited: true,
+        };
+
+        assert_eq!(
+            original_text_for_segment(&source, &displayed).as_deref(),
+            Some("前半、後半です。")
+        );
+    }
+
+    #[test]
     fn transcript_round_trips_by_meeting_id() {
         let root = std::env::temp_dir().join(format!(
             "mutsuna-transcript-store-{}-{}",
@@ -1610,6 +1865,23 @@ mod tests {
         assert_eq!(run.source.segments[0].text, "テストです。");
         assert_eq!(run.document.segments[0].text, "テストです。");
         assert!(!run.document.edited);
+        let revision_path = directory
+            .join("documents")
+            .join(&history.runs[0].transcription_id)
+            .join("revision-1.json");
+        let revision: serde_json::Value = serde_json::from_slice(
+            &fs::read(&revision_path).expect("read immutable transcript revision"),
+        )
+        .expect("parse transcript revision");
+        assert_eq!(revision["schemaVersion"], "1.0.0");
+        assert_eq!(revision["documentType"], "transcript");
+        assert_eq!(revision["revision"], 1);
+        assert!(revision["segments"][0]["segmentId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("seg_")));
+        let mut conflicting = run.clone();
+        conflicting.document.segments[0].text = "同じrevisionの異なる内容".into();
+        assert!(write_run(&directory, &conflicting).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

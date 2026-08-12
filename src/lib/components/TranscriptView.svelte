@@ -2,13 +2,18 @@
   import { tick, untrack } from "svelte";
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
   import Pause from "@lucide/svelte/icons/pause";
   import Play from "@lucide/svelte/icons/play";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import Search from "@lucide/svelte/icons/search";
   import Sparkles from "@lucide/svelte/icons/sparkles";
   import Undo2 from "@lucide/svelte/icons/undo-2";
+  import UsersRound from "@lucide/svelte/icons/users-round";
   import X from "@lucide/svelte/icons/x";
   import { Button } from "@mutsuna/ui/button";
+  import { Popover, PopoverContent, PopoverTrigger } from "@mutsuna/ui/popover";
   import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import { formatTimestamp } from "../format";
   import type { EditableTranscript, TranscriptSegmentTextChange } from "../types/transcript";
@@ -35,7 +40,7 @@
     formatting: boolean;
     onEditSegment: (segmentId: string, text: string) => void;
     onEditSpeakerLabel: (speaker: string, label: string) => void;
-    onReplaceSegments: (changes: TranscriptSegmentTextChange[]) => Promise<boolean>;
+    onReplaceSegments: (changes: TranscriptSegmentTextChange[], successMessage?: string) => Promise<boolean>;
     onFormat: () => Promise<void>;
     canUndoReplacement: boolean;
     onUndoReplacement: () => Promise<void>;
@@ -72,6 +77,7 @@
   let replacementText = $state("");
   let currentMatchIndex = $state(0);
   let replacing = $state(false);
+  let copiedSegmentId = $state<string | null>(null);
   let pinnedPlaybackSegmentId = $state<string | null>(null);
   const composingSegments = new Set<string>();
   const composingSpeakers = new Set<string>();
@@ -212,6 +218,26 @@
     onPlay(segment.startMs);
   }
 
+  async function copySegment(segment: EditableTranscript["segments"][number]) {
+    try {
+      await navigator.clipboard.writeText(segment.text);
+      copiedSegmentId = segment.segmentId;
+      window.setTimeout(() => {
+        if (copiedSegmentId === segment.segmentId) copiedSegmentId = null;
+      }, 1600);
+    } catch {
+      copiedSegmentId = null;
+    }
+  }
+
+  async function restoreSegment(segment: EditableTranscript["segments"][number]) {
+    if (!editable || !segment.edited || formatting) return;
+    await onReplaceSegments(
+      [{ segmentId: segment.segmentId, text: segment.originalText }],
+      "原文に戻しました。"
+    );
+  }
+
   function finishComposition(event: CompositionEvent, segmentId: string) {
     composingSegments.delete(segmentId);
     editSegment(event, segmentId);
@@ -234,6 +260,11 @@
   function speakerLabel(speaker: string): string {
     const label = transcript.speakerLabels.find((entry) => entry.speaker === speaker)?.label.trim();
     return label || speaker;
+  }
+
+  function speakerTone(speaker: string): number {
+    const index = transcript.speakerLabels.findIndex((entry) => entry.speaker === speaker);
+    return (index < 0 ? 0 : index) % 4;
   }
 
   function toggleReplace() {
@@ -342,12 +373,47 @@
 <section class="transcript-view" bind:this={transcriptElement} aria-label="文字起こし結果">
   {#if transcript.segments.length > 0}
     {#if editable}
-      <div class="correction-toolbar">
-        <Button size="sm" variant="outline" type="button" icon={Sparkles} disabled={formatting} loading={formatting} onclick={() => void onFormat()}>{formatting ? "整形中…" : "整形"}</Button>
-        <Button size="sm" variant={replaceOpen ? "secondary" : "ghost"} type="button" icon={Search} aria-expanded={replaceOpen} disabled={formatting} onclick={toggleReplace}>検索・置換</Button>
-        {#if canUndoReplacement}
-          <Button size="sm" variant="ghost" type="button" icon={Undo2} disabled={formatting} onclick={() => void onUndoReplacement()}>一括編集を元に戻す</Button>
-        {/if}
+      <div class="transcript-edit-bar">
+        <div class="correction-toolbar">
+          <Button size="sm" variant={replaceOpen ? "secondary" : "outline"} type="button" icon={Search} aria-expanded={replaceOpen} disabled={formatting} onclick={toggleReplace}>検索・置換</Button>
+          <Button size="sm" variant="outline" type="button" icon={Sparkles} disabled={formatting} loading={formatting} onclick={() => void onFormat()}>{formatting ? "整形中…" : "文章を整形"}</Button>
+          {#if transcript.speakerLabels.length > 0}
+            <Popover>
+              <PopoverTrigger>
+                {#snippet child({ props })}
+                  <Button {...props} size="sm" variant="outline" type="button" icon={UsersRound} disabled={formatting}>話者名</Button>
+                {/snippet}
+              </PopoverTrigger>
+              <PopoverContent class="speaker-name-popover" align="end" sideOffset={7}>
+                <div class="speaker-name-heading">
+                  <strong>話者名を設定</strong>
+                  <span>名前を変更すると、文字起こし全体に反映されます。</span>
+                </div>
+                <div class="speaker-label-list">
+                  {#each transcript.speakerLabels as entry (entry.speaker)}
+                    <label class:edited={entry.edited}>
+                      <span>{entry.speaker}</span>
+                      <input
+                        type="text"
+                        value={entry.label}
+                        placeholder="名前を入力"
+                        aria-label={`${entry.speaker}の表示名`}
+                        disabled={formatting}
+                        oncompositionstart={() => composingSpeakers.add(entry.speaker)}
+                        oncompositionend={(event) => finishSpeakerComposition(event, entry.speaker)}
+                        oninput={(event) => editSpeaker(event, entry.speaker)}
+                        onblur={() => void onBlur()}
+                      />
+                    </label>
+                  {/each}
+                </div>
+              </PopoverContent>
+            </Popover>
+          {/if}
+          {#if canUndoReplacement}
+            <Button size="sm" variant="ghost" type="button" icon={Undo2} disabled={formatting} onclick={() => void onUndoReplacement()}>一括編集を元に戻す</Button>
+          {/if}
+        </div>
       </div>
       {#if replaceOpen}
         <section
@@ -386,67 +452,66 @@
         </section>
       {/if}
     {/if}
-    {#if editable && transcript.speakerLabels.length > 0}
-      <section class="speaker-labels" aria-label="話者ラベル">
-        <div class="speaker-labels-heading">
-          <strong>話者ラベル</strong>
-          <span>STTが分離した話者へ名前を設定します</span>
-        </div>
-        <div class="speaker-label-list">
-          {#each transcript.speakerLabels as entry (entry.speaker)}
-            <label class:edited={entry.edited}>
-              <span>{entry.speaker}</span>
-              <input
-                type="text"
-                value={entry.label}
-                placeholder={entry.speaker}
-                aria-label={`${entry.speaker}の表示名`}
-                disabled={formatting}
-                oncompositionstart={() => composingSpeakers.add(entry.speaker)}
-                oncompositionend={(event) => finishSpeakerComposition(event, entry.speaker)}
-                oninput={(event) => editSpeaker(event, entry.speaker)}
-                onblur={() => void onBlur()}
-              />
-            </label>
-          {/each}
-        </div>
-      </section>
-    {/if}
     <div class="segments">
       {#each visibleSegments as segment, index (`${segment.segmentId}-${index}`)}
         <article
           class:active={index === activeIndex}
           class:edited={segment.edited}
           class="segment"
+          data-speaker-tone={speakerTone(segment.speaker)}
           data-segment-index={index}
           aria-current={index === activeIndex ? "true" : undefined}
         >
-          <span class="segment-meta">
-            <span class="segment-timing">
-              {#if playbackAvailable}
-                <button
-                  class="timestamp"
-                  type="button"
-                  title={`${formatTimestamp(segment.startMs)} – ${formatTimestamp(segment.endMs)}へ移動`}
-                  aria-label={`${formatTimestamp(segment.startMs)}へ移動`}
-                  onclick={() => onSeek(segment.startMs)}
-                >{formatTimestamp(segment.startMs)}</button>
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  type="button"
-                  icon={playing && index === activeIndex ? Pause : Play}
-                  aria-label={playing && index === activeIndex ? "一時停止" : `${formatTimestamp(segment.startMs)}の3秒前から再生`}
-                  title={playing && index === activeIndex ? "一時停止" : "3秒前から再生"}
-                  onclick={() => playing && index === activeIndex ? onPause() : playSegment(segment)}
-                />
-              {:else}
-                <span class="timestamp">{formatTimestamp(segment.startMs)}</span>
-              {/if}
-            </span>
-            <span class="segment-heading">
-              <strong title={segment.speaker}>{speakerLabel(segment.speaker)}</strong>
-            </span>
+          <span class="segment-timing">
+            {#if playbackAvailable}
+              <button
+                class="timestamp"
+                type="button"
+                title={`${formatTimestamp(segment.startMs)} – ${formatTimestamp(segment.endMs)}へ移動`}
+                aria-label={`${formatTimestamp(segment.startMs)}へ移動`}
+                onclick={() => onSeek(segment.startMs)}
+              >{formatTimestamp(segment.startMs)}</button>
+            {:else}
+              <span class="timestamp">{formatTimestamp(segment.startMs)}</span>
+            {/if}
+          </span>
+          <span class="segment-actions">
+            {#if playbackAvailable}
+              <Button
+                class="segment-play"
+                size="icon-xs"
+                variant="ghost"
+                type="button"
+                icon={playing && index === activeIndex ? Pause : Play}
+                aria-label={playing && index === activeIndex ? "一時停止" : `${formatTimestamp(segment.startMs)}の3秒前から再生`}
+                title={playing && index === activeIndex ? "一時停止" : "3秒前から再生"}
+                onclick={() => playing && index === activeIndex ? onPause() : playSegment(segment)}
+              />
+            {/if}
+            <Button
+              class="segment-copy"
+              size="icon-xs"
+              variant="ghost"
+              type="button"
+              icon={copiedSegmentId === segment.segmentId ? Check : Copy}
+              aria-label={copiedSegmentId === segment.segmentId ? "コピーしました" : "この発話をコピー"}
+              title={copiedSegmentId === segment.segmentId ? "コピーしました" : "コピー"}
+              onclick={() => void copySegment(segment)}
+            />
+            <Button
+              class="segment-restore"
+              size="icon-xs"
+              variant="ghost"
+              type="button"
+              icon={RotateCcw}
+              aria-label="この発話を原文に戻す"
+              title="原文に戻す"
+              disabled={!editable || !segment.edited || formatting}
+              onclick={() => void restoreSegment(segment)}
+            />
+          </span>
+          <span class="segment-heading">
+            <strong title={segment.speaker}>{speakerLabel(segment.speaker)}</strong>
           </span>
           {#if editable}
             <textarea
@@ -482,7 +547,8 @@
 
 <style>
   .transcript-view { min-width: 0; }
-  .correction-toolbar { display: flex; min-height: 42px; align-items: center; justify-content: flex-end; gap: 4px; padding: 7px 0 3px; }
+  .transcript-edit-bar { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .correction-toolbar { display: flex; min-width: 0; align-items: center; gap: 6px; flex-wrap: wrap; }
   .replace-panel { display: flex; min-width: 0; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 4px 0 8px; padding: 8px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
   .mobile-replace-heading { display: none; }
   .replace-fields { display: grid; min-width: 260px; flex: 1 1 360px; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 6px; }
@@ -495,29 +561,34 @@
   .match-count { min-width: 38px; text-align: center; white-space: nowrap; }
   .replace-buttons { display: flex; align-items: center; gap: 4px; }
   .desktop-replace-close { display: flex; }
-  .speaker-labels { margin: 14px 0 8px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--muted) 28%, var(--background)); }
-  .speaker-labels-heading { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
-  .speaker-labels-heading strong { font-size: 0.78rem; }
-  .speaker-labels-heading span { color: var(--muted-foreground); font-size: 0.68rem; }
-  .speaker-label-list { display: flex; flex-wrap: wrap; gap: 8px; }
-  .speaker-label-list label { display: grid; min-width: 180px; grid-template-columns: auto minmax(90px, 1fr); align-items: center; gap: 7px; padding: 5px 6px 5px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); }
-  .speaker-label-list label.edited { border-color: color-mix(in oklch, var(--primary) 45%, var(--border)); }
+  :global(.speaker-name-popover) { display: grid; width: min(340px, calc(100vw - 32px)); gap: 12px; padding: 14px; }
+  .speaker-name-heading { display: grid; gap: 3px; }
+  .speaker-name-heading strong { font-size: 0.82rem; }
+  .speaker-name-heading span { color: var(--muted-foreground); font-size: 0.69rem; line-height: 1.5; }
+  .speaker-label-list { display: grid; min-width: 0; gap: 8px; }
+  .speaker-label-list label { display: grid; min-width: 0; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 8px; }
+  .speaker-label-list label.edited input { border-color: color-mix(in oklch, var(--primary) 45%, var(--border)); }
   .speaker-label-list span { color: var(--muted-foreground); font-size: 0.67rem; white-space: nowrap; }
-  .speaker-label-list input { min-width: 0; width: 100%; padding: 5px 7px; border: 0; border-radius: 5px; color: var(--foreground); background: color-mix(in oklch, var(--muted) 40%, transparent); font: inherit; font-size: 0.76rem; }
-  .speaker-label-list input:focus { outline: 2px solid color-mix(in oklch, var(--primary) 25%, transparent); background: var(--background); }
-  .segments { display: grid; }
-  .segment { display: grid; width: 100%; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; padding: 10px 8px; border: 0; border-bottom: 1px solid var(--border); color: inherit; background: transparent; font: inherit; text-align: left; transition: background-color 120ms ease, box-shadow 120ms ease; }
-  .segment:hover { background: color-mix(in oklch, var(--primary) 4%, transparent); }
-  .segment.active { background: color-mix(in oklch, var(--primary) 8%, transparent); box-shadow: inset 3px 0 var(--primary); }
-  .segment.edited:not(.active) { box-shadow: inset 2px 0 color-mix(in oklch, var(--primary) 45%, transparent); }
-  .segment-meta { display: contents; }
-  .segment-timing { display: flex; align-self: start; grid-column: 1; grid-row: 1 / span 2; align-items: center; gap: 2px; }
-  .timestamp { padding: 2px 1px; border: 0; border-radius: 4px; color: var(--primary); background: transparent; cursor: pointer; font: inherit; font-size: 0.76rem; font-variant-numeric: tabular-nums; }
+  .speaker-label-list input { min-width: 0; width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--foreground); background: var(--background); font: inherit; font-size: 0.76rem; }
+  .speaker-label-list input:focus { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); outline: 2px solid color-mix(in oklch, var(--primary) 18%, transparent); }
+  .segments { display: grid; padding: 4px 0 0; }
+  .segment { --speaker-color: var(--primary); display: grid; width: 100%; min-height: 52px; grid-template-columns: 68px 80px 112px minmax(0, 1fr); align-items: start; column-gap: 10px; padding: 10px 8px 10px 4px; border: 0; border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent); color: inherit; background: transparent; font: inherit; text-align: left; transition: background-color 120ms ease; }
+  .segment[data-speaker-tone="1"] { --speaker-color: oklch(0.52 0.16 300); }
+  .segment[data-speaker-tone="2"] { --speaker-color: oklch(0.55 0.15 55); }
+  .segment[data-speaker-tone="3"] { --speaker-color: oklch(0.5 0.14 250); }
+  .segment.active { background: color-mix(in oklch, var(--primary) 8%, transparent); }
+  .segment-timing { display: flex; min-width: 0; height: 28px; grid-column: 1; align-items: center; justify-content: flex-end; }
+  .timestamp { display: inline-flex; height: 28px; align-items: center; padding: 0 3px; border: 0; border-radius: 4px; color: var(--muted-foreground); background: transparent; cursor: pointer; font: inherit; font-size: 0.72rem; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
   .timestamp:hover { background: color-mix(in oklch, var(--primary) 10%, transparent); }
   .timestamp:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  .segment-heading { display: flex; min-width: 0; grid-column: 2; align-items: center; justify-content: space-between; gap: 10px; }
-  .segment-heading strong { overflow: hidden; color: var(--foreground); font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
-  .segment-text { min-width: 0; grid-column: 2; margin-top: 2px; overflow-wrap: anywhere; font-size: 0.88rem; line-height: 1.55; white-space: pre-wrap; }
+  .segment-actions { display: flex; height: 28px; grid-column: 2; align-items: center; gap: 2px; }
+  .segment-actions :global(button) { border: 0; box-shadow: none; background: transparent; }
+  .segment-actions :global(.segment-play) { color: var(--speaker-color); }
+  .segment.active .segment-actions :global(.segment-play) { color: var(--primary); background: transparent; }
+  .segment-actions :global(.segment-copy), .segment-actions :global(.segment-restore) { color: var(--muted-foreground); }
+  .segment-heading { display: flex; min-width: 0; height: 28px; grid-column: 3; align-items: center; }
+  .segment-heading strong { overflow: hidden; color: var(--speaker-color); font-size: 0.78rem; font-weight: 700; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+  .segment-text { min-width: 0; grid-column: 4; margin-top: 1px; overflow-wrap: anywhere; font-size: 0.86rem; line-height: 1.6; white-space: pre-wrap; }
   .editor { box-sizing: border-box; display: block; width: 100%; min-height: calc(1.55em + 4px); resize: none; overflow: hidden; padding: 1px 4px; border: 1px solid transparent; border-radius: 6px; color: var(--foreground); background: transparent; font: inherit; font-size: 0.88rem; line-height: 1.55; }
   .editor:hover { border-color: color-mix(in oklch, var(--border) 75%, transparent); background: color-mix(in oklch, var(--background) 70%, transparent); }
   .editor:focus { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); outline: 2px solid color-mix(in oklch, var(--primary) 18%, transparent); background: var(--background); }
@@ -529,6 +600,8 @@
   .empty-result { margin: 28px 0 0; color: var(--muted-foreground); font-size: 0.84rem; }
 
   @media (max-width: 780px) {
+    .transcript-edit-bar { align-items: stretch; }
+    .correction-toolbar { justify-content: flex-start; flex-wrap: wrap; }
     .replace-panel { position: fixed; z-index: 40; top: 0; right: 0; left: 0; max-height: 100dvh; align-items: stretch; margin: 0; padding: calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 14px calc(14px + env(safe-area-inset-left, 0px)); overflow-y: auto; border-width: 0 0 1px; border-radius: 0 0 16px 16px; background: var(--background); box-shadow: 0 14px 36px rgb(0 0 0 / 18%); animation: replace-panel-enter 180ms cubic-bezier(0.22, 1, 0.36, 1); }
     .mobile-replace-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; }
     .mobile-replace-heading strong { font-size: 0.84rem; }
@@ -540,7 +613,12 @@
 
   @media (max-width: 600px) {
     .replace-fields { grid-template-columns: minmax(0, 1fr); }
-    .segment { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; padding: 9px 4px; }
+    .segment { grid-template-columns: 52px 76px minmax(0, 1fr); column-gap: 7px; padding: 9px 3px; }
+    .segment-timing { grid-column: 1; grid-row: 1 / span 2; }
+    .segment-actions { grid-column: 2; grid-row: 1 / span 2; }
+    .segment-heading { grid-column: 3; }
+    .segment-text { grid-column: 3; margin-top: 3px; }
+    .timestamp { padding-right: 1px; padding-left: 1px; font-size: 0.67rem; }
   }
 
   @keyframes replace-panel-enter {

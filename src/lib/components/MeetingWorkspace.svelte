@@ -5,6 +5,8 @@
   import FileAudio from "@lucide/svelte/icons/file-audio";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import History from "@lucide/svelte/icons/history";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import {
@@ -18,6 +20,15 @@
     AlertDialogTitle
   } from "@mutsuna/ui/alert-dialog";
   import { Button } from "@mutsuna/ui/button";
+  import {
+    Dialog,
+    DialogBody,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle
+  } from "@mutsuna/ui/dialog";
   import { scrollbarVisibility } from "@mutsuna/ui/scrollbar";
   import {
     DropdownMenu,
@@ -52,11 +63,12 @@
     LocalDiarizationProgress
   } from "../types/transcript";
   import type {
+    GenerationAttemptSummary,
     SummaryProgress,
     SummaryProviderDefinition,
-    SummarySourceSelection,
-    SummaryStatus
+    SummarySourceSelection
   } from "../types/summary";
+  import type { MeetingDocument } from "../types/meeting-document";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
   import SummarySourceSheet from "./SummarySourceSheet.svelte";
@@ -73,8 +85,10 @@
     runs: readonly TranscriptionRunSummary[];
     selectedTranscriptionId: string | null;
     selectedRun: TranscriptionRunDetail | null;
+    runLoadingId: string | null;
     saveState: TranscriptSaveState;
-    summaryStatus: SummaryStatus | null;
+    summaryStatus: MeetingDocument | null;
+    summaryAttempt: GenerationAttemptSummary | null;
     summaryProviders: readonly SummaryProviderDefinition[];
     summaryProviderId: string;
     summaryModelId: string;
@@ -109,7 +123,7 @@
     onRunChange: (transcriptionId: string) => void;
     onEditSegment: (segmentId: string, text: string) => void;
     onEditSpeakerLabel: (speaker: string, label: string) => void;
-    onReplaceSegments: (changes: TranscriptSegmentTextChange[]) => Promise<boolean>;
+    onReplaceSegments: (changes: TranscriptSegmentTextChange[], successMessage?: string) => Promise<boolean>;
     onFormatTranscript: () => Promise<void>;
     canUndoReplacement: boolean;
     onUndoReplacement: () => Promise<void>;
@@ -118,6 +132,8 @@
     onSummaryProviderChange: (value: string) => void;
     onSummaryModelChange: (value: string) => void;
     onGenerateSummary: () => void;
+    onRevalidateSummary: () => void;
+    onSaveSummary: (document: MeetingDocument) => Promise<MeetingDocument | null>;
     onReveal: (meeting: RecentMeetingSummary) => void;
     onRename: (meeting: RecentMeetingSummary, newFileName: string) => void;
     onDelete: (meeting: RecentMeetingSummary, mode: "audioOnly" | "all") => Promise<void>;
@@ -132,8 +148,10 @@
     runs,
     selectedTranscriptionId,
     selectedRun,
+    runLoadingId,
     saveState,
     summaryStatus,
+    summaryAttempt,
     summaryProviders,
     summaryProviderId,
     summaryModelId,
@@ -177,12 +195,23 @@
     onSummaryProviderChange,
     onSummaryModelChange,
     onGenerateSummary,
+    onRevalidateSummary,
+    onSaveSummary,
     onReveal,
     onRename,
     onDelete,
     onCreate,
     onError
   }: Props = $props();
+
+  const summaryStale = $derived(Boolean(
+    summaryStatus
+      && selectedRun
+      && (
+        summaryStatus.sourceTranscript.documentId !== `trn_${selectedRun.transcriptionId}`
+        || summaryStatus.sourceTranscript.revision !== selectedRun.revision + 1
+      )
+  ));
 
   let detailTab = $state<"summary" | "transcript" | "info">("transcript");
   const detailTabs = ["summary", "transcript", "info"] as const;
@@ -198,6 +227,7 @@
   let fileNameDraft = $state("");
   let fileNameInput = $state<HTMLInputElement | null>(null);
   let deleteDialogOpen = $state(false);
+  let retranscriptionDialogOpen = $state(false);
   let deleteDialogMeetingId = $state<string | null>(null);
   let diarizationSpeakerCount = $state("off");
   let localRecognitionMode = $state<LocalRecognitionMode>("fast");
@@ -266,6 +296,7 @@
     if (deleteDialogMeetingId === currentMeetingId) return;
     deleteDialogMeetingId = currentMeetingId;
     deleteDialogOpen = false;
+    retranscriptionDialogOpen = false;
   });
 
   async function deleteSelectedMeeting(mode: "audioOnly" | "all") {
@@ -305,13 +336,13 @@
     }
   }
   const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
+  const loadingRunSummary = $derived(runs.find((run) => run.transcriptionId === runLoadingId) ?? null);
   const selectedSummarySource = $derived(summarySourceState?.selection ?? null);
-  const saveStatus = $derived.by(() => {
-    if (!selectedRun) return "";
+  const compactSaveStatus = $derived.by(() => {
     if (saveState === "saving") return "保存中…";
-    if (saveState === "unsaved") return "変更あり";
-    if (saveState === "error") return "保存できませんでした";
-    return selectedRun.edited ? "編集済み・保存済み" : "保存済み";
+    if (saveState === "unsaved") return "未保存";
+    if (saveState === "error") return "保存エラー";
+    return "保存済み";
   });
   const diarizationProgressLabel = $derived.by(() => {
     if (!diarizationProgress) return "";
@@ -349,7 +380,7 @@
     selectedAudio ? selectedAudio.name.slice(0, selectedAudio.name.length - selectedFileExtension.length) : ""
   );
   const transcriptionLabel = $derived.by(() => {
-    if (!transcribing) return transcript ? "再文字起こし" : "文字起こし";
+    if (!transcribing) return transcript ? "やり直す" : "文字起こしを開始";
     if (progress?.stage === "detectingSpeech") {
       if (progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
       return "発話を検出中…";
@@ -359,17 +390,17 @@
   });
   const contextStatus = $derived.by(() => {
     if (!selectedProvider) return "モデルを選択してください";
-    if (!contextEnabled) return "コンテキスト: オフ";
-    if (!selectedProvider?.capabilities.contextText && !selectedProvider?.capabilities.contextTerms) return "このモデルはコンテキスト非対応";
-    if (!selectedProvider.capabilities.contextText && contextTermCount === 0) return "このモデルへ送信できる重要用語はありません";
+    if (!contextEnabled) return "カスタム指示・辞書: オフ";
+    if (!selectedProvider?.capabilities.contextText && !selectedProvider?.capabilities.contextTerms) return "このモデルはカスタム指示・辞書に非対応";
+    if (!selectedProvider.capabilities.contextText && contextTermCount === 0) return "このモデルで使える辞書は未登録です";
     if (contextSurchargeActive) {
       const estimated = selectedAudio && selectedProvider?.pricingUsdPerHour != null
         ? formatEstimatedCost(selectedAudio.durationMs / 3_600_000 * selectedProvider.pricingUsdPerHour * 1.2)
         : null;
-      return `重要用語 ${contextTermCount}件を使用・料金 +20%${estimated ? `・推定 ${estimated}` : ""}`;
+      return `辞書 ${contextTermCount}件を使用・料金 +20%${estimated ? `・推定 ${estimated}` : ""}`;
     }
-    if (contextTermCount > 0 || contextDraft?.background.trim()) return "コンテキストを使用";
-    return "コンテキストは空です";
+    if (contextTermCount > 0 || contextDraft?.background.trim()) return "カスタム指示・辞書を使用";
+    return "カスタム指示・辞書は空です";
   });
 
   $effect(() => {
@@ -493,6 +524,34 @@
   }
 </script>
 
+{#snippet meetingContextPanel(description: string)}
+  {#if contextDraft}
+    <div class="meeting-context-wrap">
+      <TranscriptionContextEditor
+        title="この会議の補助設定"
+        {description}
+        {contextEnabled}
+        background={contextDraft.background}
+        termsText={contextDraft.termsText}
+        correctionsText={contextDraft.correctionsText}
+        useGlobal={contextDraft.useGlobal}
+        provider={selectedProvider}
+        saveState={contextSaveState}
+        loading={contextLoading}
+        disabled={transcribing}
+        onBackgroundChange={onContextBackgroundChange}
+        onTermsChange={onContextTermsChange}
+        onCorrectionsChange={onContextCorrectionsChange}
+        onUseGlobalChange={onContextUseGlobalChange}
+      />
+    </div>
+  {:else if contextLoading}
+    <p class="meeting-info-loading" role="status">文字起こしの補助設定を読み込んでいます…</p>
+  {:else if contextSaveState === "error"}
+    <p class="meeting-info-loading context-error" role="alert">文字起こしの補助設定を読み込めませんでした。会議を開き直してください。</p>
+  {/if}
+{/snippet}
+
 <section class="meeting-workspace" bind:this={workspaceElement}>
   {#if meeting || selectedAudio}
     {#if selectedAudio}
@@ -536,6 +595,8 @@
         <MeetingSummary
           {transcript}
           status={summaryStatus}
+          stale={summaryStale}
+          attempt={summaryAttempt?.transcriptionId === selectedTranscriptionId ? summaryAttempt : null}
           providers={summaryProviders}
           providerId={summaryProviderId}
           modelId={summaryModelId}
@@ -547,135 +608,132 @@
           onProviderChange={onSummaryProviderChange}
           onModelChange={onSummaryModelChange}
           onGenerate={onGenerateSummary}
+          onRevalidate={onRevalidateSummary}
+          onSave={onSaveSummary}
           onShowSource={showSummarySource}
         />
       {:else if detailTab === "transcript"}
         {#if transcript}
-          <section class="transcription-toolbar" aria-label="文字起こしモデルと再実行">
-            <div class="transcription-heading">
-              <div class="transcription-title-row">
-                <strong>文字起こし</strong>
-                {#if runs.length > 0}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger>
-                      {#snippet child({ props })}
-                        <Button {...props} size="xs" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`} disabled={transcriptFormatting}>
-                          履歴 {runs.length}
-                        </Button>
-                      {/snippet}
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent class="transcription-history-menu" align="start">
-                      {#each runs as run (run.transcriptionId)}
-                        <DropdownMenuItem class="transcription-history-item" onclick={() => onRunChange(run.transcriptionId)}>
-                          <span class="history-item-copy">
-                            <strong>{run.sequence}回目・{runModelLabel(run)}</strong>
-                            <small>
-                              {runDate(run.createdAt)}{run.edited ? "・編集済み" : ""}{run.costUsd != null ? `・実コスト ${formatActualCost(run.costUsd)}` : ""}
-                            </small>
-                          </span>
-                          {#if run.transcriptionId === selectedTranscriptionId}<Check aria-hidden="true" />{/if}
-                        </DropdownMenuItem>
-                      {/each}
-                      {#if selectedRun?.edited && saveState === "saved"}
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onclick={onResetTranscript}>
-                          <RotateCcw aria-hidden="true" />
-                          原文に戻す
-                        </DropdownMenuItem>
-                      {/if}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+          <section class="transcription-overview" aria-label="現在の文字起こし" aria-busy={runLoadingId !== null}>
+            <div class="current-transcription">
+              <strong>{runLoadingId ? "切り替えています" : "現在の文字起こし"}</strong>
+              <div class="current-transcription-meta" aria-live="polite" aria-atomic="true">
+                {#if runLoadingId}
+                  <span class="loading"><LoaderCircle aria-hidden="true" />読み込み中…</span>
+                  {#if loadingRunSummary}<span>{loadingRunSummary.sequence}回目</span><span>{runModelLabel(loadingRunSummary)}</span>{/if}
+                {:else}
+                  {#if selectedRunSummary}<span>{selectedRunSummary.sequence}回目</span><span>{runModelLabel(selectedRunSummary)}</span>{/if}
+                  {#if selectedRun?.edited}<span>編集済み</span>{/if}
+                  <span class:error={saveState === "error"} class:pending={saveState === "saving" || saveState === "unsaved"}>{compactSaveStatus}</span>
                 {/if}
               </div>
-              <span class:error={saveState === "error"} class:pending={saveState === "saving" || saveState === "unsaved"} aria-live="polite" aria-atomic="true">
-                {#if selectedRunSummary}{selectedRunSummary.sequence}回目・{runModelLabel(selectedRunSummary)}{/if}{#if selectedRunSummary && saveStatus}・{/if}{saveStatus || "モデルを変更して再実行できます"}
+            </div>
+            <div class="transcription-overview-actions">
+              {#if runs.length > 0}
+                <DropdownMenu>
+                  <DropdownMenuTrigger>
+                    {#snippet child({ props })}
+                      <Button {...props} size="sm" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`} disabled={transcriptFormatting}>
+                        履歴を見る（{runs.length}件）
+                      </Button>
+                    {/snippet}
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent class="transcription-history-menu" align="end">
+                    {#each runs as run (run.transcriptionId)}
+                      <DropdownMenuItem class="transcription-history-item" disabled={runLoadingId !== null} onclick={() => onRunChange(run.transcriptionId)}>
+                        <span class="history-item-copy">
+                          <strong>{run.sequence}回目・{runModelLabel(run)}</strong>
+                          <small>{runDate(run.createdAt)}{run.edited ? "・編集済み" : ""}{run.costUsd != null ? `・実コスト ${formatActualCost(run.costUsd)}` : ""}</small>
+                        </span>
+                        {#if run.transcriptionId === runLoadingId}<LoaderCircle class="history-loading-icon" aria-hidden="true" />{:else if run.transcriptionId === selectedTranscriptionId}<Check aria-hidden="true" />{/if}
+                      </DropdownMenuItem>
+                    {/each}
+                    {#if selectedRun?.edited && saveState === "saved"}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onclick={onResetTranscript}><RotateCcw aria-hidden="true" />原文に戻す</DropdownMenuItem>
+                    {/if}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              {/if}
+              <span data-transcription-action>
+                <Button size="sm" variant="outline" type="button" icon={RefreshCw} onclick={() => retranscriptionDialogOpen = true} disabled={!selectedAudio || transcribing || diarizing || transcriptFormatting}>やり直す</Button>
               </span>
             </div>
-            <div class="transcription-controls">
-              <Select
-                type="single"
-                value={provider}
-                onValueChange={selectProvider}
-                disabled={transcribing || diarizing || transcriptFormatting || providerOptions.length === 0}
-              >
-                <SelectTrigger aria-label="文字起こしモデル" class="transcription-model-select">
-                  <span>{selectedProviderOption?.label ?? "モデルを選択"}</span>
-                </SelectTrigger>
-                <SelectContent>
-                  {#each providerOptions as option (option.value)}
-                    <SelectItem value={option.value}>{option.label}</SelectItem>
-                  {/each}
-                </SelectContent>
-              </Select>
-              {#if provider === "local"}
-                <Select
-                  type="single"
-                  value={localRecognitionMode}
-                  onValueChange={changeLocalRecognitionMode}
-                  disabled={transcribing || diarizing || transcriptFormatting || localRecognitionModeWorking}
-                >
-                  <SelectTrigger aria-label="ローカル文字起こしの精度" class="transcription-model-select">
-                    <span>精度: {localRecognitionModeLabel}</span>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {#each LOCAL_RECOGNITION_MODE_OPTIONS as option (option.value)}
-                      <SelectItem value={option.value}>{option.label} — {option.description}</SelectItem>
-                    {/each}
-                  </SelectContent>
-                </Select>
-              {/if}
-              <span class="transcription-action" data-transcription-action>
-                <Button size="sm" variant="outline" type="button" onclick={startTranscription} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
-              </span>
-              {#if provider === "local"}
-                <Select
-                  type="single"
-                  value={diarizationSpeakerCount}
-                  onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }}
-                  disabled={diarizing || transcribing || transcriptFormatting || !diarizationModelReady}
-                >
-                  <SelectTrigger aria-label="話者分離" class="speaker-count-select">
-                    <span>{diarizationSpeakerCount === "off" ? "話者分離: オフ" : diarizationSpeakerCount === "auto" ? "話者分離: 自動" : `話者分離: ${diarizationSpeakerCount}人`}</span>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="off">話者分離: オフ</SelectItem>
-                    <SelectItem value="auto">話者分離: 人数自動</SelectItem>
-                    {#each Array.from({ length: 9 }, (_, index) => index + 2) as count}
-                      <SelectItem value={String(count)}>話者分離: {count}人</SelectItem>
-                    {/each}
-                  </SelectContent>
-                </Select>
-                {#if !diarizationModelReady}
-                  <Button size="sm" variant="outline" type="button" onclick={onOpenDiarizationSettings}>話者分離モデルを追加</Button>
-                {/if}
-              {/if}
-            </div>
-            {#if transcribing && diarizing && diarizationProgressLabel}
-              <div class="diarization-controls"><small aria-live="polite">話者分離: {diarizationProgressLabel}</small></div>
-            {/if}
           </section>
-          <p class:surcharge={contextSurchargeActive} class="context-status">{contextStatus}</p>
-          <TranscriptView
-            {transcript}
-            transcriptionId={selectedTranscriptionId}
-            currentPositionMs={playbackPositionMs}
-            playing={playbackPlaying}
-            playbackAvailable={Boolean(selectedAudio)}
-            followRequestId={timelineFollowRequestId}
-            scrollContainer={detailContentElement}
-            onSeek={seekFromTranscript}
-            onPlay={playFromTranscript}
-            onPause={pauseFromTranscript}
-            editable={Boolean(selectedRun) && !diarizing}
-            formatting={transcriptFormatting || diarizing}
-            {onEditSegment}
-            {onEditSpeakerLabel}
-            {onReplaceSegments}
-            onFormat={onFormatTranscript}
-            {canUndoReplacement}
-            {onUndoReplacement}
-            onBlur={onFlushEdits}
-          />
+
+          <Dialog bind:open={retranscriptionDialogOpen}>
+            <DialogContent class="retranscription-dialog">
+              <DialogHeader>
+                <DialogTitle>文字起こしをやり直す</DialogTitle>
+                <DialogDescription>設定を変えてもう一度実行します。現在の結果は消えず、履歴に残ります。</DialogDescription>
+              </DialogHeader>
+              <DialogBody class="retranscription-settings">
+                <label>
+                  <span>文字起こしモデル</span>
+                  <Select type="single" value={provider} onValueChange={selectProvider} disabled={transcribing || providerOptions.length === 0}>
+                    <SelectTrigger aria-label="文字起こしモデル" class="transcription-model-select"><span>{selectedProviderOption?.label ?? "モデルを選択"}</span></SelectTrigger>
+                    <SelectContent>{#each providerOptions as option (option.value)}<SelectItem value={option.value}>{option.label}</SelectItem>{/each}</SelectContent>
+                  </Select>
+                </label>
+                {#if provider === "local"}
+                  <label>
+                    <span>文字起こしの精度</span>
+                    <Select type="single" value={localRecognitionMode} onValueChange={changeLocalRecognitionMode} disabled={transcribing || localRecognitionModeWorking}>
+                      <SelectTrigger aria-label="ローカル文字起こしの精度"><span>{localRecognitionModeLabel}</span></SelectTrigger>
+                      <SelectContent>{#each LOCAL_RECOGNITION_MODE_OPTIONS as option (option.value)}<SelectItem value={option.value}>{option.label} — {option.description}</SelectItem>{/each}</SelectContent>
+                    </Select>
+                  </label>
+                  <label>
+                    <span>話者分離</span>
+                    <Select type="single" value={diarizationSpeakerCount} onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }} disabled={transcribing || !diarizationModelReady}>
+                      <SelectTrigger aria-label="話者分離"><span>{diarizationSpeakerCount === "off" ? "オフ" : diarizationSpeakerCount === "auto" ? "人数を自動判定" : `${diarizationSpeakerCount}人`}</span></SelectTrigger>
+                      <SelectContent><SelectItem value="off">オフ</SelectItem><SelectItem value="auto">人数を自動判定</SelectItem>{#each Array.from({ length: 9 }, (_, index) => index + 2) as count}<SelectItem value={String(count)}>{count}人</SelectItem>{/each}</SelectContent>
+                    </Select>
+                  </label>
+                  {#if !diarizationModelReady}<Button size="sm" variant="outline" type="button" onclick={onOpenDiarizationSettings}>話者分離モデルを追加</Button>{/if}
+                {/if}
+                <div class="retranscription-context-summary">
+                  <span>カスタム指示・辞書</span>
+                  <strong class:surcharge={contextSurchargeActive}>{contextStatus}</strong>
+                  <small>内容は「会議情報」タブで変更できます。</small>
+                </div>
+                {#if transcribing && diarizing && diarizationProgressLabel}<small class="retranscription-progress" aria-live="polite">話者分離: {diarizationProgressLabel}</small>{/if}
+              </DialogBody>
+              <DialogFooter>
+                <Button type="button" variant="ghost" onclick={() => retranscriptionDialogOpen = false} disabled={transcribing}>キャンセル</Button>
+                <Button type="button" onclick={startTranscription} disabled={!canTranscribe} loading={transcribing}>{transcriptionLabel}</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <div class="transcript-result-area" aria-busy={runLoadingId !== null}>
+            {#if runLoadingId}
+              <div class="transcript-switching" role="status">
+                <LoaderCircle aria-hidden="true" />
+                <span><strong>文字起こしを読み込んでいます</strong>{#if loadingRunSummary}<small>{loadingRunSummary.sequence}回目・{runModelLabel(loadingRunSummary)}</small>{/if}</span>
+              </div>
+            {/if}
+            <TranscriptView
+              {transcript}
+              transcriptionId={selectedTranscriptionId}
+              currentPositionMs={playbackPositionMs}
+              playing={playbackPlaying}
+              playbackAvailable={Boolean(selectedAudio)}
+              followRequestId={timelineFollowRequestId}
+              scrollContainer={detailContentElement}
+              onSeek={seekFromTranscript}
+              onPlay={playFromTranscript}
+              onPause={pauseFromTranscript}
+              editable={Boolean(selectedRun) && !diarizing && !runLoadingId}
+              formatting={transcriptFormatting || diarizing || Boolean(runLoadingId)}
+              {onEditSegment}
+              {onEditSpeakerLabel}
+              {onReplaceSegments}
+              onFormat={onFormatTranscript}
+              {canUndoReplacement}
+              {onUndoReplacement}
+              onBlur={onFlushEdits}
+            />
+          </div>
         {:else}
           <div class="empty-transcript">
             <FileAudio aria-hidden="true" />
@@ -744,6 +802,7 @@
               </div>
             {/if}
           </div>
+          {@render meetingContextPanel("文字起こしを始める前に、この会議のカスタム指示・辞書・置換を設定できます。")}
         {/if}
       {:else if meeting}
         <dl class="meeting-info">
@@ -756,31 +815,7 @@
           {/if}
           <div><dt>Meeting ID</dt><dd class="meeting-id">{meeting.meetingId}</dd></div>
         </dl>
-        {#if contextDraft}
-          <div class="meeting-context-wrap">
-            <TranscriptionContextEditor
-              title="この会議のコンテキスト"
-              description="この会議だけで使う背景情報と重要用語を設定します。"
-              {contextEnabled}
-              background={contextDraft.background}
-              termsText={contextDraft.termsText}
-              correctionsText={contextDraft.correctionsText}
-              useGlobal={contextDraft.useGlobal}
-              provider={selectedProvider}
-              saveState={contextSaveState}
-              loading={contextLoading}
-              disabled={transcribing}
-              onBackgroundChange={onContextBackgroundChange}
-              onTermsChange={onContextTermsChange}
-              onCorrectionsChange={onContextCorrectionsChange}
-              onUseGlobalChange={onContextUseGlobalChange}
-            />
-          </div>
-        {:else if contextLoading}
-          <p class="meeting-info-loading" role="status">文字起こしコンテキストを読み込んでいます…</p>
-        {:else if contextSaveState === "error"}
-          <p class="meeting-info-loading context-error" role="alert">文字起こしコンテキストを読み込めませんでした。会議を開き直してください。</p>
-        {/if}
+        {@render meetingContextPanel("この会議だけで使うカスタム指示・辞書・置換を設定します。")}
         <section class="danger-zone" aria-labelledby="meeting-delete-heading">
           <div>
             <strong id="meeting-delete-heading">会議を削除</strong>
@@ -836,20 +871,16 @@
 <style>
   .meeting-workspace { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
 
-  .transcription-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 22px 0 20px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
-  .transcription-heading { display: grid; min-width: 0; gap: 3px; }
-  .transcription-title-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
-  .transcription-heading strong { font-size: 0.88rem; }
-  .transcription-heading span { color: var(--muted-foreground); font-size: 0.72rem; }
-  .transcription-heading span.error { color: var(--destructive); }
-  .transcription-heading span.pending { color: var(--foreground); }
-  .transcription-controls { display: flex; min-width: 0; align-items: center; gap: 8px; }
-  .diarization-controls { display: flex; min-width: 0; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .diarization-controls small { color: var(--muted-foreground); }
-  .diarization-controls :global(.speaker-count-select) { min-width: 132px; }
-  .context-status { margin: -10px 0 18px; color: var(--muted-foreground); font-size: 0.72rem; }
-  .context-status.surcharge { color: var(--foreground); font-weight: 650; }
-  .transcription-toolbar :global([data-slot="select-trigger"]) { width: 240px; }
+  .transcription-overview { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0 10px; border-bottom: 1px solid var(--border); }
+  .current-transcription { display: flex; min-width: 0; align-items: center; gap: 12px; }
+  .current-transcription > strong { flex: none; font-size: 0.78rem; }
+  .current-transcription-meta { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .current-transcription-meta span { padding: 3px 8px; border-radius: 999px; color: var(--muted-foreground); background: var(--muted); font-size: 0.68rem; line-height: 1.35; white-space: nowrap; }
+  .current-transcription-meta span.pending { color: var(--foreground); }
+  .current-transcription-meta span.error { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 9%, var(--background)); }
+  .current-transcription-meta span.loading { display: inline-flex; align-items: center; gap: 5px; color: var(--primary); background: color-mix(in oklch, var(--primary) 9%, var(--background)); }
+  .current-transcription-meta span.loading :global(svg), :global(.history-loading-icon) { width: 13px; height: 13px; animation: transcription-loading-spin 800ms linear infinite; }
+  .transcription-overview-actions { display: flex; flex: none; align-items: center; gap: 6px; }
   :global(.transcription-history-menu) { width: min(320px, calc(100vw - 32px)); }
   :global(.transcription-history-item) { justify-content: space-between; gap: 12px; padding: 8px 9px; }
   :global(.transcription-history-item > svg) { color: var(--primary); }
@@ -857,6 +888,23 @@
   .history-item-copy strong, .history-item-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .history-item-copy strong { color: var(--foreground); font-size: 0.78rem; }
   .history-item-copy small { color: var(--muted-foreground); font-size: 0.68rem; }
+  :global(.retranscription-dialog) { width: min(480px, calc(100vw - 28px)); }
+  :global(.retranscription-settings) { display: grid; gap: 14px; }
+  :global(.retranscription-settings > label) { display: grid; min-width: 0; gap: 6px; }
+  :global(.retranscription-settings > label > span), :global(.retranscription-context-summary > span) { color: var(--muted-foreground); font-size: 0.7rem; font-weight: 650; }
+  :global(.retranscription-settings [data-slot="select-trigger"]) { width: 100%; }
+  :global(.retranscription-context-summary) { display: grid; gap: 3px; padding: 11px 12px; border-radius: 9px; background: var(--muted); }
+  :global(.retranscription-context-summary strong) { font-size: 0.75rem; }
+  :global(.retranscription-context-summary strong.surcharge) { color: var(--foreground); }
+  :global(.retranscription-context-summary small), :global(.retranscription-progress) { color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+  .transcript-result-area { position: relative; min-height: 180px; }
+  .transcript-switching { position: absolute; z-index: 5; inset: 0; display: flex; min-height: 180px; align-items: flex-start; justify-content: center; gap: 10px; padding-top: 64px; color: var(--primary); background: color-mix(in oklch, var(--background) 84%, transparent); backdrop-filter: blur(2px); }
+  .transcript-switching > :global(svg) { width: 19px; height: 19px; animation: transcription-loading-spin 800ms linear infinite; }
+  .transcript-switching span { display: grid; gap: 2px; }
+  .transcript-switching strong { color: var(--foreground); font-size: 0.78rem; }
+  .transcript-switching small { color: var(--muted-foreground); font-size: 0.69rem; }
+
+  @keyframes transcription-loading-spin { to { transform: rotate(360deg); } }
 
   .audio-player-wrap { min-width: 0; margin: 12px 30px; container: audio-player / inline-size; }
   .audio-unavailable { display: flex; min-width: 0; align-items: center; gap: 12px; margin: 16px 30px 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; color: var(--muted-foreground); background: var(--muted); }
@@ -911,15 +959,17 @@
   }
 
   @media (max-width: 520px) {
-    .transcription-toolbar { flex-direction: column; align-items: stretch; gap: 14px; margin-top: 20px; padding-bottom: 20px; }
-    .transcription-controls { flex-direction: column; align-items: stretch; gap: 10px; }
-    .diarization-controls { align-items: stretch; }
-    .transcription-toolbar :global([data-slot="select-trigger"]) { width: 100%; min-height: 44px; }
-    .transcription-action { width: 100%; }
-    .transcription-action :global(button) { width: 100%; min-height: 48px; padding-right: 18px; padding-left: 18px; font-size: 0.95rem; }
+    .transcription-overview { align-items: stretch; flex-direction: column; gap: 10px; }
+    .current-transcription { align-items: flex-start; flex-direction: column; gap: 7px; }
+    .transcription-overview-actions { width: 100%; justify-content: space-between; }
+    .transcription-overview-actions :global(button) { min-height: 40px; }
     .empty-transcript { min-height: 380px; margin-top: 18px; padding: 28px 18px; }
     .transcription-start-controls :global([data-slot="select-trigger"]) { min-height: 48px; }
     .danger-zone { align-items: stretch; flex-direction: column; }
     .danger-zone :global(button) { width: 100%; min-height: 44px; justify-content: center; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .current-transcription-meta span.loading :global(svg), :global(.history-loading-icon), .transcript-switching > :global(svg) { animation: none; }
   }
 </style>

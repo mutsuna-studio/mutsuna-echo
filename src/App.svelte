@@ -40,7 +40,8 @@
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
-  import type { SummaryModelDefinition, SummaryProgress, SummaryProviderDefinition, SummaryStatus } from "./lib/types/summary";
+  import type { GenerationAttemptSummary, SummaryModelDefinition, SummaryProgress, SummaryProviderDefinition } from "./lib/types/summary";
+  import type { MeetingDocument } from "./lib/types/meeting-document";
   import type {
     SelectedAudioFile,
     EditableTranscript,
@@ -71,7 +72,7 @@
   const API_KEY_SAVE_TIMEOUT_MS = 30_000;
   const summarySettingsPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "summary-settings";
   const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
-    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・重要用語", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
+    { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・辞書", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "cloudflare", label: "Cloudflare Workers AI", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIトークンとAccount IDが必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
@@ -215,7 +216,8 @@
   let summaryProviderId = $state(savedSummaryProviderId);
   let summaryModelId = $state(savedSummaryModelId);
   let summaryModelsLoading = $state(false);
-  let summaryStatus = $state.raw<SummaryStatus | null>(null);
+  let summaryStatus = $state.raw<MeetingDocument | null>(null);
+  let summaryAttempt = $state.raw<GenerationAttemptSummary | null>(null);
   let summaryGenerating = $state(false);
   let summaryProgress = $state.raw<SummaryProgress | null>(null);
   let transcriptFormatting = $state(false);
@@ -224,6 +226,7 @@
   let transcriptionRuns = $state.raw<TranscriptionRunSummary[]>([]);
   let selectedTranscriptionId = $state<string | null>(null);
   let selectedTranscriptionRun = $state.raw<TranscriptionRunDetail | null>(null);
+  let transcriptionRunLoadingId = $state<string | null>(null);
   let transcriptSaveState = $state<TranscriptSaveState>("saved");
   let transcriptionUsage = $state<TranscriptionUsage | null>(null);
   let sonioxUsage = $state.raw<SonioxUsage | null>(savedSonioxUsage());
@@ -1128,6 +1131,14 @@
     }
   }
 
+  async function refreshGeneratedMeetingName(meetingId: string) {
+    await refreshMeetings();
+    const meeting = meetings.find((candidate) => candidate.meetingId === meetingId);
+    if (meeting && selectedAudio?.meetingId === meetingId && selectedAudio.name !== meeting.fileName) {
+      selectedAudio = { ...selectedAudio, name: meeting.fileName };
+    }
+  }
+
   async function refreshCloudflareUsage() {
     if (!hasCloudflareApiKey || cloudflareUsageLoading) return;
     cloudflareUsageLoading = true;
@@ -1269,7 +1280,7 @@
       flushMeetingContext()
     ]);
     if (transcriptSaveState === "error" || !globalContextSaved || !meetingContextSaved) {
-      showWarningToast("コンテキストを保存できていません。", "入力内容を確認してから再試行してください。");
+      showWarningToast("文字起こしの補助設定を保存できていません。", "入力内容を確認してから再試行してください。");
       return;
     }
     transcribing = true;
@@ -1306,6 +1317,7 @@
             segments: result.transcript.segments.map((segment) => ({
               ...segment,
               segmentId: "",
+              originalText: segment.text,
               edited: false
             }))
           };
@@ -1366,19 +1378,27 @@
     selectedTranscriptionId = run?.transcriptionId ?? null;
     transcript = run?.transcript ?? null;
     summaryStatus = null;
+    summaryAttempt = null;
   }
 
   async function refreshSummaryStatus() {
     if (!selectedMeetingId || !selectedTranscriptionRun) {
       summaryStatus = null;
+      summaryAttempt = null;
       return;
     }
     try {
-      summaryStatus = await invoke<SummaryStatus>("get_selected_summary", {
-        meetingId: selectedMeetingId
-      });
+      [summaryStatus, summaryAttempt] = await Promise.all([
+        invoke<MeetingDocument | null>("get_selected_meeting_document", {
+          meetingId: selectedMeetingId
+        }),
+        invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
+          meetingId: selectedMeetingId
+        })
+      ]);
     } catch (error) {
       summaryStatus = null;
+      summaryAttempt = null;
       showError(errorText(error));
     }
   }
@@ -1425,22 +1445,75 @@
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
     processingMeetingId = operationMeetingId;
+    summaryAttempt = null;
     summaryProgress = null;
     try {
-      summaryStatus = await invoke<SummaryStatus>("generate_selected_summary", {
+      summaryStatus = await invoke<MeetingDocument>("generate_selected_meeting_document", {
         request: {
           meetingId: selectedMeetingId,
           providerId: summaryProviderId,
           modelId: summaryModelId
         }
       });
+      summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
+        meetingId: selectedMeetingId
+      });
+      await refreshGeneratedMeetingName(operationMeetingId);
       showSuccessToast("会議ノートを生成しました。");
     } catch (error) {
+      summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
+        meetingId: operationMeetingId
+      }).catch(() => null);
       showError(errorText(error));
     } finally {
       summaryGenerating = false;
       if (processingMeetingId === operationMeetingId) processingMeetingId = null;
       summaryProgress = null;
+    }
+  }
+
+  async function revalidateSummaryAttempt() {
+    if (!selectedMeetingId || !summaryAttempt?.canRevalidate || summaryGenerating || transcriptFormatting) return;
+    const attemptId = summaryAttempt.attemptId;
+    summaryGenerating = true;
+    summaryAttempt = null;
+    try {
+      summaryStatus = await invoke<MeetingDocument>("revalidate_generation_attempt", {
+        request: {
+          meetingId: selectedMeetingId,
+          attemptId
+        }
+      });
+      summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
+        meetingId: selectedMeetingId
+      });
+      await refreshGeneratedMeetingName(selectedMeetingId);
+      showSuccessToast("保存済みの生成結果を再検証しました。");
+    } catch (error) {
+      summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
+        meetingId: selectedMeetingId
+      }).catch(() => summaryAttempt);
+      showError(errorText(error));
+    } finally {
+      summaryGenerating = false;
+    }
+  }
+
+  async function saveMeetingDocument(document: MeetingDocument): Promise<MeetingDocument | null> {
+    if (!selectedMeetingId || summaryGenerating || transcriptFormatting) return null;
+    try {
+      summaryStatus = await invoke<MeetingDocument>("save_edited_meeting_document", {
+        request: {
+          meetingId: selectedMeetingId,
+          expectedRevision: document.revision,
+          document
+        }
+      });
+      return summaryStatus;
+    } catch (error) {
+      showError(errorText(error));
+      await refreshSummaryStatus();
+      return null;
     }
   }
 
@@ -1525,10 +1598,11 @@
   }
 
   async function selectTranscriptionRun(transcriptionId: string) {
-    if (transcriptionId === selectedTranscriptionId) return;
-    await flushTranscriptEdits();
-    if (transcriptSaveState === "error") return;
+    if (transcriptionId === selectedTranscriptionId || transcriptionRunLoadingId) return;
+    transcriptionRunLoadingId = transcriptionId;
     try {
+      await flushTranscriptEdits();
+      if (transcriptSaveState === "error") return;
       const run = await invoke<TranscriptionRunDetail>("select_transcription_run", {
         request: { transcriptionId }
       });
@@ -1536,6 +1610,8 @@
       await refreshSummaryStatus();
     } catch (error) {
       showError(errorText(error));
+    } finally {
+      if (transcriptionRunLoadingId === transcriptionId) transcriptionRunLoadingId = null;
     }
   }
 
@@ -1545,7 +1621,9 @@
     transcript = {
       ...transcript,
       segments: transcript.segments.map((segment) =>
-        segment.segmentId === segmentId ? { ...segment, text, edited: true } : segment
+        segment.segmentId === segmentId
+          ? { ...segment, text, edited: text !== segment.originalText }
+          : segment
       )
     };
     pendingTranscriptChanges.set(segmentId, text);
@@ -1562,7 +1640,9 @@
       ...transcript,
       segments: transcript.segments.map((segment) => {
         const text = replacements.get(segment.segmentId);
-        return text == null ? segment : { ...segment, text, edited: true };
+        return text == null
+          ? segment
+          : { ...segment, text, edited: text !== segment.originalText };
       })
     };
     for (const change of changes) {
@@ -1738,9 +1818,6 @@
           };
           selectedTranscriptionId = saved.transcriptionId;
           transcriptSaveState = newerChanges.size > 0 || newerSpeakerLabels.size > 0 ? "unsaved" : "saved";
-          if (summaryStatus?.summary) {
-            summaryStatus = { ...summaryStatus, currentRevision: saved.revision, stale: summaryStatus.summary.sourceRevision !== saved.revision };
-          }
         }
         await refreshTranscriptionHistoryList();
       } catch (error) {
@@ -1825,10 +1902,8 @@
     {pageTitle}
     contentGutter="auto"
     contentPadding="none"
-    contentClass={section === "settings"
-      ? "app-shell-frame-content settings-shell-content overflow-hidden border-0 rounded-none"
-      : "app-shell-frame-content overflow-hidden"}
-    headerClass={section === "settings" ? "settings-shell-header app-main-header" : "app-main-header"}
+    contentClass="app-shell-frame-content overflow-hidden"
+    headerClass="app-main-header"
   >
     {#snippet headerActions()}
       {#if section === "meetings"}
@@ -1889,8 +1964,10 @@
           runs={transcriptionRuns}
           {selectedTranscriptionId}
           selectedRun={selectedTranscriptionRun}
+          runLoadingId={transcriptionRunLoadingId}
           saveState={transcriptSaveState}
           {summaryStatus}
+          {summaryAttempt}
           {summaryProviders}
           {summaryProviderId}
           summaryModelId={summaryModelId}
@@ -1934,6 +2011,8 @@
           onSummaryProviderChange={changeSummaryProvider}
           onSummaryModelChange={changeSummaryModel}
           onGenerateSummary={generateSummary}
+          onRevalidateSummary={revalidateSummaryAttempt}
+          onSaveSummary={saveMeetingDocument}
           onReveal={revealMeeting}
           onRename={renameMeeting}
           onDelete={deleteMeeting}
@@ -2000,12 +2079,12 @@
                 </section>
                 <section class="settings-section">
                   <div class="settings-section-heading">
-                    <h2>認識のヒント</h2>
+                    <h2>カスタム指示・辞書・置換</h2>
                   </div>
                   <div class="context-settings-wrap">
                     <TranscriptionContextEditor
-                      title="すべての会議で使うヒント"
-                      description="会社名や製品名など、よく使う言葉を登録します。"
+                      title="すべての会議で使う補助設定"
+                      description="共通のカスタム指示・辞書・置換を登録します。"
                       contextEnabled={globalContextSettings.contextEnabled}
                       showMasterToggle
                       background={globalContextDraft.background}

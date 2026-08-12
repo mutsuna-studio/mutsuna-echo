@@ -13,7 +13,7 @@ phases.
 - Split the hero visualization into microphone on the left and system audio on
   the right while retaining the existing total-level meters below.
 - Promoted the primary record control to the center of the waveform, with an
-  explicit ready/recording status and an active stop state.
+  explicit active recording status and an active stop state.
 - Reorganized microphone, system-audio, and silence-stop controls into one
   visually connected settings row.
 - Composed the standard `@mutsuna/ui` 0.5.0 Select trigger, content, and items so
