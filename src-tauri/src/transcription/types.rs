@@ -8,15 +8,18 @@ pub enum TranscriptionProvider {
     Soniox,
     #[serde(rename = "cloudflare")]
     Cloudflare,
+    #[serde(rename = "mutsunaCloud")]
+    MutsunaCloud,
     #[serde(rename = "local")]
     Local,
 }
 
 impl TranscriptionProvider {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ElevenLabs,
         Self::Soniox,
         Self::Cloudflare,
+        Self::MutsunaCloud,
         Self::Local,
     ];
 
@@ -25,6 +28,7 @@ impl TranscriptionProvider {
             Self::ElevenLabs => "elevenlabs",
             Self::Soniox => "soniox",
             Self::Cloudflare => "cloudflare",
+            Self::MutsunaCloud => "mutsunaCloud",
             Self::Local => "local",
         }
     }

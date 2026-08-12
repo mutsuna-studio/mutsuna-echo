@@ -807,6 +807,7 @@ pub(crate) async fn transcribe_selected_audio(
         TranscriptionProvider::ElevenLabs
             | TranscriptionProvider::Soniox
             | TranscriptionProvider::Cloudflare
+            | TranscriptionProvider::MutsunaCloud
     ) {
         publish_transcription_progress(
             &app,
@@ -1239,6 +1240,12 @@ mod tests {
         assert!(
             serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
                 "provider": "soniox"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<TranscriptionRequest>(serde_json::json!({
+                "provider": "mutsunaCloud"
             }))
             .is_ok()
         );

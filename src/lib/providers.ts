@@ -1,6 +1,6 @@
-export type TranscriptionProviderId = "elevenlabs" | "soniox" | "cloudflare" | "local";
+export type TranscriptionProviderId = "elevenlabs" | "soniox" | "cloudflare" | "mutsunaCloud" | "local";
 export type TranscriptionProviderKind = "cloud" | "local";
-export type TranscriptionProviderSetup = "apiKey" | "oauthOrApiKey" | "modelDownload";
+export type TranscriptionProviderSetup = "apiKey" | "oauthOrApiKey" | "cloudAccount" | "modelDownload";
 export type TranscriptionProviderAvailability =
   | "ready"
   | "apiKeyRequired"
@@ -47,6 +47,13 @@ export type CloudflareConnectionStatus = {
   accounts: CloudflareAccountOption[];
   oauthConfigured: boolean;
   legacyConfigured: boolean;
+};
+
+export type MutsunaCloudStatus = {
+  connected: boolean;
+  canUse: boolean;
+  availableCredits: string | null;
+  accountStatus: string | null;
 };
 
 export type InstalledLocalSttModel = {
@@ -140,7 +147,7 @@ export const VAD_PRESET_OPTIONS = [
 ] as const;
 
 export function isTranscriptionProviderId(value: string): value is TranscriptionProviderId {
-  return value === "elevenlabs" || value === "soniox" || value === "cloudflare" || value === "local";
+  return value === "elevenlabs" || value === "soniox" || value === "cloudflare" || value === "mutsunaCloud" || value === "local";
 }
 
 export function getTranscriptionProvider(
@@ -165,6 +172,6 @@ export function transcriptionProviderLabel(
   providers: readonly TranscriptionProviderDefinition[] = []
 ): string {
   return providers.find((provider) => provider.id === id)?.label
-    ?? ({ elevenlabs: "ElevenLabs", soniox: "Soniox", cloudflare: "Cloudflare Workers AI", local: "ローカルSTT" } as Record<string, string>)[id]
+    ?? ({ elevenlabs: "ElevenLabs", soniox: "Soniox", cloudflare: "Cloudflare Workers AI", mutsunaCloud: "Mutsuna Cloud", local: "ローカルSTT" } as Record<string, string>)[id]
     ?? id;
 }

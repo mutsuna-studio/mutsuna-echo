@@ -10,6 +10,7 @@ mod local;
 pub(crate) mod local_diarization;
 pub(crate) mod local_models;
 pub(crate) mod local_settings;
+pub(crate) mod mutsuna_cloud;
 pub(crate) mod providers;
 pub(crate) mod soniox;
 pub mod types;
@@ -45,6 +46,19 @@ pub(crate) async fn transcribe(
     model_id: Option<&str>,
     context: Option<&context::TranscriptionContext>,
 ) -> Result<TranscriptionOutcome, String> {
+    if provider == TranscriptionProvider::MutsunaCloud {
+        // The first hosted MVP intentionally uploads only the selected mixed
+        // track. This avoids silently charging separate microphone/system jobs.
+        return transcribe_one(
+            app,
+            audio_path,
+            audio_duration_ms,
+            provider,
+            model_id,
+            context,
+        )
+        .await;
+    }
     let tracks = crate::meeting_store::recording_tracks(app, meeting_id)?;
     let mut sources = Vec::new();
     if let Some(path) = tracks.microphone {
@@ -124,6 +138,12 @@ async fn transcribe_one(
                 context,
             )
             .await
+        }
+        TranscriptionProvider::MutsunaCloud => {
+            if model_id.is_some_and(|model| model != mutsuna_cloud::MODEL_ID) {
+                return Err("選択したMutsuna Cloudモデルには対応していません。".into());
+            }
+            mutsuna_cloud::transcribe(app, audio_path, audio_duration_ms).await
         }
         TranscriptionProvider::Local => {
             let installed = local_models::list_installed(app)?;

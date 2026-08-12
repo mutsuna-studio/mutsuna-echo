@@ -24,6 +24,7 @@ class SecureCredentialBridgeInstrumentedTest {
     "cloudflare-oauth-account-id",
     "cloudflare-oauth-account-name",
     "cloudflare-oauth-accounts",
+    "mutsuna-cloud-access-token",
   )
 
   @After

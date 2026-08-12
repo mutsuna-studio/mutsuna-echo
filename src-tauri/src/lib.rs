@@ -16,6 +16,7 @@ mod local_ai_runtime;
 mod meeting_detection;
 mod meeting_schema;
 mod meeting_store;
+mod mutsuna_cloud;
 mod pcm_cache;
 mod pending_action;
 mod processing_metrics;
@@ -44,6 +45,7 @@ pub fn run() {
     let builder = builder
         .manage(commands::transcribe::AudioSelectionState::default())
         .manage(cloudflare_auth::CloudflareAuthState::default())
+        .manage(mutsuna_cloud::MutsunaCloudState::default())
         .manage(processing_power::ProcessingPowerState::default())
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
@@ -75,6 +77,10 @@ pub fn run() {
             cloudflare_auth::start_cloudflare_oauth,
             cloudflare_auth::select_cloudflare_oauth_account,
             cloudflare_auth::disconnect_cloudflare_oauth,
+            mutsuna_cloud::get_mutsuna_cloud_status,
+            mutsuna_cloud::connect_mutsuna_cloud,
+            mutsuna_cloud::disconnect_mutsuna_cloud,
+            mutsuna_cloud::purchase_mutsuna_cloud_credits,
             transcription::providers::get_transcription_providers,
             transcription::providers::list_installed_local_stt_models,
             transcription::local_models::list_local_stt_model_catalog,
