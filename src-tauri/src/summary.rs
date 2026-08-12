@@ -962,13 +962,10 @@ async fn generate_cloudflare_text_silent(
     prompt: &str,
 ) -> Result<String, String> {
     validate_cloudflare_model_id(model_id)?;
-    let api_token =
-        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareApiToken)?;
-    let account_id =
-        crate::credentials::load(app, crate::credentials::CredentialId::CloudflareAccountId)?;
+    let auth = crate::cloudflare_auth::resolve_valid_credentials(app).await?;
     crate::transcription::cloudflare::generate_text(
-        &account_id,
-        &api_token,
+        &auth.account_id,
+        &auth.access_token,
         model_id,
         prompt,
         |_| {},

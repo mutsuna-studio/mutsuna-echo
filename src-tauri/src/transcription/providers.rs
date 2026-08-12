@@ -14,6 +14,7 @@ enum ProviderKind {
 #[serde(rename_all = "camelCase")]
 enum ProviderSetup {
     ApiKey,
+    OAuthOrApiKey,
     ModelDownload,
 }
 
@@ -114,11 +115,11 @@ const SONIOX_DEFINITION: ProviderDefinition = ProviderDefinition {
 
 const CLOUDFLARE_DEFINITION: ProviderDefinition = ProviderDefinition {
     id: "cloudflare",
-    label: "Cloudflare Workers AI",
+    label: "Cloudflare Free",
     kind: ProviderKind::Cloud,
-    setup: ProviderSetup::ApiKey,
+    setup: ProviderSetup::OAuthOrApiKey,
     default_model_label: "Whisper Large v3 Turbo",
-    capability_summary: "多言語・単語タイムスタンプ・セルフキー",
+    capability_summary: "多言語・単語タイムスタンプ・無料枠",
     capabilities: CLOUDFLARE_CAPABILITIES,
 };
 
@@ -166,12 +167,9 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
             format!("APIキーの保存状態を確認できませんでした: {error}"),
         ),
     };
-    let cloudflare = match (
-        crate::credentials::has(app, crate::credentials::CredentialId::CloudflareApiToken),
-        crate::credentials::has(app, crate::credentials::CredentialId::CloudflareAccountId),
-    ) {
-        (Ok(has_token), Ok(has_account)) => cloudflare(has_token && has_account),
-        (Err(error), _) | (_, Err(error)) => unavailable_provider(
+    let cloudflare = match crate::cloudflare_auth::is_configured(app) {
+        Ok(configured) => cloudflare(configured),
+        Err(error) => unavailable_provider(
             CLOUDFLARE_DEFINITION,
             format!("資格情報の保存状態を確認できませんでした: {error}"),
         ),
@@ -286,9 +284,9 @@ fn cloudflare(configured: bool) -> TranscriptionProviderDescriptor {
         capability_summary: CLOUDFLARE_DEFINITION.capability_summary,
         capabilities: CLOUDFLARE_DEFINITION.capabilities,
         status_message: if configured {
-            "セルフキーでCloudflare Workers AIを利用できます。".into()
+            "Cloudflare Workers AIの無料枠を利用できます。".into()
         } else {
-            "Cloudflare APIトークンとAccount IDを設定してください。".into()
+            "Cloudflareへ接続してください。APIトークンも詳細設定から利用できます。".into()
         },
         pricing_usd_per_hour: Some(super::cloudflare::PRICE_USD_PER_AUDIO_MINUTE * 60.0),
         pricing_verified_on: Some("2026-08-11"),

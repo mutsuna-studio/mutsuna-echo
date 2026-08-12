@@ -27,15 +27,13 @@
 
   let { provider, loading, saving, deleting, hasApiKey, busy, onSave, onDelete }: Props = $props();
   let apiKey = $state("");
-  let accountId = $state("");
   let deleteDialogOpen = $state(false);
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     const submittedApiKey = apiKey.trim();
-    if (await onSave(submittedApiKey, provider.id === "cloudflare" ? accountId.trim() : undefined)) {
+    if (await onSave(submittedApiKey)) {
       apiKey = "";
-      accountId = "";
     }
   }
 </script>
@@ -55,38 +53,24 @@
     <small>音声を{provider.label}へ送って文字起こしします。</small>
     {#if provider.id === "elevenlabs"}
       <small>APIキーには文字起こし・ユーザー情報・利用状況の権限が必要です。</small>
-    {:else if provider.id === "cloudflare"}
-      <small>Workers AI Read・Edit権限を持つAPIトークンとAccount IDを端末内に安全に保存します。</small>
     {:else}
       <small>APIキーには文字起こし権限が必要です。</small>
     {/if}
   </div>
 
   <div class="cloud-model-actions">
-    <form class:cloudflare-form={provider.id === "cloudflare"} onsubmit={submit}>
-      {#if provider.id === "cloudflare"}
-        <Input
-          id="cloudflare-account-id"
-          aria-label="Cloudflare Account ID"
-          type="text"
-          placeholder={hasApiKey ? "新しいAccount IDに変更" : "Account ID"}
-          autocomplete="off"
-          spellcheck="false"
-          bind:value={accountId}
-          disabled={busy}
-        />
-      {/if}
+    <form onsubmit={submit}>
       <Input
         id={`${provider.id}-api-key`}
         aria-label={`${provider.label} API key`}
         type="password"
-        placeholder={provider.id === "cloudflare" ? (hasApiKey ? "新しいAPIトークンに変更" : "APIトークン") : (hasApiKey ? "新しいAPIキーに変更" : "APIキーを入力")}
+        placeholder={hasApiKey ? "新しいAPIキーに変更" : "APIキーを入力"}
         autocomplete="off"
         spellcheck="false"
         bind:value={apiKey}
         disabled={busy}
       />
-      <Button variant="secondary" type="submit" disabled={busy || !apiKey.trim() || (provider.id === "cloudflare" && !accountId.trim())} loading={saving}>
+      <Button variant="secondary" type="submit" disabled={busy || !apiKey.trim()} loading={saving}>
         {saving ? "保存中…" : hasApiKey ? "更新" : "保存"}
       </Button>
     </form>
@@ -124,12 +108,11 @@
   small { color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.5; }
   .cloud-model-actions { display: flex; min-width: 0; flex: none; align-items: center; gap: 8px; }
   form { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
-  form.cloudflare-form { grid-template-columns: repeat(2, minmax(0, 1fr)) auto; }
   form :global([data-slot="input"]) { width: 230px; min-width: 0; }
   @media (max-width: 680px) {
     .cloud-model-row { align-items: stretch; flex-direction: column; }
     .cloud-model-actions, form { width: 100%; }
-    form, form.cloudflare-form { flex: 1; grid-template-columns: 1fr; }
+    form { flex: 1; grid-template-columns: 1fr; }
     form :global([data-slot="input"]) { width: 100%; flex: 1; }
     .cloud-model-actions :global([data-slot="button"]), form :global([data-slot="input"]) { min-height: 44px; }
   }

@@ -113,20 +113,14 @@ async fn transcribe_one(
             if model_id.is_some_and(|model| model != cloudflare::MODEL_ID) {
                 return Err("選択したCloudflare Workers AIモデルには対応していません。".into());
             }
-            let api_token = crate::credentials::load(
-                app,
-                crate::credentials::CredentialId::CloudflareApiToken,
-            )?;
-            let account_id = crate::credentials::load(
-                app,
-                crate::credentials::CredentialId::CloudflareAccountId,
-            )?;
+            let auth = crate::cloudflare_auth::resolve_valid_credentials(app).await?;
+            let _auth_method = auth.auth_method;
             cloudflare::transcribe(
                 app,
                 audio_path,
                 audio_duration_ms,
-                &account_id,
-                &api_token,
+                &auth.account_id,
+                &auth.access_token,
                 context,
             )
             .await

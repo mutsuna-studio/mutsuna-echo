@@ -158,7 +158,13 @@ async fn validate_provider_api_key(
             Ok(true)
         }
         crate::credentials::CredentialId::CloudflareApiToken
-        | crate::credentials::CredentialId::CloudflareAccountId => {
+        | crate::credentials::CredentialId::CloudflareAccountId
+        | crate::credentials::CredentialId::CloudflareOAuthAccessToken
+        | crate::credentials::CredentialId::CloudflareOAuthRefreshToken
+        | crate::credentials::CredentialId::CloudflareOAuthExpiresAt
+        | crate::credentials::CredentialId::CloudflareOAuthAccountId
+        | crate::credentials::CredentialId::CloudflareOAuthAccountName
+        | crate::credentials::CredentialId::CloudflareOAuthAccounts => {
             Err("CloudflareではAPIトークンとAccount IDを一緒に設定してください。".into())
         }
     }

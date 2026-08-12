@@ -188,6 +188,7 @@ struct WorkersAiWord {
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(10))
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|error| format!("Cloudflare接続を準備できませんでした: {error}"))
@@ -211,9 +212,18 @@ fn api_error(status: StatusCode, envelope: Option<&ApiEnvelope<serde_json::Value
         .map(|error| error.message.trim())
         .filter(|message| !message.is_empty());
     match status {
-        StatusCode::UNAUTHORIZED => "Cloudflare APIトークンが無効です。".into(),
+        StatusCode::UNAUTHORIZED => "Cloudflareの認証情報が無効または期限切れです。".into(),
         StatusCode::FORBIDDEN => {
-            "Cloudflare APIトークンにWorkers AIの読み取り・実行権限がありません。".into()
+            "Cloudflareの認証情報にWorkers AIの読み取り・実行権限がありません。".into()
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            "Cloudflare Workers AIの利用上限に達したか、リクエストが集中しています。".into()
+        }
+        StatusCode::NOT_FOUND => {
+            "選択したCloudflare Workers AIモデルは利用できないか、対応していません。".into()
+        }
+        status if status.is_server_error() => {
+            format!("Cloudflare Workers AIで一時的な障害が発生しています（HTTP {status}）。")
         }
         _ => detail.map_or_else(
             || format!("Cloudflare Workers AIのリクエストに失敗しました（HTTP {status}）。"),

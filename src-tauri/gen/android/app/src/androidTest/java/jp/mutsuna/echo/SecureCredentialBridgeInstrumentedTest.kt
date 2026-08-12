@@ -18,6 +18,12 @@ class SecureCredentialBridgeInstrumentedTest {
     "soniox",
     "cloudflare-api-token",
     "cloudflare-account-id",
+    "cloudflare-oauth-access-token",
+    "cloudflare-oauth-refresh-token",
+    "cloudflare-oauth-expires-at",
+    "cloudflare-oauth-account-id",
+    "cloudflare-oauth-account-name",
+    "cloudflare-oauth-accounts",
   )
 
   @After

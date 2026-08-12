@@ -14,6 +14,12 @@ pub(crate) enum CredentialId {
     Soniox,
     CloudflareApiToken,
     CloudflareAccountId,
+    CloudflareOAuthAccessToken,
+    CloudflareOAuthRefreshToken,
+    CloudflareOAuthExpiresAt,
+    CloudflareOAuthAccountId,
+    CloudflareOAuthAccountName,
+    CloudflareOAuthAccounts,
 }
 
 impl CredentialId {
@@ -23,6 +29,12 @@ impl CredentialId {
             Self::Soniox => "soniox",
             Self::CloudflareApiToken => "cloudflare-api-token",
             Self::CloudflareAccountId => "cloudflare-account-id",
+            Self::CloudflareOAuthAccessToken => "cloudflare-oauth-access-token",
+            Self::CloudflareOAuthRefreshToken => "cloudflare-oauth-refresh-token",
+            Self::CloudflareOAuthExpiresAt => "cloudflare-oauth-expires-at",
+            Self::CloudflareOAuthAccountId => "cloudflare-oauth-account-id",
+            Self::CloudflareOAuthAccountName => "cloudflare-oauth-account-name",
+            Self::CloudflareOAuthAccounts => "cloudflare-oauth-accounts",
         }
     }
 
@@ -32,6 +44,12 @@ impl CredentialId {
             Self::Soniox => "Soniox",
             Self::CloudflareApiToken => "Cloudflare APIトークン",
             Self::CloudflareAccountId => "Cloudflare Account ID",
+            Self::CloudflareOAuthAccessToken => "Cloudflare OAuthアクセストークン",
+            Self::CloudflareOAuthRefreshToken => "Cloudflare OAuthリフレッシュトークン",
+            Self::CloudflareOAuthExpiresAt => "Cloudflare OAuth有効期限",
+            Self::CloudflareOAuthAccountId => "Cloudflare OAuth Account ID",
+            Self::CloudflareOAuthAccountName => "Cloudflare OAuthアカウント名",
+            Self::CloudflareOAuthAccounts => "Cloudflare OAuthアカウント一覧",
         }
     }
 
@@ -96,6 +114,12 @@ mod tests {
             CredentialId::Soniox,
             CredentialId::CloudflareApiToken,
             CredentialId::CloudflareAccountId,
+            CredentialId::CloudflareOAuthAccessToken,
+            CredentialId::CloudflareOAuthRefreshToken,
+            CredentialId::CloudflareOAuthExpiresAt,
+            CredentialId::CloudflareOAuthAccountId,
+            CredentialId::CloudflareOAuthAccountName,
+            CredentialId::CloudflareOAuthAccounts,
         ] {
             assert!(
                 android_contract.contains(&format!("\"{}\"", credential.id())),

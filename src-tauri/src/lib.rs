@@ -4,6 +4,7 @@ mod android_update;
 mod audio_enhancement;
 mod audio_playback;
 mod audio_waveform;
+mod cloudflare_auth;
 mod commands;
 mod compute_tuning;
 mod credentials;
@@ -42,6 +43,7 @@ pub fn run() {
     );
     let builder = builder
         .manage(commands::transcribe::AudioSelectionState::default())
+        .manage(cloudflare_auth::CloudflareAuthState::default())
         .manage(processing_power::ProcessingPowerState::default())
         .manage(recording::RecordingService::default());
     #[cfg(desktop)]
@@ -69,6 +71,10 @@ pub fn run() {
             commands::api_key::delete_api_key,
             commands::api_key::save_provider_api_key,
             commands::api_key::delete_provider_api_key,
+            cloudflare_auth::get_cloudflare_connection_status,
+            cloudflare_auth::start_cloudflare_oauth,
+            cloudflare_auth::select_cloudflare_oauth_account,
+            cloudflare_auth::disconnect_cloudflare_oauth,
             transcription::providers::get_transcription_providers,
             transcription::providers::list_installed_local_stt_models,
             transcription::local_models::list_local_stt_model_catalog,

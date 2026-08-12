@@ -1,6 +1,6 @@
 export type TranscriptionProviderId = "elevenlabs" | "soniox" | "cloudflare" | "local";
 export type TranscriptionProviderKind = "cloud" | "local";
-export type TranscriptionProviderSetup = "apiKey" | "modelDownload";
+export type TranscriptionProviderSetup = "apiKey" | "oauthOrApiKey" | "modelDownload";
 export type TranscriptionProviderAvailability =
   | "ready"
   | "apiKeyRequired"
@@ -34,6 +34,19 @@ export type TranscriptionProviderDefinition = {
   statusMessage: string;
   pricingUsdPerHour: number | null;
   pricingVerifiedOn: string | null;
+};
+
+export type CloudflareAccountOption = { id: string; name: string };
+
+export type CloudflareConnectionStatus = {
+  connected: boolean;
+  authMethod: "oauth" | "apiToken" | null;
+  accountName: string | null;
+  needsReauthentication: boolean;
+  accountSelectionRequired: boolean;
+  accounts: CloudflareAccountOption[];
+  oauthConfigured: boolean;
+  legacyConfigured: boolean;
 };
 
 export type InstalledLocalSttModel = {

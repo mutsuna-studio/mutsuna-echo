@@ -16,6 +16,7 @@
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import Settings from "@lucide/svelte/icons/settings";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
+  import CloudflareConnectionSettings from "./lib/components/CloudflareConnectionSettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import ThirdPartyLicenses from "./lib/components/ThirdPartyLicenses.svelte";
   import { checkAndroidUpdate, isAndroid, waitForAndroidUpdateCheck } from "./lib/androidUpdate";
@@ -36,7 +37,8 @@
     isTranscriptionProviderId,
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId,
-    type LocalDiarizationModelStatus
+    type LocalDiarizationModelStatus,
+    type CloudflareConnectionStatus
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
@@ -75,7 +77,7 @@
     { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・辞書", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "cloudflare", label: "Cloudflare Workers AI", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIトークンとAccount IDが必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
+    { id: "cloudflare", label: "Cloudflare Free", kind: "cloud", setup: "oauthOrApiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Cloudflareへの接続が必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
   ];
   const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
     {
@@ -196,12 +198,14 @@
   let usageLoading = $state(false);
   let sonioxUsageLoading = $state(false);
   let cloudflareUsageLoading = $state(false);
+  let cloudflareConnecting = $state(false);
   let recordingBusy = $state(false);
   let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
+  let cloudflareConnection = $state.raw<CloudflareConnectionStatus | null>(summarySettingsPreview ? { connected: false, authMethod: null, accountName: null, needsReauthentication: false, accountSelectionRequired: false, accounts: [], oauthConfigured: true, legacyConfigured: false } : null);
   let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [], corrections: [] });
   let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "", correctionsText: "" });
   let globalContextSaveState = $state<ContextSaveState>("saved");
@@ -350,7 +354,7 @@
   });
 
   const saving = $derived(savingProviderId !== null);
-  const busy = $derived(loading || saving || deleting || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
+  const busy = $derived(loading || saving || deleting || cloudflareConnecting || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
   const processingMeetingStatus = $derived(
     summaryGenerating
       ? "要約中"
@@ -390,7 +394,7 @@
   const hasSonioxApiKey = $derived(
     transcriptionProviders.find((provider) => provider.id === "soniox")?.configured ?? false
   );
-  const hasCloudflareApiKey = $derived(
+  const hasCloudflareConnection = $derived(
     transcriptionProviders.find((provider) => provider.id === "cloudflare")?.configured ?? false
   );
   const pageTitle = $derived(
@@ -402,6 +406,9 @@
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
+  );
+  const cloudflareProvider = $derived(
+    transcriptionProviders.find((provider) => provider.id === "cloudflare") ?? null
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(
@@ -495,6 +502,61 @@
     transcriptionProviders = await invoke<TranscriptionProviderDefinition[]>(
       "get_transcription_providers"
     );
+  }
+
+  async function refreshCloudflareConnection() {
+    cloudflareConnection = await invoke<CloudflareConnectionStatus>("get_cloudflare_connection_status");
+  }
+
+  async function refreshCloudflareState() {
+    await Promise.all([refreshProviders(), refreshCloudflareConnection(), refreshSummaryProviders()]);
+    if (hasCloudflareConnection) void refreshCloudflareUsage();
+    else clearCloudflareUsage();
+  }
+
+  async function connectCloudflare() {
+    if (cloudflareConnecting) return;
+    cloudflareConnecting = true;
+    try {
+      cloudflareConnection = await invoke<CloudflareConnectionStatus>("start_cloudflare_oauth");
+      await refreshCloudflareState();
+      if (cloudflareConnection.accountSelectionRequired) {
+        showWarningToast("Cloudflareの認証が完了しました。", "利用するアカウントを選択してください。");
+      } else {
+        showSuccessToast("Cloudflareへ接続しました。");
+      }
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      cloudflareConnecting = false;
+    }
+  }
+
+  async function selectCloudflareAccount(accountId: string) {
+    cloudflareConnecting = true;
+    try {
+      cloudflareConnection = await invoke<CloudflareConnectionStatus>("select_cloudflare_oauth_account", { accountId });
+      await refreshCloudflareState();
+      showSuccessToast("Cloudflareアカウントを接続しました。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      cloudflareConnecting = false;
+    }
+  }
+
+  async function disconnectCloudflareOAuth() {
+    deleting = true;
+    try {
+      const revoked = await invoke<boolean>("disconnect_cloudflare_oauth");
+      await refreshCloudflareState();
+      if (revoked) showSuccessToast("Cloudflare OAuthの接続を解除しました。");
+      else showWarningToast("端末上の接続を解除しました。", "Cloudflare側の取り消しは確認できませんでした。必要に応じてCloudflareのOAuth認可画面から取り消してください。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      deleting = false;
+    }
   }
 
   async function refreshLocalModels() {
@@ -1037,9 +1099,10 @@
             if (!cancelled && payload.meetingId === selectedMeetingId) summaryProgress = payload;
           })
         ]);
-        const [nextProviders, nextSummaryProviders, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
+        const [nextProviders, nextSummaryProviders, nextCloudflareConnection, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<SummaryProviderDefinition[]>("get_summary_providers"),
+          invoke<CloudflareConnectionStatus>("get_cloudflare_connection_status"),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
@@ -1055,6 +1118,7 @@
         ]);
         if (cancelled) return;
         transcriptionProviders = nextProviders;
+        cloudflareConnection = nextCloudflareConnection;
         setGlobalContextFromSettings(nextGlobalContext);
         globalContextLoading = false;
         summaryProviders = nextSummaryProviders;
@@ -1079,7 +1143,7 @@
           await restoreTranscriptionHistory();
         }
         if (hasApiKey) await refreshUsage();
-        if (hasCloudflareApiKey) await refreshCloudflareUsage();
+        if (hasCloudflareConnection) await refreshCloudflareUsage();
         void checkForAvailableUpdate();
       } catch (error) {
         showError(errorText(error));
@@ -1121,7 +1185,7 @@
         await restoreTranscriptionHistory();
         await refreshMeetings();
         await refreshUsage();
-        if (hasCloudflareApiKey) await refreshCloudflareUsage();
+        if (hasCloudflareConnection) await refreshCloudflareUsage();
       }
     } catch (error) {
       if (reportError) showError(errorText(error));
@@ -1140,7 +1204,7 @@
   }
 
   async function refreshCloudflareUsage() {
-    if (!hasCloudflareApiKey || cloudflareUsageLoading) return;
+    if (!hasCloudflareConnection || cloudflareUsageLoading) return;
     cloudflareUsageLoading = true;
     cloudflareUsageError = "";
     try {
@@ -1221,6 +1285,7 @@
     if (saved && providerId === "elevenlabs") void refreshUsage();
     if (saved && providerId === "soniox") clearSonioxUsage();
     if (saved && providerId === "cloudflare") {
+      await refreshCloudflareConnection();
       void refreshCloudflareUsage();
       await refreshSummaryProviders();
     }
@@ -1238,6 +1303,7 @@
       }
       if (providerId === "soniox") clearSonioxUsage();
       if (providerId === "cloudflare") {
+        await refreshCloudflareConnection();
         clearCloudflareUsage();
         await refreshSummaryProviders();
       }
@@ -2063,6 +2129,21 @@
                   </div>
                   <div class="transcription-model-manager">
                     <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshLocalModels} onMessage={showMessage} onError={showError} />
+                    {#if cloudflareProvider}
+                      <CloudflareConnectionSettings
+                        status={cloudflareConnection}
+                        {loading}
+                        connecting={cloudflareConnecting}
+                        saving={savingProviderId === "cloudflare"}
+                        {deleting}
+                        {busy}
+                        onConnect={connectCloudflare}
+                        onSelectAccount={selectCloudflareAccount}
+                        onDisconnectOAuth={disconnectCloudflareOAuth}
+                        onSaveManual={(apiToken, accountId) => saveApiKey("cloudflare", apiToken, accountId)}
+                        onDeleteManual={() => deleteApiKey("cloudflare")}
+                      />
+                    {/if}
                     {#each apiKeyProviders as provider (provider.id)}
                       <ApiKeySettings
                         {provider}
@@ -2147,10 +2228,10 @@
                   {#if hasSonioxApiKey}
                     <SonioxUsagePanel usage={sonioxUsage} loading={sonioxUsageLoading} error={sonioxUsageError} onRefresh={refreshSonioxUsage} />
                   {/if}
-                  {#if hasCloudflareApiKey}
+                  {#if hasCloudflareConnection}
                     <CloudflareUsagePanel usage={cloudflareUsage} loading={cloudflareUsageLoading} error={cloudflareUsageError} onRefresh={refreshCloudflareUsage} />
                   {/if}
-                  {#if !hasApiKey && !hasSonioxApiKey && !hasCloudflareApiKey}
+                  {#if !hasApiKey && !hasSonioxApiKey && !hasCloudflareConnection}
                     <section class="settings-empty-state">
                       <ChartNoAxesColumn aria-hidden="true" />
                       <h2>利用状況はまだありません</h2>
