@@ -99,12 +99,21 @@ jobs:
           version = library.SherpaOnnxGetVersionStr().decode()
           assert version.startswith('1.13.4'), version
           PY
-      - name: Create manifest and archive
+      - name: Create runtime manifest
         shell: bash
         run: |
           node scripts/create-runtime-manifest.mjs "$RUNNER_TEMP/runtime" '${{ matrix.target }}' 1.13.4-1
+      - name: Archive Unix runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
           cd "$RUNNER_TEMP/runtime"
           zip -9 -r "$RUNNER_TEMP/mutsuna-local-ai-runtime-v1.13.4-1-${{ matrix.target }}.zip" .
+      - name: Archive Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "$env:RUNNER_TEMP/runtime/*" -DestinationPath "$env:RUNNER_TEMP/mutsuna-local-ai-runtime-v1.13.4-1-${{ matrix.target }}.zip" -CompressionLevel Optimal
       - name: Notarize macOS runtime pack
         if: matrix.platform == 'macos' && env.MACOS_NOTARIZE == '1'
         shell: bash
