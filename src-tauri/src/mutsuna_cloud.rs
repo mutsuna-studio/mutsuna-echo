@@ -593,11 +593,7 @@ async fn connect_flow(app: &AppHandle) -> Result<MutsunaCloudStatus, String> {
         endpoint(&base_url, "/v1/auth/device/start")?,
         &DeviceStartRequest {
             client_id: "mutsuna-echo-native",
-            scopes: [
-                "cloud:transcribe",
-                "billing:read",
-                "billing:checkout",
-            ],
+            scopes: ["cloud:transcribe", "billing:read", "billing:checkout"],
         },
         "端末認証開始",
     )

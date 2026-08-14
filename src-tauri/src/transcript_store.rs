@@ -1437,9 +1437,9 @@ fn transcript_path_in(
 
 fn validate_provider_id(provider_id: &str) -> Result<(), String> {
     if provider_id.is_empty()
-        || !provider_id.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-'
-        })
+        || !provider_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
     {
         return Err("文字起こしプロバイダーIDが不正です。".to_string());
     }

@@ -9,6 +9,7 @@
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Maximize2 from "@lucide/svelte/icons/maximize-2";
   import Mic from "@lucide/svelte/icons/mic";
+  import MicOff from "@lucide/svelte/icons/mic-off";
   import Minimize2 from "@lucide/svelte/icons/minimize-2";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import Square from "@lucide/svelte/icons/square";
@@ -23,12 +24,12 @@
     OverlayPreviewSnapshot
   } from "../types/overlay-preview";
   import type { PendingAction } from "../types/pending-action";
-  import type { RecordingStatus, StopRecordingResult } from "../types/recording";
+  import type { MicrophoneMuteStatus, RecordingStatus, StopRecordingResult } from "../types/recording";
 
   const echoTheme = createTheme("custom", "oklch(0.527 0.093 185.044)");
-  const promptSize = { width: 320, height: 60 };
+  const promptSize = { width: 360, height: 60 };
   const controllerSize = { width: 380, height: 64 };
-  const minimizedControllerSize = { width: 88, height: 48 };
+  const minimizedControllerSize = { width: 124, height: 48 };
   const snapStorageKey = "meeting-overlay-snap-position";
   const snapMargin = 20;
   const snapPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
@@ -52,6 +53,8 @@
   let loading = $state(true);
   let starting = $state(false);
   let stopping = $state(false);
+  let muting = $state(false);
+  let microphoneMute = $state.raw<MicrophoneMuteStatus | null>(null);
   let controllerMode = $state(false);
   let controllerMinimized = $state(false);
   let completionMessage = $state("");
@@ -82,6 +85,13 @@
       : status?.voiceActivity === "listening"
         ? "音声を待機中"
         : "VADは利用できません"
+  );
+  const microphoneMuteTitle = $derived(
+    microphoneMute?.supported
+      ? microphoneMute.muted
+        ? "OSの既定マイクのミュートを解除"
+        : "OSの既定マイクをミュート"
+      : microphoneMute?.limitation ?? "マイクのミュート状態を確認中"
   );
 
   function errorText(value: unknown): string {
@@ -369,6 +379,31 @@
     }
   }
 
+  async function refreshMicrophoneMute() {
+    if (isPreview) return;
+    microphoneMute = await invoke<MicrophoneMuteStatus>("get_microphone_mute_status");
+  }
+
+  async function toggleMicrophoneMute() {
+    if (muting || !microphoneMute?.supported) return;
+    if (isPreview) {
+      microphoneMute = { ...microphoneMute, muted: !microphoneMute.muted };
+      return;
+    }
+    muting = true;
+    error = "";
+    try {
+      microphoneMute = await invoke<MicrophoneMuteStatus>("set_microphone_muted", {
+        muted: !microphoneMute.muted
+      });
+    } catch (cause) {
+      error = errorText(cause);
+      await refreshMicrophoneMute().catch(() => undefined);
+    } finally {
+      muting = false;
+    }
+  }
+
   async function stopRecording() {
     if (stopping || !active) return;
     if (isPreview) {
@@ -407,6 +442,7 @@
           });
           const initialPreview = await overlayPreviewRuntime.get();
           if (initialPreview) {
+            microphoneMute = { supported: true, muted: false, limitation: null };
             await applyPreviewMode(initialPreview);
             return;
           }
@@ -417,8 +453,10 @@
         ]);
         if (cancelled) return;
         detection = nextDetection;
+        await refreshMicrophoneMute().catch(() => undefined);
         await acceptStatus(nextStatus);
         if (!detection && !active && !controllerMode) await closeOverlay();
+        else if (!controllerMode) await resizeOverlay(false);
         else await applySnap(snapPosition);
       } catch (cause) {
         error = errorText(cause);
@@ -440,6 +478,14 @@
       void invoke<RecordingStatus>("get_recording_status")
         .then(acceptStatus)
         .catch((cause) => { error = errorText(cause); });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  });
+
+  $effect(() => {
+    if (isPreview || (!shownDetection && !controllerMode)) return;
+    const timer = window.setInterval(() => {
+      void refreshMicrophoneMute().catch(() => undefined);
     }, 1_000);
     return () => window.clearInterval(timer);
   });
@@ -465,6 +511,18 @@
           aria-label="通常サイズに戻す"
           title="通常サイズに戻す"
           onclick={restoreController}
+        />
+        <Button
+          class={`microphone-mute-button${microphoneMute?.muted ? " muted" : ""}`}
+          size="icon-sm"
+          variant={microphoneMute?.muted ? "destructive" : "ghost"}
+          type="button"
+          icon={microphoneMute?.muted ? MicOff : Mic}
+          aria-label={microphoneMuteTitle}
+          title={microphoneMuteTitle}
+          onclick={toggleMicrophoneMute}
+          loading={muting}
+          disabled={!microphoneMute?.supported}
         />
         <Button
           class="minimized-stop-button"
@@ -501,10 +559,14 @@
         {#if active && status?.phase !== "finalizing"}
           <div class="audio-sources">
             <div class="waveform-with-legend">
-              <Mic
-                class={`microphone-legend${status?.microphone ? " enabled" : ""}`}
-                aria-label={status?.microphone ? "マイク入力: 緑" : "マイク入力なし"}
-              />
+              {#if microphoneMute?.muted}
+                <MicOff class="microphone-legend muted" aria-label="OSの既定マイク: ミュート中" />
+              {:else}
+                <Mic
+                  class={`microphone-legend${status?.microphone ? " enabled" : ""}`}
+                  aria-label={status?.microphone ? "マイク入力: 緑" : "マイク入力なし"}
+                />
+              {/if}
               <AudioLevelWaveform
                 microphoneLevel={status?.microphoneLevel ?? 0}
                 systemLevel={status?.systemLevel ?? 0}
@@ -534,6 +596,18 @@
             <Button class="overlay-error-close-button" size="sm" variant="ghost" type="button" onclick={isPreview ? closePreview : closeOverlay}>閉じる</Button>
           {:else}
             {#if status?.phase !== "finalizing"}
+              <Button
+                class={`microphone-mute-button${microphoneMute?.muted ? " muted" : ""}`}
+                size="icon-sm"
+                variant={microphoneMute?.muted ? "destructive" : "ghost"}
+                type="button"
+                icon={microphoneMute?.muted ? MicOff : Mic}
+                aria-label={microphoneMuteTitle}
+                title={microphoneMuteTitle}
+                onclick={toggleMicrophoneMute}
+                loading={muting}
+                disabled={!microphoneMute?.supported}
+              />
               <Button
                 class="minimize-controller-button"
                 size="icon-sm"
@@ -572,6 +646,18 @@
             </button>
           {/if}
           <div class="detection-actions">
+            <Button
+              class={`microphone-mute-button${microphoneMute?.muted ? " muted" : ""}`}
+              size="icon-sm"
+              variant={microphoneMute?.muted ? "destructive" : "ghost"}
+              type="button"
+              icon={microphoneMute?.muted ? MicOff : Mic}
+              aria-label={microphoneMuteTitle}
+              title={microphoneMuteTitle}
+              onclick={toggleMicrophoneMute}
+              loading={muting}
+              disabled={!microphoneMute?.supported}
+            />
             <Button
               size="sm"
               type="button"
@@ -727,6 +813,7 @@
     color: rgb(255 255 255);
     background: rgb(255 255 255 / 10%);
   }
+  .minimized-controller :global(.microphone-mute-button:not(.muted)) { color: rgb(226 233 229 / 72%); }
 
   .meeting-prompt { height: 100%; }
   .meeting-overlay:not(.compact) .meeting-prompt { width: 100%; height: auto; }
@@ -787,6 +874,7 @@
     text-transform: uppercase;
   }
   .detection-actions { flex: none; gap: 3px; }
+  .detection-actions :global(.microphone-mute-button:not(.muted)) { color: rgb(226 233 229 / 72%); }
 
   .detection-actions :global(.overlay-record-button) {
     height: 34px;
@@ -883,6 +971,7 @@
   .controller-message { flex: 1; }
   .controller-action { position: relative; z-index: 2; display: flex; flex: none; align-items: center; gap: 3px; margin-left: 2px; }
   .controller-action :global(.minimize-controller-button) { color: rgb(226 233 229 / 66%); }
+  .controller-action :global(.microphone-mute-button:not(.muted)) { color: rgb(226 233 229 / 66%); }
   .controller-action :global(.minimize-controller-button:hover) {
     color: rgb(255 255 255);
     background: rgb(255 255 255 / 10%);

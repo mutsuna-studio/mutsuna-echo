@@ -21,7 +21,7 @@ const JOINER: &str = "joiner-epoch-99-avg-1.int8.onnx";
 const TOKENS: &str = "tokens.txt";
 const VAD_PROGRESS_UNIT_MS: u64 = 1_000;
 const MAX_VAD_PROGRESS_UNITS: u32 = 100;
-const VAD_CACHE_SCHEMA: u8 = 5;
+const VAD_CACHE_SCHEMA: u8 = 8;
 const DISPLAY_WORD_CONTINUATION_GAP_MS: u64 = 160;
 const RECOVERY_EDGE_GAP_MS: u64 = 1_200;
 const RECOVERY_MIN_UTTERANCE_MS: u64 = 200;
@@ -646,6 +646,26 @@ fn token_midpoint_ms(token: &TranscriptToken) -> Option<u64> {
     Some(start_ms.saturating_add(end_ms.saturating_sub(start_ms) / 2))
 }
 
+fn recognition_ownership(regions: &[vad::SpeechRegion], region_index: usize) -> Option<(u64, u64)> {
+    let region = regions.get(region_index)?;
+    let start_ms = regions
+        .get(region_index.wrapping_sub(1))
+        .map(|previous| midpoint(previous.speech_end_ms, region.speech_start_ms))
+        .unwrap_or(region.start_ms)
+        .max(region.start_ms);
+    let end_ms = regions
+        .get(region_index.saturating_add(1))
+        .map(|next| midpoint(region.speech_end_ms, next.speech_start_ms))
+        .unwrap_or(region.end_ms)
+        .min(region.end_ms);
+    (start_ms < end_ms).then_some((start_ms, end_ms))
+}
+
+fn midpoint(left: u64, right: u64) -> u64 {
+    let lower = left.min(right);
+    lower.saturating_add(left.abs_diff(right) / 2)
+}
+
 fn flush_recognition_batch(
     app: &tauri::AppHandle,
     recognizer: &OfflineRecognizer,
@@ -670,14 +690,18 @@ fn flush_recognition_batch(
             .ok_or_else(|| "ReazonSpeechから文字起こし結果を取得できませんでした。".to_string())?;
         let (mut region_tokens, _) =
             normalize_result(&result, region.duration_ms(), region.start_ms);
-        // Padded windows overlap by design. Keep only tokens whose midpoint
-        // belongs to the original VAD region, retaining boundary context for
-        // recognition without duplicating transcript text.
+        let (ownership_start_ms, ownership_end_ms) =
+            recognition_ownership(regions, item.region_index)
+                .ok_or_else(|| "認識区間の保存範囲が不正です。".to_string())?;
+        // Padded windows overlap by design. Divide that overlap at the midpoint
+        // between adjacent speech regions. Unlike filtering at the raw VAD
+        // boundary, this keeps quiet lead-ins recognized from the padding while
+        // still assigning every token to at most one window.
         region_tokens.retain(|token| {
-            let start = token.start_ms.unwrap_or(region.speech_start_ms);
+            let start = token.start_ms.unwrap_or(ownership_start_ms);
             let end = token.end_ms.unwrap_or(start);
             let midpoint = start.saturating_add(end.saturating_sub(start) / 2);
-            midpoint >= region.speech_start_ms && midpoint < region.speech_end_ms
+            midpoint >= ownership_start_ms && midpoint < ownership_end_ms
         });
         tokens.append(&mut region_tokens);
         *completed_chunks = completed_chunks.saturating_add(1);
@@ -880,7 +904,8 @@ fn valid_seconds_to_ms(seconds: f32) -> Option<u64> {
 mod tests {
     use super::{
         assign_vad_utterances, augment_uncovered_utterance_edges, normalize_result,
-        sparse_utterance_candidates, tokenize_hotword, vad_completed_units, vad_total_units,
+        recognition_ownership, sparse_utterance_candidates, tokenize_hotword, vad_completed_units,
+        vad_total_units,
     };
     use crate::transcription::vad;
     use crate::transcription::{TokenTimeSource, TranscriptToken};
@@ -952,6 +977,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn padded_ownership_keeps_the_observed_quiet_lead_in_without_overlap() {
+        let regions = vec![
+            vad::SpeechRegion {
+                start_ms: 8_054,
+                speech_start_ms: 9_054,
+                speech_end_ms: 17_356,
+                end_ms: 18_356,
+            },
+            vad::SpeechRegion {
+                start_ms: 16_886,
+                speech_start_ms: 17_886,
+                speech_end_ms: 27_788,
+                end_ms: 28_788,
+            },
+        ];
+        assert_eq!(recognition_ownership(&regions, 0), Some((8_054, 17_621)));
+        assert_eq!(recognition_ownership(&regions, 1), Some((17_621, 28_788)));
     }
 
     #[test]

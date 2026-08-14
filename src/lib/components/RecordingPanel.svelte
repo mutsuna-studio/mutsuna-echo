@@ -16,19 +16,28 @@
   import { Checkbox } from "@mutsuna/ui/checkbox";
   import { Popover, PopoverContent, PopoverTrigger } from "@mutsuna/ui/popover";
   import { Select, SelectContent, SelectItem, SelectTrigger } from "@mutsuna/ui/select";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Info from "@lucide/svelte/icons/info";
   import Mic from "@lucide/svelte/icons/mic";
+  import MicOff from "@lucide/svelte/icons/mic-off";
   import MonitorSpeaker from "@lucide/svelte/icons/monitor-speaker";
   import SlidersHorizontal from "@lucide/svelte/icons/sliders-horizontal";
   import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Volume2 from "@lucide/svelte/icons/volume-2";
+  import VolumeX from "@lucide/svelte/icons/volume-x";
   import { VAD_PRESET_OPTIONS, type LocalVadModelStatus, type VadPreset } from "../providers";
   import type { SelectedAudioFile } from "../types/transcript";
   import type {
+    ApplicationOutput,
+    ApplicationOutputIcon,
+    ApplicationOutputStatus,
+    MicrophoneMuteStatus,
     RecoverableRecording,
     RecordingCapabilities,
     RecordingStatus,
-    StopRecordingResult
+    StopRecordingResult,
+    SystemOutputStatus
   } from "../types/recording";
   import AudioLevelWaveform from "./AudioLevelWaveform.svelte";
 
@@ -109,6 +118,18 @@
   let previewRecordingStartedAt = 0;
   let previewMicrophoneLevel = $state(0.18);
   let settingsPopoverOpen = $state(false);
+  let microphoneMute = $state.raw<MicrophoneMuteStatus | null>(null);
+  let microphoneMuteBusy = $state(false);
+  let systemOutput = $state.raw<SystemOutputStatus | null>(null);
+  let systemOutputBusy = $state(false);
+  let pendingSystemVolume: number | null = null;
+  let applicationOutput = $state.raw<ApplicationOutputStatus | null>(null);
+  let applicationMuteBusy = $state<string[]>([]);
+  const applicationVolumeBusy = new Set<string>();
+  const pendingApplicationVolumes = new Map<string, number>();
+  let applicationIcons = $state<Record<string, string | null>>({});
+  let outputMixerExpanded = $state(false);
+  const pendingApplicationIcons = new Set<string>();
 
   $effect(() => {
     if (!preview) return;
@@ -118,6 +139,16 @@
     systemAudio = false;
     microphoneDeviceId = "preview-microphone";
     systemDeviceId = "preview-system";
+    microphoneMute = { supported: true, muted: false, limitation: null };
+    systemOutput = { supported: true, volume: 64, muted: false, muteSupported: true, limitation: null };
+    applicationOutput = {
+      supported: true,
+      applications: [
+        { id: "preview-browser", name: "ブラウザ", volume: 72, muted: false, sessionCount: 3 },
+        { id: "preview-music", name: "音楽プレーヤー", volume: 45, muted: false, sessionCount: 1 }
+      ],
+      limitation: null
+    };
     vadModel = {
       modelId: "preview-vad",
       displayName: "Silero VAD",
@@ -153,12 +184,13 @@
     Boolean(capabilities?.supported) && (microphone || systemAudio) && !disabled && !actionBusy && !active
   );
   const metering = $derived(active || monitoring);
+  const microphoneSignalEnabled = $derived(microphone && !microphoneMute?.muted);
   const microphoneInputLevel = $derived(preview ? previewMicrophoneLevel : (status?.microphoneLevel ?? 0));
   const microphoneSpectrum = $derived(
     preview ? createPreviewSpectrum(previewMicrophoneLevel, 0.35) : (status?.microphoneSpectrum ?? [])
   );
   const systemSpectrum = $derived(status?.systemSpectrum ?? []);
-  const microphoneMeterPercent = $derived(toMeterPercent(microphoneInputLevel, (preview || metering) && microphone));
+  const microphoneMeterPercent = $derived(toMeterPercent(microphoneInputLevel, (preview || metering) && microphoneSignalEnabled));
   const systemMeterPercent = $derived(toMeterPercent(status?.systemLevel ?? 0, metering && systemAudio));
   const vadAvailability = $derived.by<"preparing" | "available" | "unavailable">(() => {
     if (loading || !capabilities || !vadModel || vadModel.downloading) return "preparing";
@@ -196,7 +228,7 @@
   );
   const inputSettingsSummary = $derived.by(() => {
     const sources = [
-      microphone ? "マイク ON" : "マイク OFF",
+      !microphone ? "マイク録音 OFF" : microphoneMute?.muted ? "マイク ミュート" : "マイク ON",
       systemAudio ? "システム音声 ON" : "システム音声 OFF"
     ];
     return `${sources.join(" · ")} · 無音停止 ${selectedVadLabel}`;
@@ -276,6 +308,236 @@
     await acceptStatus(nextStatus);
   }
 
+  async function refreshMicrophoneMute() {
+    microphoneMute = await invoke<MicrophoneMuteStatus>("get_microphone_mute_status");
+  }
+
+  async function toggleMicrophoneMute() {
+    if (microphoneMuteBusy || !microphoneMute?.supported) return;
+    if (preview) {
+      microphoneMute = { ...microphoneMute, muted: !microphoneMute.muted };
+      return;
+    }
+    microphoneMuteBusy = true;
+    onMessage("");
+    onError("");
+    try {
+      microphoneMute = await invoke<MicrophoneMuteStatus>("set_microphone_muted", {
+        muted: !microphoneMute.muted
+      });
+      onMessage(microphoneMute.muted
+        ? "OSの既定マイクをミュートしました。"
+        : "OSの既定マイクのミュートを解除しました。");
+    } catch (error) {
+      onError(errorText(error));
+      await refreshMicrophoneMute().catch(() => undefined);
+    } finally {
+      microphoneMuteBusy = false;
+    }
+  }
+
+  async function refreshSystemOutput() {
+    systemOutput = await invoke<SystemOutputStatus>("get_system_output_status");
+  }
+
+  async function applySystemVolume(volume: number) {
+    if (!systemOutput?.supported) return;
+    if (systemOutputBusy) {
+      pendingSystemVolume = volume;
+      return;
+    }
+    if (preview) {
+      systemOutput = { ...systemOutput, volume };
+      return;
+    }
+    systemOutputBusy = true;
+    try {
+      const updated = await invoke<SystemOutputStatus>("set_system_output_volume", { volume });
+      systemOutput = pendingSystemVolume !== null && systemOutput
+        ? { ...updated, volume: systemOutput.volume }
+        : updated;
+    } catch (error) {
+      onError(errorText(error));
+      await refreshSystemOutput().catch(() => undefined);
+    } finally {
+      systemOutputBusy = false;
+      if (pendingSystemVolume !== null) {
+        const pending = pendingSystemVolume;
+        pendingSystemVolume = null;
+        await applySystemVolume(pending);
+      }
+    }
+  }
+
+  function scheduleSystemVolume(value: string) {
+    if (!systemOutput?.supported) return;
+    const volume = Math.max(0, Math.min(100, Number(value)));
+    systemOutput = { ...systemOutput, volume };
+    void applySystemVolume(volume);
+  }
+
+  async function toggleSystemOutputMute() {
+    if (systemOutputBusy || !systemOutput?.supported || !systemOutput.muteSupported) return;
+    if (preview) {
+      systemOutput = { ...systemOutput, muted: !systemOutput.muted };
+      return;
+    }
+    systemOutputBusy = true;
+    onError("");
+    try {
+      systemOutput = await invoke<SystemOutputStatus>("set_system_output_muted", {
+        muted: !systemOutput.muted
+      });
+    } catch (error) {
+      onError(errorText(error));
+      await refreshSystemOutput().catch(() => undefined);
+    } finally {
+      systemOutputBusy = false;
+    }
+  }
+
+  function replaceApplication(updated: ApplicationOutput) {
+    if (!applicationOutput) return;
+    applicationOutput = {
+      ...applicationOutput,
+      applications: applicationOutput.applications.map((application) =>
+        application.id === updated.id ? updated : application
+      )
+    };
+  }
+
+  async function refreshApplicationOutput() {
+    const updated = await invoke<ApplicationOutputStatus>("get_application_output_status");
+    if (!applicationOutput) {
+      applicationOutput = updated;
+      return;
+    }
+    applicationOutput = {
+      ...updated,
+      applications: updated.applications.map((application) => {
+        const displayed = applicationOutput?.applications.find((item) => item.id === application.id);
+        return {
+          ...application,
+          volume: displayed && (applicationVolumeBusy.has(application.id) || pendingApplicationVolumes.has(application.id))
+            ? displayed.volume
+            : application.volume,
+          muted: displayed && applicationMuteBusy.includes(application.id) ? displayed.muted : application.muted
+        };
+      })
+    };
+  }
+
+  function toggleOutputMixer() {
+    outputMixerExpanded = !outputMixerExpanded;
+    if (outputMixerExpanded && !preview && capabilities?.platform === "windows") {
+      void refreshApplicationOutput().catch((error) => onError(errorText(error)));
+    }
+  }
+
+  function applicationIconDataUrl(icon: ApplicationOutputIcon): string {
+    if (icon.width === 0 || icon.height === 0 || icon.pixels.length !== icon.width * icon.height * 4) {
+      throw new Error("アプリアイコンの画像データが正しくありません。");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = icon.width;
+    canvas.height = icon.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("アプリアイコンを描画できません。");
+    context.putImageData(
+      new ImageData(new Uint8ClampedArray(icon.pixels), icon.width, icon.height),
+      0,
+      0
+    );
+    return canvas.toDataURL("image/png");
+  }
+
+  async function loadApplicationIcon(applicationId: string) {
+    if (applicationId in applicationIcons || pendingApplicationIcons.has(applicationId)) return;
+    pendingApplicationIcons.add(applicationId);
+    try {
+      const icon = await invoke<ApplicationOutputIcon | null>("get_application_output_icon", {
+        applicationId
+      });
+      applicationIcons = {
+        ...applicationIcons,
+        [applicationId]: icon ? applicationIconDataUrl(icon) : null
+      };
+    } catch {
+      applicationIcons = { ...applicationIcons, [applicationId]: null };
+    } finally {
+      pendingApplicationIcons.delete(applicationId);
+    }
+  }
+
+  async function applyApplicationVolume(applicationId: string, volume: number) {
+    if (applicationVolumeBusy.has(applicationId)) {
+      pendingApplicationVolumes.set(applicationId, volume);
+      return;
+    }
+    if (preview) return;
+    applicationVolumeBusy.add(applicationId);
+    try {
+      const updated = await invoke<ApplicationOutput>("set_application_output_volume", {
+        applicationId,
+        volume
+      });
+      if (!pendingApplicationVolumes.has(applicationId)) {
+        const displayed = applicationOutput?.applications.find((item) => item.id === applicationId);
+        replaceApplication({
+          ...updated,
+          muted: displayed && applicationMuteBusy.includes(applicationId) ? displayed.muted : updated.muted
+        });
+      }
+    } catch (error) {
+      onError(errorText(error));
+      await refreshApplicationOutput().catch(() => undefined);
+    } finally {
+      applicationVolumeBusy.delete(applicationId);
+      const pending = pendingApplicationVolumes.get(applicationId);
+      if (pending !== undefined) {
+        pendingApplicationVolumes.delete(applicationId);
+        await applyApplicationVolume(applicationId, pending);
+      }
+    }
+  }
+
+  function scheduleApplicationVolume(applicationId: string, value: string) {
+    if (!applicationOutput?.supported) return;
+    const volume = Math.max(0, Math.min(100, Number(value)));
+    const application = applicationOutput.applications.find((item) => item.id === applicationId);
+    if (!application) return;
+    replaceApplication({ ...application, volume });
+    void applyApplicationVolume(applicationId, volume);
+  }
+
+  async function toggleApplicationMute(application: ApplicationOutput) {
+    if (applicationMuteBusy.includes(application.id)) return;
+    if (preview) {
+      replaceApplication({ ...application, muted: !application.muted });
+      return;
+    }
+    applicationMuteBusy = [...applicationMuteBusy, application.id];
+    onError("");
+    try {
+      const updated = await invoke<ApplicationOutput>("set_application_output_muted", {
+        applicationId: application.id,
+        muted: !application.muted
+      });
+      const displayed = applicationOutput?.applications.find((item) => item.id === application.id);
+      replaceApplication({
+        ...updated,
+        volume: displayed && (applicationVolumeBusy.has(application.id) || pendingApplicationVolumes.has(application.id))
+          ? displayed.volume
+          : updated.volume
+      });
+    } catch (error) {
+      onError(errorText(error));
+      await refreshApplicationOutput().catch(() => undefined);
+    } finally {
+      applicationMuteBusy = applicationMuteBusy.filter((id) => id !== application.id);
+    }
+  }
+
   async function acceptStatus(nextStatus: RecordingStatus, deliverCompletion = true) {
     status = nextStatus;
     if (deliverCompletion) await deliverCompletedRecording(nextStatus);
@@ -326,6 +588,13 @@
         systemDeviceId = nextCapabilities.systemDevices.find((device) => device.isDefault)?.id ?? "";
         vadPreset = nextVadPreset;
         vadModel = nextVadModel;
+        if (nextCapabilities.platform === "windows" || nextCapabilities.platform === "macos") {
+          await Promise.all([
+            refreshMicrophoneMute(),
+            refreshSystemOutput(),
+            ...(nextCapabilities.platform === "windows" ? [refreshApplicationOutput()] : [])
+          ]).catch((error) => onError(errorText(error)));
+        }
         // 画面の再表示時に残っている前回のcompleted状態は、新しい録音完了ではない。
         // 初回同期では表示状態だけを復元し、通知と音声の再引き渡しを行わない。
         if (nextStatus.phase === "completed" && nextStatus.outputPath) {
@@ -343,6 +612,27 @@
       statusEventsAvailable = false;
       unlisten?.();
     };
+  });
+
+  $effect(() => {
+    if (preview || (capabilities?.platform !== "windows" && capabilities?.platform !== "macos")) return;
+    const timer = window.setInterval(() => {
+      void refreshMicrophoneMute().catch(() => undefined);
+      if (!systemOutputBusy && pendingSystemVolume === null) {
+        void refreshSystemOutput().catch(() => undefined);
+      }
+      if (outputMixerExpanded && capabilities?.platform === "windows" && applicationVolumeBusy.size === 0 && applicationMuteBusy.length === 0) {
+        void refreshApplicationOutput().catch(() => undefined);
+      }
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  });
+
+  $effect(() => {
+    if (preview || !outputMixerExpanded || capabilities?.platform !== "windows" || !applicationOutput?.supported) return;
+    for (const application of applicationOutput.applications) {
+      void loadApplicationIcon(application.id);
+    }
   });
 
   $effect(() => {
@@ -552,11 +842,27 @@
         <strong>{formatTimer(status?.elapsedMs ?? 0)}</strong>
       {/if}
     </div>
+    {#if capabilities.platform === "windows" || capabilities.platform === "macos"}
+      <button
+        class:muted={microphoneMute?.muted}
+        class="desktop-microphone-mute"
+        type="button"
+        onclick={toggleMicrophoneMute}
+        disabled={disabled || microphoneMuteBusy || !microphoneMute?.supported}
+        aria-pressed={microphoneMute?.muted ?? false}
+        title={microphoneMute?.supported
+          ? microphoneMute.muted ? "OSの既定マイクのミュートを解除" : "OSの既定マイクをミュート"
+          : microphoneMute?.limitation ?? "マイクのミュート状態を確認中"}
+      >
+        {#if microphoneMute?.muted}<MicOff aria-hidden="true" />{:else}<Mic aria-hidden="true" />{/if}
+        <span>{microphoneMuteBusy ? "変更中…" : microphoneMute?.muted ? "ミュート解除" : "マイクをミュート"}</span>
+      </button>
+    {/if}
     <div class="waveform-stage">
       <AudioLevelWaveform
         microphoneLevel={microphoneInputLevel}
         systemLevel={status?.systemLevel ?? 0}
-        microphoneEnabled={microphone}
+        microphoneEnabled={microphoneSignalEnabled}
         systemEnabled={systemAudio}
         elapsedMs={status?.elapsedMs ?? 0}
         {microphoneSpectrum}
@@ -589,6 +895,113 @@
       {status?.voiceActivity === "speechDetected" ? "音声を検出中" : "録音中"}
     </span>
   </div>
+  {/if}
+
+  {#if capabilities.platform === "windows" || capabilities.platform === "macos"}
+    <section class:expanded={outputMixerExpanded} class="desktop-output-mixer" aria-label="出力音量">
+      <button
+        class="output-mixer-summary"
+        type="button"
+        onclick={toggleOutputMixer}
+        aria-expanded={outputMixerExpanded}
+        aria-controls="desktop-output-mixer-content"
+      >
+        <span class="output-mixer-summary-title"><Volume2 aria-hidden="true" /><strong>出力音量</strong></span>
+        <span class="output-mixer-summary-state">
+          <small>
+            {systemOutput?.muted ? "ミュート中" : `${systemOutput?.volume ?? 0}%`}
+            {#if capabilities.platform === "windows"} · {applicationOutput?.applications.length ?? 0}個のアプリ{/if}
+          </small>
+          <ChevronDown class={outputMixerExpanded ? "expanded" : ""} aria-hidden="true" />
+        </span>
+      </button>
+      {#if outputMixerExpanded}
+        <div id="desktop-output-mixer-content" class="output-mixer-content">
+          <div class:muted={systemOutput?.muted} class="desktop-system-output" aria-label="システム音量">
+            <span class="system-output-label"><Volume2 aria-hidden="true" />システム音量</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={systemOutput?.volume ?? 0}
+              oninput={(event) => scheduleSystemVolume(event.currentTarget.value)}
+              disabled={disabled || !systemOutput?.supported}
+              aria-label="OSのシステム音量"
+              aria-valuetext={`${systemOutput?.volume ?? 0}%`}
+              title={systemOutput?.limitation ?? "OSの既定出力の音量"}
+            />
+            <output>{systemOutput?.volume ?? 0}%</output>
+            <button
+              type="button"
+              onclick={toggleSystemOutputMute}
+              disabled={disabled || systemOutputBusy || !systemOutput?.supported || !systemOutput.muteSupported}
+              aria-pressed={systemOutput?.muted ?? false}
+              aria-label={systemOutput?.muted ? "システム音声のミュートを解除" : "システム音声をミュート"}
+              title={systemOutput?.muteSupported
+                ? systemOutput.muted ? "システム音声のミュートを解除" : "システム音声をミュート"
+                : systemOutput?.limitation ?? "ミュート状態を確認中"}
+            >
+              {#if systemOutput?.muted}<VolumeX aria-hidden="true" />{:else}<Volume2 aria-hidden="true" />{/if}
+            </button>
+          </div>
+
+          {#if capabilities.platform === "windows"}
+            <section class="application-output-mixer" aria-label="アプリごとの音量">
+              <header>
+                <span class="application-output-title"><MonitorSpeaker aria-hidden="true" />アプリごとの音量</span>
+                <small>{applicationOutput?.applications.length ?? 0}個のアプリ</small>
+              </header>
+              {#if applicationOutput?.applications.length}
+                <div class="application-output-list">
+                  {#each applicationOutput.applications as application (application.id)}
+                    <div class:muted={application.muted} class="application-output-row">
+                      <span class="application-identity">
+                        {#if applicationIcons[application.id]}
+                          <img src={applicationIcons[application.id] ?? ""} alt="" aria-hidden="true" />
+                        {:else}
+                          <span class="application-icon-fallback" aria-hidden="true"><MonitorSpeaker /></span>
+                        {/if}
+                        <span class="application-name" title={application.name}>
+                          {application.name}
+                          {#if application.sessionCount > 1}<small>{application.sessionCount}</small>{/if}
+                        </span>
+                      </span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={application.volume}
+                        oninput={(event) => scheduleApplicationVolume(application.id, event.currentTarget.value)}
+                        disabled={disabled || !applicationOutput.supported}
+                        aria-label={`${application.name}の音量`}
+                        aria-valuetext={`${application.volume}%`}
+                      />
+                      <output>{application.volume}%</output>
+                      <button
+                        type="button"
+                        onclick={() => toggleApplicationMute(application)}
+                        disabled={disabled || !applicationOutput.supported || applicationMuteBusy.includes(application.id)}
+                        aria-pressed={application.muted}
+                        aria-label={application.muted ? `${application.name}のミュートを解除` : `${application.name}をミュート`}
+                        title={application.muted ? "ミュートを解除" : "ミュート"}
+                      >
+                        {#if application.muted}<VolumeX aria-hidden="true" />{:else}<Volume2 aria-hidden="true" />{/if}
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="application-output-empty">
+                  {applicationOutput?.limitation ?? "音声を再生中のアプリはありません。"}
+                </p>
+              {/if}
+            </section>
+          {/if}
+        </div>
+      {/if}
+    </section>
   {/if}
 
   <Popover bind:open={settingsPopoverOpen}>
@@ -636,7 +1049,7 @@
         </Select>
       {/if}
       <div
-        class:live={metering && microphone}
+        class:live={metering && microphoneSignalEnabled}
         class="meter microphone-meter"
         role="meter"
         aria-label="マイク入力レベル"
@@ -780,12 +1193,18 @@
   .recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .recovery-row div { display: flex; gap: 7px; }
   .recording-console { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.72fr); align-items: stretch; }
-  .desktop-recording-hero { grid-column: 1 / -1; min-width: 0; padding: 10px 24px 12px; }
+  .desktop-recording-hero { position: relative; grid-column: 1 / -1; min-width: 0; padding: 10px 24px 12px; }
   .recording-console.active .desktop-recording-hero { padding: 16px 24px 21px; }
   .desktop-recording-status { display: flex; min-height: 0; align-items: center; justify-content: center; gap: 9px; color: var(--muted-foreground); font-size: 0.8rem; font-weight: 680; }
   .desktop-recording-status.active { color: var(--foreground); }
   .desktop-recording-status.active { min-height: 24px; }
   .desktop-recording-status strong { margin-left: 3px; font-size: 0.83rem; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+  .desktop-microphone-mute { display: flex; position: absolute; z-index: 2; top: 7px; right: 24px; min-height: 34px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); background: color-mix(in oklch, var(--card) 88%, transparent); cursor: pointer; font: inherit; font-size: 0.7rem; font-weight: 700; }
+  .desktop-microphone-mute:hover:not(:disabled) { color: var(--foreground); background: var(--muted); }
+  .desktop-microphone-mute.muted { border-color: color-mix(in oklch, var(--destructive) 44%, var(--border)); color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, var(--card)); }
+  .desktop-microphone-mute:disabled { cursor: not-allowed; opacity: 0.52; }
+  .desktop-microphone-mute:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .desktop-microphone-mute :global(svg) { width: 16px; height: 16px; }
   .waveform-stage { position: relative; min-height: 94px; margin-top: 2px; padding: 8px 0 14px; }
   .recording-console.active .waveform-stage { min-height: 119px; padding: 13px 0 22px; }
   .desktop-record-controls { position: absolute; z-index: 1; top: 2px; left: 50%; display: flex; width: 142px; align-items: center; flex-direction: column; gap: 7px; transform: translateX(-50%); color: var(--foreground); font-size: 0.78rem; font-weight: 720; }
@@ -831,6 +1250,58 @@
   .desktop-start:disabled { cursor: not-allowed; opacity: 0.52; }
   .desktop-start :global(svg) { width: 31px; height: 31px; stroke-width: 2; }
   .desktop-start.active :global(svg) { width: 23px; height: 23px; fill: currentColor; }
+  .desktop-output-mixer { display: grid; grid-column: 1 / -1; gap: 8px; margin: 0 0 8px; }
+  .output-mixer-summary { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 14px; border: 1px solid color-mix(in oklch, var(--border) 82%, transparent); border-radius: var(--radius-control); color: var(--foreground); background: color-mix(in oklch, var(--card) 82%, transparent); cursor: pointer; }
+  .output-mixer-summary:hover { border-color: color-mix(in oklch, var(--audio-system) 32%, var(--border)); background: color-mix(in oklch, var(--audio-system) 5%, var(--card)); }
+  .output-mixer-summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .output-mixer-summary-title,
+  .output-mixer-summary-state { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .output-mixer-summary-title strong { font-size: 0.78rem; font-weight: 720; }
+  .output-mixer-summary-title :global(svg) { width: 18px; height: 18px; flex: none; color: var(--audio-system); }
+  .output-mixer-summary-state { color: var(--muted-foreground); }
+  .output-mixer-summary-state small { overflow: hidden; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
+  .output-mixer-summary-state :global(svg) { width: 17px; height: 17px; flex: none; transition: transform 160ms ease; }
+  .output-mixer-summary-state :global(svg.expanded) { transform: rotate(180deg); }
+  .output-mixer-content { display: grid; gap: 8px; }
+  .desktop-system-output { display: grid; grid-template-columns: auto minmax(120px, 1fr) 42px 34px; align-items: center; gap: 10px; margin: 0; padding: 9px 14px; border: 1px solid color-mix(in oklch, var(--border) 82%, transparent); border-radius: var(--radius-control); color: var(--foreground); background: color-mix(in oklch, var(--card) 82%, transparent); }
+  .desktop-system-output.muted { border-color: color-mix(in oklch, var(--destructive) 30%, var(--border)); }
+  .system-output-label { display: flex; min-width: 116px; align-items: center; gap: 8px; font-size: 0.76rem; font-weight: 720; white-space: nowrap; }
+  .system-output-label :global(svg) { width: 17px; height: 17px; color: var(--audio-system); }
+  .desktop-system-output input[type="range"] { width: 100%; min-width: 0; accent-color: var(--audio-system); cursor: pointer; }
+  .desktop-system-output input[type="range"]:disabled { cursor: not-allowed; opacity: 0.5; }
+  .desktop-system-output output { color: var(--muted-foreground); font-size: 0.72rem; font-variant-numeric: tabular-nums; text-align: right; }
+  .desktop-system-output > button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 8px; color: var(--muted-foreground); background: var(--background); cursor: pointer; }
+  .desktop-system-output > button:hover:not(:disabled) { color: var(--foreground); background: var(--muted); }
+  .desktop-system-output.muted > button { border-color: color-mix(in oklch, var(--destructive) 44%, var(--border)); color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, var(--background)); }
+  .desktop-system-output > button:disabled { cursor: not-allowed; opacity: 0.48; }
+  .desktop-system-output > button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .desktop-system-output > button :global(svg) { width: 17px; height: 17px; }
+  .application-output-mixer { display: grid; gap: 8px; margin: 0; padding: 10px 14px 12px; border: 1px solid color-mix(in oklch, var(--border) 82%, transparent); border-radius: var(--radius-control); color: var(--foreground); background: color-mix(in oklch, var(--card) 82%, transparent); }
+  .application-output-mixer > header { display: flex; min-height: 24px; align-items: center; justify-content: space-between; gap: 12px; }
+  .application-output-title { display: flex; align-items: center; gap: 8px; font-size: 0.76rem; font-weight: 720; }
+  .application-output-title :global(svg) { width: 17px; height: 17px; color: var(--audio-system); }
+  .application-output-mixer > header > small,
+  .application-output-empty { color: var(--muted-foreground); font-size: 0.68rem; }
+  .application-output-list { display: grid; max-height: 208px; gap: 3px; overflow-y: auto; }
+  .application-output-row { display: grid; grid-template-columns: minmax(116px, 0.65fr) minmax(120px, 1fr) 42px 34px; align-items: center; gap: 10px; min-height: 38px; padding: 2px 0; }
+  .application-output-row.muted { color: var(--muted-foreground); }
+  .application-identity { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .application-identity > img,
+  .application-icon-fallback { display: grid; width: 24px; height: 24px; place-items: center; flex: none; object-fit: contain; }
+  .application-icon-fallback { border-radius: 6px; color: var(--muted-foreground); background: var(--muted); }
+  .application-icon-fallback :global(svg) { width: 14px; height: 14px; }
+  .application-name { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; font-size: 0.73rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .application-name > small { display: inline-grid; min-width: 18px; height: 18px; place-items: center; flex: none; padding: 0 4px; border-radius: 999px; color: var(--muted-foreground); background: var(--muted); font-size: 0.6rem; }
+  .application-output-row input[type="range"] { width: 100%; min-width: 0; accent-color: var(--audio-system); cursor: pointer; }
+  .application-output-row input[type="range"]:disabled { cursor: not-allowed; opacity: 0.5; }
+  .application-output-row output { color: var(--muted-foreground); font-size: 0.72rem; font-variant-numeric: tabular-nums; text-align: right; }
+  .application-output-row > button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 8px; color: var(--muted-foreground); background: var(--background); cursor: pointer; }
+  .application-output-row > button:hover:not(:disabled) { color: var(--foreground); background: var(--muted); }
+  .application-output-row.muted > button { border-color: color-mix(in oklch, var(--destructive) 44%, var(--border)); color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, var(--background)); }
+  .application-output-row > button:disabled { cursor: not-allowed; opacity: 0.48; }
+  .application-output-row > button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .application-output-row > button :global(svg) { width: 17px; height: 17px; }
+  .application-output-empty { margin: 2px 0 0; padding: 8px 0; }
   .mobile-recorder,
   .mobile-record-toggle,
   .mobile-discard-button { display: none; }
@@ -838,6 +1309,7 @@
     .limitation { display: none; }
     .recording-console { --settings-motion: 300ms cubic-bezier(0.22, 1, 0.36, 1); display: block; }
     .desktop-recording-hero { display: none; }
+    .desktop-output-mixer { display: none; }
     .recording-settings-summary { min-height: 48px; padding: 9px 14px; }
     .settings-summary-copy { display: grid; gap: 2px; }
     .recording-settings-summary strong { font-size: 0.82rem; }

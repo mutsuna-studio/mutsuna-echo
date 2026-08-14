@@ -63,6 +63,50 @@ pub struct AudioDevice {
     pub is_default: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrophoneMuteStatus {
+    pub supported: bool,
+    pub muted: bool,
+    pub limitation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemOutputStatus {
+    pub supported: bool,
+    pub volume: u8,
+    pub muted: bool,
+    pub mute_supported: bool,
+    pub limitation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationOutput {
+    pub id: String,
+    pub name: String,
+    pub volume: u8,
+    pub muted: bool,
+    pub session_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationOutputStatus {
+    pub supported: bool,
+    pub applications: Vec<ApplicationOutput>,
+    pub limitation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationOutputIcon {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingCapabilities {

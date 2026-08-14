@@ -10,6 +10,40 @@ export interface AudioDevice {
   isDefault: boolean;
 }
 
+export interface MicrophoneMuteStatus {
+  supported: boolean;
+  muted: boolean;
+  limitation: string | null;
+}
+
+export interface SystemOutputStatus {
+  supported: boolean;
+  volume: number;
+  muted: boolean;
+  muteSupported: boolean;
+  limitation: string | null;
+}
+
+export interface ApplicationOutput {
+  id: string;
+  name: string;
+  volume: number;
+  muted: boolean;
+  sessionCount: number;
+}
+
+export interface ApplicationOutputStatus {
+  supported: boolean;
+  applications: ApplicationOutput[];
+  limitation: string | null;
+}
+
+export interface ApplicationOutputIcon {
+  width: number;
+  height: number;
+  pixels: number[];
+}
+
 export interface RecordingCapabilities {
   platform: "windows" | "macos" | "android" | "unsupported";
   supported: boolean;

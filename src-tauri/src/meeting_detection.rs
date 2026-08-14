@@ -367,7 +367,7 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Ok(());
     }
 
-    let width = 320.0;
+    let width = 360.0;
     let height = 60.0;
     // メイン画面の設定を複製すると、開発時はdevUrl、本番時はfrontendDistが
     // Tauriによって同じように解決される。
@@ -385,7 +385,8 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     config.height = height;
     config.min_width = Some(88.0);
     config.min_height = Some(48.0);
-    // The recording controller switches between 380 x 64 and 88 x 48.
+    // The overlay switches between the 360 x 60 prompt, 380 x 64 controller,
+    // and 124 x 48 minimized controller.
     config.max_width = Some(380.0);
     config.max_height = Some(64.0);
     config.resizable = false;
@@ -678,11 +679,11 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(debug_assertions)]
-    use super::{OverlayPreviewMode, ProcessingPreviewMode};
     use super::{
         classify_window, DetectionTracker, MeetingCandidate, MeetingDetectionState, MeetingProvider,
     };
+    #[cfg(debug_assertions)]
+    use super::{OverlayPreviewMode, ProcessingPreviewMode};
 
     #[test]
     fn recognizes_supported_meeting_titles_but_not_landing_pages() {

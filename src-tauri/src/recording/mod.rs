@@ -1,13 +1,16 @@
 #[cfg(any(target_os = "android", test))]
 #[allow(dead_code)]
 pub mod android;
+pub mod application_output;
 mod desktop;
 mod manifest;
+pub mod microphone_mute;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod mixer;
 mod platform;
 mod service;
 mod session;
+pub mod system_output;
 pub mod types;
 
 use std::sync::{Arc, Mutex};

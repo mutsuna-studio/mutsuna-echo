@@ -10,8 +10,9 @@ use crate::{
     recording::{
         self,
         types::{
-            RecordedAudioSummary, RecordingCapabilities, RecordingStatus, RecoverableRecording,
-            StartRecordingRequest,
+            ApplicationOutput, ApplicationOutputIcon, ApplicationOutputStatus,
+            MicrophoneMuteStatus, RecordedAudioSummary, RecordingCapabilities, RecordingStatus,
+            RecoverableRecording, StartRecordingRequest, SystemOutputStatus,
         },
         RecordingService,
     },
@@ -56,6 +57,59 @@ pub(crate) enum MeetingDeletionMode {
 #[tauri::command]
 pub(crate) fn get_recording_capabilities() -> Result<RecordingCapabilities, String> {
     recording::capabilities()
+}
+
+#[tauri::command]
+pub(crate) fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus, String> {
+    recording::microphone_mute::status()
+}
+
+#[tauri::command]
+pub(crate) fn set_microphone_muted(muted: bool) -> Result<MicrophoneMuteStatus, String> {
+    recording::microphone_mute::set_muted(muted)
+}
+
+#[tauri::command]
+pub(crate) fn get_system_output_status() -> Result<SystemOutputStatus, String> {
+    recording::system_output::status()
+}
+
+#[tauri::command]
+pub(crate) fn set_system_output_volume(volume: u8) -> Result<SystemOutputStatus, String> {
+    recording::system_output::set_volume(volume)
+}
+
+#[tauri::command]
+pub(crate) fn set_system_output_muted(muted: bool) -> Result<SystemOutputStatus, String> {
+    recording::system_output::set_muted(muted)
+}
+
+#[tauri::command]
+pub(crate) fn get_application_output_status() -> Result<ApplicationOutputStatus, String> {
+    recording::application_output::status()
+}
+
+#[tauri::command]
+pub(crate) fn get_application_output_icon(
+    application_id: String,
+) -> Result<Option<ApplicationOutputIcon>, String> {
+    recording::application_output::icon(&application_id)
+}
+
+#[tauri::command]
+pub(crate) fn set_application_output_volume(
+    application_id: String,
+    volume: u8,
+) -> Result<ApplicationOutput, String> {
+    recording::application_output::set_volume(&application_id, volume)
+}
+
+#[tauri::command]
+pub(crate) fn set_application_output_muted(
+    application_id: String,
+    muted: bool,
+) -> Result<ApplicationOutput, String> {
+    recording::application_output::set_muted(&application_id, muted)
 }
 
 #[tauri::command]
