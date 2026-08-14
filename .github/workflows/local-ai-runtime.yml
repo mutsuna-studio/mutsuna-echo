@@ -177,6 +177,7 @@ jobs:
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
           for pack in "$RUNNER_TEMP"/runtime-distribution/*.zip; do
             pnpm tauri signer sign "$pack"
+            node -e "const fs=require('fs');const path=process.argv[1];const decoded=Buffer.from(fs.readFileSync(path,'utf8').trim(),'base64');if(!decoded.toString('utf8').startsWith('untrusted comment:'))throw new Error('invalid Tauri signature');fs.writeFileSync(path,decoded)" "$pack.sig"
             test -s "$pack.sig"
           done
       - name: Publish dedicated release

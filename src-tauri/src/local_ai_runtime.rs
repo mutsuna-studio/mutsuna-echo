@@ -1,4 +1,6 @@
 #[cfg(not(target_os = "android"))]
+use base64::Engine;
+#[cfg(not(target_os = "android"))]
 use futures_util::StreamExt;
 #[cfg(not(target_os = "android"))]
 use minisign_verify::{PublicKey, Signature};
@@ -421,9 +423,28 @@ async fn download_limited(
 
 #[cfg(not(target_os = "android"))]
 fn verify_signature(archive: &[u8], encoded_signature: &[u8]) -> Result<(), String> {
-    let signature =
+    verify_signature_with_key(archive, encoded_signature, MINISIGN_PUBLIC_KEY)
+}
+
+#[cfg(not(target_os = "android"))]
+fn verify_signature_with_key(
+    archive: &[u8],
+    encoded_signature: &[u8],
+    public_key: &str,
+) -> Result<(), String> {
+    let encoded_signature =
         std::str::from_utf8(encoded_signature).map_err(|_| "実行環境の署名が不正です。")?;
-    let public_key = PublicKey::from_base64(MINISIGN_PUBLIC_KEY)
+    let encoded_signature = encoded_signature.trim();
+    let decoded_signature;
+    let signature = if encoded_signature.starts_with("untrusted comment:") {
+        encoded_signature
+    } else {
+        decoded_signature = base64::engine::general_purpose::STANDARD
+            .decode(encoded_signature)
+            .map_err(|_| "実行環境の署名が不正です。")?;
+        std::str::from_utf8(&decoded_signature).map_err(|_| "実行環境の署名が不正です。")?
+    };
+    let public_key = PublicKey::from_base64(public_key)
         .map_err(|error| format!("署名鍵を読み込めませんでした: {error}"))?;
     let signature = Signature::decode(signature)
         .map_err(|error| format!("実行環境の署名を読み込めませんでした: {error}"))?;
@@ -721,5 +742,30 @@ mod tests {
         assert!(Path::new("../escape.dll")
             .components()
             .any(|part| !matches!(part, Component::Normal(_))));
+    }
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn tauri_wrapped_signature_verifies_and_rejects_modified_data() {
+        const SYNTHETIC_PUBLIC_KEY: &str =
+            "RWS4wIwS2O/1uigdO6t/J4PrJlwlweHZmq+j0o6CytMVGK2lixMeR1Yw";
+        const EMPTY_ARCHIVE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTNHdJd1MyTy8xdXJaREJxVml6cjU5azlnaXplWXFDNzBTR00zUyswa1FSNWNVNTkvRjJ2d01MMlZSUk9UOFlyVi9TcmdYZ3VxREZJTVJsSWx4UkV1QWJVZ0NjcmtkYWdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2Njc3NDA0CWZpbGU6cnVudGltZS56aXAKTVNwNGw4emIzZ1pZUjNReXhtMGRRTTZab2IxVkNpcFlMbjNBK1B0Ulg1bVRhNm14YTBjTDB4Z2FDWmV1UW13VTZNMGdhd2FxNEdCUWs5ZHI0dmsxQmc9PQo=";
+
+        assert!(verify_signature_with_key(
+            b"",
+            EMPTY_ARCHIVE_SIGNATURE.as_bytes(),
+            SYNTHETIC_PUBLIC_KEY,
+        )
+        .is_ok());
+        assert!(verify_signature_with_key(
+            b"modified",
+            EMPTY_ARCHIVE_SIGNATURE.as_bytes(),
+            SYNTHETIC_PUBLIC_KEY,
+        )
+        .is_err());
+
+        let raw_signature = base64::engine::general_purpose::STANDARD
+            .decode(EMPTY_ARCHIVE_SIGNATURE)
+            .expect("synthetic signature should decode");
+        assert!(verify_signature_with_key(b"", &raw_signature, SYNTHETIC_PUBLIC_KEY).is_ok());
     }
 }
