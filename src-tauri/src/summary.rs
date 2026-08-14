@@ -1,12 +1,12 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicU32, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, LazyLock, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -39,6 +39,24 @@ const LEGACY_NODE_VERSIONS: &[&str] = &["22.23.2"];
 const MAX_NODE_ARCHIVE_BYTES: u64 = 100 * 1024 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+static INSTALLING_SUMMARY_AGENTS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static ACTIVE_MEETING_AI_JOBS: LazyLock<Mutex<HashMap<String, MeetingAiJobKind>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum MeetingAiJobKind {
+    Summary,
+    Formatting,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingAiJobStatus {
+    kind: MeetingAiJobKind,
+}
 
 #[derive(Clone, Copy)]
 struct AcpAgentDefinition {
@@ -101,6 +119,7 @@ pub(crate) struct SummaryAgentInstallStatus {
     version: String,
     installed: bool,
     external: bool,
+    installing: bool,
     installable: bool,
     status_message: String,
 }
@@ -354,10 +373,49 @@ pub(crate) async fn install_summary_agent(
     app: AppHandle,
     provider_id: String,
 ) -> Result<(), String> {
+    tauri::async_runtime::spawn(install_summary_agent_job(app, provider_id))
+        .await
+        .map_err(|error| {
+            format!("要約エージェントのバックグラウンド導入を完了できませんでした: {error}")
+        })?
+}
+
+async fn install_summary_agent_job(app: AppHandle, provider_id: String) -> Result<(), String> {
+    let _install_guard = SummaryAgentInstallGuard::begin(&provider_id)?;
     ensure_managed_node(&app).await?;
     tauri::async_runtime::spawn_blocking(move || install_agent(&app, &provider_id))
         .await
         .map_err(|_| "要約エージェントのインストール処理を完了できませんでした。".to_string())?
+}
+
+struct SummaryAgentInstallGuard {
+    provider_id: String,
+}
+
+impl SummaryAgentInstallGuard {
+    fn begin(provider_id: &str) -> Result<Self, String> {
+        if !ACP_AGENTS.iter().any(|agent| agent.id == provider_id) {
+            return Err("要約エージェントIDが不正です。".into());
+        }
+        let mut installing = INSTALLING_SUMMARY_AGENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !installing.insert(provider_id.to_string()) {
+            return Err("選択した要約エージェントはインストール中です。".into());
+        }
+        Ok(Self {
+            provider_id: provider_id.to_string(),
+        })
+    }
+}
+
+impl Drop for SummaryAgentInstallGuard {
+    fn drop(&mut self) {
+        INSTALLING_SUMMARY_AGENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.provider_id);
+    }
 }
 
 #[tauri::command]
@@ -376,6 +434,19 @@ pub(crate) fn get_selected_meeting_document(
     meeting_id: String,
 ) -> Result<Option<crate::meeting_schema::MeetingDocument>, String> {
     crate::meeting_schema::selected(&app, &meeting_id)
+}
+
+#[tauri::command]
+pub(crate) fn get_meeting_ai_job_status(
+    meeting_id: String,
+) -> Result<Option<MeetingAiJobStatus>, String> {
+    crate::meeting_store::validate_meeting_id(&meeting_id)?;
+    Ok(ACTIVE_MEETING_AI_JOBS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&meeting_id)
+        .copied()
+        .map(|kind| MeetingAiJobStatus { kind }))
 }
 
 #[tauri::command]
@@ -405,6 +476,18 @@ pub(crate) async fn revalidate_generation_attempt(
     app: AppHandle,
     request: RevalidateGenerationAttemptRequest,
 ) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    tauri::async_runtime::spawn(revalidate_generation_attempt_job(app, request))
+        .await
+        .map_err(|error| {
+            format!("会議ノート再検証のバックグラウンド処理を完了できませんでした: {error}")
+        })?
+}
+
+async fn revalidate_generation_attempt_job(
+    app: AppHandle,
+    request: RevalidateGenerationAttemptRequest,
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Summary)?;
     crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
     let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
         .ok_or_else(|| "再検証する文字起こしがありません。".to_string())?;
@@ -460,6 +543,18 @@ pub(crate) async fn generate_selected_meeting_document(
     app: AppHandle,
     request: GenerateSummaryRequest,
 ) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    tauri::async_runtime::spawn(generate_meeting_document_job(app, request))
+        .await
+        .map_err(|error| {
+            format!("会議ノート生成のバックグラウンド処理を完了できませんでした: {error}")
+        })?
+}
+
+async fn generate_meeting_document_job(
+    app: AppHandle,
+    request: GenerateSummaryRequest,
+) -> Result<crate::meeting_schema::MeetingDocument, String> {
+    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Summary)?;
     let _power_guard = crate::processing_power::acquire(&app, "会議ノートを生成中")?;
     generate(app, request).await
 }
@@ -469,8 +564,47 @@ pub(crate) async fn format_selected_transcript(
     app: AppHandle,
     request: FormatTranscriptRequest,
 ) -> Result<TranscriptFormattingResult, String> {
+    tauri::async_runtime::spawn(format_selected_transcript_job(app, request))
+        .await
+        .map_err(|error| format!("文章整形のバックグラウンド処理を完了できませんでした: {error}"))?
+}
+
+async fn format_selected_transcript_job(
+    app: AppHandle,
+    request: FormatTranscriptRequest,
+) -> Result<TranscriptFormattingResult, String> {
+    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Formatting)?;
     let _power_guard = crate::processing_power::acquire(&app, "文字起こしを整形中")?;
     format_transcript(app, request).await
+}
+
+struct MeetingAiJobGuard {
+    meeting_id: String,
+}
+
+impl MeetingAiJobGuard {
+    fn begin(meeting_id: &str, kind: MeetingAiJobKind) -> Result<Self, String> {
+        crate::meeting_store::validate_meeting_id(meeting_id)?;
+        let mut active = ACTIVE_MEETING_AI_JOBS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(meeting_id) {
+            return Err("この会議では要約または文章整形を実行中です。".into());
+        }
+        active.insert(meeting_id.to_string(), kind);
+        Ok(Self {
+            meeting_id: meeting_id.to_string(),
+        })
+    }
+}
+
+impl Drop for MeetingAiJobGuard {
+    fn drop(&mut self) {
+        ACTIVE_MEETING_AI_JOBS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.meeting_id);
+    }
 }
 
 pub(crate) async fn generate(
@@ -634,7 +768,7 @@ async fn format_transcript(
         );
     }
 
-    let changes = original
+    let changes: Vec<TranscriptFormattingChange> = original
         .segments
         .iter()
         .zip(&formatted.segments)
@@ -644,6 +778,25 @@ async fn format_transcript(
             text: after.text.clone(),
         })
         .collect();
+
+    if !changes.is_empty() {
+        crate::transcript_store::update_run_segments(
+            &app,
+            &request.meeting_id,
+            &original.transcription_id,
+            original.revision,
+            changes
+                .iter()
+                .map(|change| crate::transcript_store::TranscriptSegmentChange {
+                    segment_id: change.segment_id.clone(),
+                    text: change.text.clone(),
+                })
+                .collect(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let _ = crate::meeting_store::mark_updated(&app, &request.meeting_id);
+    }
 
     Ok(TranscriptFormattingResult {
         transcription_id: original.transcription_id,
@@ -2948,6 +3101,10 @@ fn extract_node_archive(
 
 fn install_statuses(app: &AppHandle) -> Vec<SummaryAgentInstallStatus> {
     let runtime_supported = node_distribution().is_some();
+    let installing = INSTALLING_SUMMARY_AGENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     ACP_AGENTS
         .iter()
         .map(|agent| {
@@ -2957,17 +3114,21 @@ fn install_statuses(app: &AppHandle) -> Vec<SummaryAgentInstallStatus> {
                     .map(PathBuf::from)
                     .is_some_and(|path| path.is_file())
                     || find_on_path(agent.executable).is_some());
+            let is_installing = installing.contains(agent.id);
             SummaryAgentInstallStatus {
                 id: agent.id.into(),
                 label: agent.label.into(),
                 version: agent.version.into(),
                 installed: managed || external,
                 external,
-                installable: runtime_supported,
+                installing: is_installing,
+                installable: runtime_supported && !is_installing,
                 status_message: if managed {
                     format!("Echo管理版 v{}", agent.version)
                 } else if external {
                     "システムにインストール済み".into()
+                } else if is_installing {
+                    "インストール中".into()
                 } else if runtime_supported {
                     "未インストール".into()
                 } else {
@@ -3213,6 +3374,29 @@ mod tests {
                 text: "修正版です".into(),
             }],
         }
+    }
+
+    #[test]
+    fn summary_agent_install_guard_rejects_duplicate_and_releases_provider() {
+        let first = SummaryAgentInstallGuard::begin("codex").expect("first install guard");
+        assert!(SummaryAgentInstallGuard::begin("codex").is_err());
+        drop(first);
+        assert!(SummaryAgentInstallGuard::begin("codex").is_ok());
+    }
+
+    #[test]
+    fn summary_agent_install_guard_rejects_unknown_provider() {
+        assert!(SummaryAgentInstallGuard::begin("unknown-provider").is_err());
+    }
+
+    #[test]
+    fn meeting_ai_job_guard_rejects_duplicate_and_releases_meeting() {
+        let meeting_id = uuid::Uuid::now_v7().to_string();
+        let first = MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Summary)
+            .expect("first meeting job guard");
+        assert!(MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Formatting).is_err());
+        drop(first);
+        assert!(MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Formatting).is_ok());
     }
 
     fn candidate(segment_id: &str) -> MeetingExtractionCandidate {

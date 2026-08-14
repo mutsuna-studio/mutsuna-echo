@@ -85,6 +85,7 @@
   const SUMMARY_MODEL_STORAGE_KEY = "mutsuna-echo.summary-model";
   const SUMMARY_PROVIDER_MODEL_DEFAULTS_STORAGE_KEY = "mutsuna-echo.summary-provider-model-defaults";
   const SONIOX_USAGE_STORAGE_KEY = "mutsuna-echo.soniox-usage";
+  const TRANSCRIPTION_ATTEMPT_STORAGE_KEY = "mutsuna-echo.transcription-attempt";
   const API_KEY_SAVE_TIMEOUT_MS = 30_000;
   const summarySettingsPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "summary-settings";
   const TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS: TranscriptionProviderDefinition[] = [
@@ -127,6 +128,36 @@
   type ContextDraft = { background: string; termsText: string; correctionsText: string };
   type MeetingContextDraft = ContextDraft & { useGlobal: boolean };
   type GeneratedNameProposal = { meetingId: string; title: string };
+  type PersistedTranscriptionAttempt = {
+    meetingId: string;
+    status: "running" | "failed";
+    message: string | null;
+    startedAt: string;
+  };
+
+  function savedTranscriptionAttempt(): PersistedTranscriptionAttempt | null {
+    try {
+      const value = JSON.parse(localStorage.getItem(TRANSCRIPTION_ATTEMPT_STORAGE_KEY) ?? "null");
+      return value
+        && typeof value.meetingId === "string"
+        && (value.status === "running" || value.status === "failed")
+        && (value.message === null || typeof value.message === "string")
+        && typeof value.startedAt === "string"
+        ? value as PersistedTranscriptionAttempt
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistTranscriptionAttempt(value: PersistedTranscriptionAttempt | null) {
+    try {
+      if (value) localStorage.setItem(TRANSCRIPTION_ATTEMPT_STORAGE_KEY, JSON.stringify(value));
+      else localStorage.removeItem(TRANSCRIPTION_ATTEMPT_STORAGE_KEY);
+    } catch {
+      // The in-memory error remains visible even if WebView storage is unavailable.
+    }
+  }
 
   function termsFromText(value: string): string[] {
     return [...new Set(value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean))];
@@ -205,6 +236,8 @@
   let deleting = $state(false);
   let selecting = $state(false);
   let transcribing = $state(false);
+  let transcriptionAttemptError = $state<string | null>(null);
+  let transcriptionAttemptMeetingId = $state<string | null>(null);
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let transcriptionSessionSyncing = false;
   const transcriptionStageOrder: Record<TranscriptionProgress["stage"], number> = {
@@ -275,6 +308,7 @@
   let generatedNameDialogOpen = $state(false);
   let generatedNameBusy = $state(false);
   let transcriptFormatting = $state(false);
+  let recoveredTranscriptFormatting = false;
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
   let transcript = $state.raw<EditableTranscript | null>(null);
   let transcriptionRuns = $state.raw<TranscriptionRunSummary[]>([]);
@@ -1323,12 +1357,20 @@
         meetings = nextMeetings;
         selectedAudio = session.selectedAudio;
         selectedMeetingId = session.selectedAudio?.meetingId ?? null;
+        const persistedAttempt = savedTranscriptionAttempt();
+        if (persistedAttempt && !(persistedAttempt.status === "running" && session.transcribing)) {
+          transcriptionAttemptMeetingId = persistedAttempt.meetingId;
+          transcriptionAttemptError = persistedAttempt.status === "failed"
+            ? persistedAttempt.message ?? "前回の文字起こしを完了できませんでした。"
+            : "前回の文字起こしは、アプリの終了または再起動によって中断されました。もう一度実行してください。";
+        }
         transcribing = session.transcribing;
         diarizing = session.diarizing;
         processingMeetingId = session.transcribing || session.diarizing
           ? session.selectedAudio?.meetingId ?? null
           : null;
         updateTranscriptionProgress(session.progress);
+        if (session.backgroundError) showError(session.backgroundError);
         diarizationModelStatus = await invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status");
         if (pendingResult.error) {
           pendingActionProblem = { action: null, message: pendingResult.error };
@@ -1363,10 +1405,13 @@
     try {
       const session = await invoke<TranscriptionSession>("get_transcription_session");
       const wasTranscribing = transcribing;
+      const wasDiarizing = diarizing;
+      const wasProcessing = wasTranscribing || wasDiarizing;
       updateTranscriptionProgress(session.progress);
-      diarizing = session.diarizing;
-      if (session.transcribing) {
-        transcribing = true;
+      if (session.backgroundError) showError(session.backgroundError);
+      if (session.transcribing || session.diarizing) {
+        transcribing = session.transcribing;
+        diarizing = session.diarizing;
         processingMeetingId = session.selectedAudio?.meetingId ?? processingMeetingId;
         return;
       }
@@ -1374,11 +1419,29 @@
       selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
       transcribing = false;
       diarizing = false;
-      if (wasTranscribing && !summaryGenerating && !transcriptFormatting) processingMeetingId = null;
+      if (wasProcessing && !summaryGenerating && !transcriptFormatting) processingMeetingId = null;
       transcriptionProgress = null;
       diarizationProgress = null;
-      if (wasTranscribing && selectedAudio) {
+      if (wasProcessing && selectedAudio) {
         await restoreTranscriptionHistory();
+        const persistedAttempt = wasTranscribing ? savedTranscriptionAttempt() : null;
+        if (persistedAttempt?.status === "running" && persistedAttempt.meetingId === selectedAudio.meetingId) {
+          const startedAt = Date.parse(persistedAttempt.startedAt);
+          const completedRun = transcriptionRuns.some((run) => {
+            const createdAt = Date.parse(run.createdAt);
+            return Number.isFinite(startedAt) && Number.isFinite(createdAt) && createdAt >= startedAt - 1_000;
+          });
+          if (completedRun) {
+            transcriptionAttemptError = null;
+            transcriptionAttemptMeetingId = null;
+            persistTranscriptionAttempt(null);
+          } else {
+            const message = "文字起こしのバックグラウンド処理を完了できず、履歴へ保存されませんでした。もう一度実行してください。";
+            transcriptionAttemptError = message;
+            transcriptionAttemptMeetingId = persistedAttempt.meetingId;
+            persistTranscriptionAttempt({ ...persistedAttempt, status: "failed", message });
+          }
+        }
         await refreshMeetings();
         await refreshUsage();
         if (hasCloudflareConnection) await refreshCloudflareUsage();
@@ -1577,6 +1640,16 @@
       return;
     }
     transcribing = true;
+    transcriptionAttemptError = null;
+    transcriptionAttemptMeetingId = transcriptionMeetingId;
+    if (transcriptionMeetingId) {
+      persistTranscriptionAttempt({
+        meetingId: transcriptionMeetingId,
+        status: "running",
+        message: null,
+        startedAt: new Date().toISOString()
+      });
+    }
     processingMeetingId = transcriptionMeetingId;
     const diarizationEnabled = diarizationSpeakerCount !== undefined && transcriptionProvider === "local";
     diarizing = diarizationEnabled;
@@ -1620,6 +1693,7 @@
               edited: false
             }))
           };
+          transcriptSaveState = "notSaved";
         }
       }
       if (result.transcript.segments.length > 0) {
@@ -1628,7 +1702,20 @@
         showWarningToast("文字起こしは完了しました。", "発話を検出できませんでした。");
       }
       if (result.persistenceWarning) {
+        transcriptionAttemptError = result.persistenceWarning;
+        if (transcriptionMeetingId) {
+          persistTranscriptionAttempt({
+            meetingId: transcriptionMeetingId,
+            status: "failed",
+            message: result.persistenceWarning,
+            startedAt: new Date().toISOString()
+          });
+        }
         showWarningToast("文字起こしを保存できませんでした。", result.persistenceWarning);
+      } else {
+        transcriptionAttemptError = null;
+        transcriptionAttemptMeetingId = null;
+        persistTranscriptionAttempt(null);
       }
       if (result.diarizationWarning) {
         showWarningToast("文字起こしは完了しました。", `話者分離のみ失敗しました: ${result.diarizationWarning}`);
@@ -1638,7 +1725,16 @@
       if (transcriptionProvider === "cloudflare") await refreshCloudflareUsage();
       section = "meetings";
     } catch (error) {
-      showError(errorText(error));
+      transcriptionAttemptError = errorText(error);
+      if (transcriptionMeetingId) {
+        persistTranscriptionAttempt({
+          meetingId: transcriptionMeetingId,
+          status: "failed",
+          message: transcriptionAttemptError,
+          startedAt: new Date().toISOString()
+        });
+      }
+      showError(transcriptionAttemptError);
     } finally {
       transcribing = false;
       diarizing = false;
@@ -1695,12 +1791,85 @@
           meetingId: selectedMeetingId
         })
       ]);
+      if (summaryAttempt?.status === "generating") {
+        summaryGenerating = true;
+        processingMeetingId = selectedMeetingId;
+      }
     } catch (error) {
       summaryStatus = null;
       summaryAttempt = null;
       showError(errorText(error));
     }
   }
+
+  $effect(() => {
+    const meetingId = selectedMeetingId;
+    const attemptId = summaryAttempt?.status === "generating" ? summaryAttempt.attemptId : null;
+    if (!meetingId || !attemptId) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", { meetingId })
+        .then(async (latestAttempt) => {
+          if (cancelled || latestAttempt?.attemptId !== attemptId) return;
+          summaryAttempt = latestAttempt;
+          if (latestAttempt.status === "generating") return;
+          summaryGenerating = false;
+          if (processingMeetingId === meetingId) processingMeetingId = null;
+          summaryProgress = null;
+          await refreshSummaryStatus();
+          if (latestAttempt.status === "failed") {
+            showError(latestAttempt.error ?? "会議ノートのバックグラウンド生成に失敗しました。");
+          } else {
+            await refreshGeneratedMeetingName(meetingId, summaryStatus);
+            showSuccessToast("会議ノートのバックグラウンド生成が完了しました。");
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) console.warn("Could not synchronize summary generation state", error);
+        });
+    }, 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  });
+
+  async function syncMeetingAiJobStatus(reportError = false) {
+    const meetingId = selectedMeetingId;
+    if (!meetingId) return;
+    try {
+      const status = await invoke<{ kind: "summary" | "formatting" } | null>("get_meeting_ai_job_status", { meetingId });
+      if (selectedMeetingId !== meetingId) return;
+      if (status?.kind === "formatting") {
+        if (!transcriptFormatting) recoveredTranscriptFormatting = true;
+        transcriptFormatting = true;
+        processingMeetingId = meetingId;
+        return;
+      }
+      if (recoveredTranscriptFormatting) {
+        recoveredTranscriptFormatting = false;
+        transcriptFormatting = false;
+        if (processingMeetingId === meetingId) processingMeetingId = null;
+        await restoreTranscriptionHistory();
+        showSuccessToast("文章整形のバックグラウンド処理が終了しました。結果を確認してください。");
+      }
+    } catch (error) {
+      if (reportError) showError(errorText(error));
+      else console.warn("Could not synchronize meeting AI job state", error);
+    }
+  }
+
+  $effect(() => {
+    if (summarySettingsPreview) return;
+    void syncMeetingAiJobStatus();
+    const timer = window.setInterval(() => void syncMeetingAiJobStatus(), 1_000);
+    const syncWhenFocused = () => void syncMeetingAiJobStatus(true);
+    window.addEventListener("focus", syncWhenFocused);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", syncWhenFocused);
+    };
+  });
 
   function changeSummaryProvider(value: string) {
     summaryProviderId = value;
@@ -2016,8 +2185,9 @@
           modelId: useLlm ? summaryModelId : null
         }
       });
-      if (selectedTranscriptionRun?.transcriptionId !== sourceTranscriptionId
-        || selectedTranscriptionRun.revision !== sourceRevision
+      const currentRun = selectedTranscriptionRun;
+      if (currentRun?.transcriptionId !== sourceTranscriptionId
+        || currentRun.revision !== sourceRevision
         || result.transcriptionId !== sourceTranscriptionId
         || result.sourceRevision !== sourceRevision) {
         showError("整形中に文字起こしが変更されました。内容を確認して、もう一度整形してください。");
@@ -2027,10 +2197,18 @@
         showSuccessToast("整形する箇所はありませんでした。");
       } else {
         const method = result.method === "mechanicalAndLlm" ? "機械整形とLLM校正" : "機械整形";
-        await replaceTranscriptSegments(
-          result.changes,
-          `${result.changes.length.toLocaleString("ja-JP")}件の発話を${method}しました。`
+        const currentSegments = new Map(
+          currentRun.transcript.segments.map((segment) => [segment.segmentId, segment.text])
         );
+        transcriptReplacementUndo = {
+          transcriptionId: sourceTranscriptionId,
+          changes: result.changes.flatMap((change) => {
+            const text = currentSegments.get(change.segmentId);
+            return text === undefined ? [] : [{ segmentId: change.segmentId, text }];
+          })
+        };
+        await restoreTranscriptionHistory();
+        showSuccessToast(`${result.changes.length.toLocaleString("ja-JP")}件の発話を${method}しました。`);
       }
       if (result.warning) showWarningToast("LLM校正を省略しました。", result.warning);
     } catch (error) {
@@ -2294,6 +2472,7 @@
           providers={transcriptionProviders}
           provider={transcriptionProvider}
           {transcribing}
+          transcriptionError={transcriptionAttemptMeetingId === selectedMeetingId ? transcriptionAttemptError : null}
           processingCurrentMeeting={processingMeetingId === selectedMeetingId}
           progress={transcriptionProgress}
           {canTranscribe}

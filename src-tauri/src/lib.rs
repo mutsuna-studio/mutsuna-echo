@@ -136,6 +136,7 @@ pub fn run() {
             summary::install_summary_agent,
             summary::delete_summary_agent,
             summary::get_selected_meeting_document,
+            summary::get_meeting_ai_job_status,
             summary::save_edited_meeting_document,
             summary::get_latest_generation_attempt,
             summary::generate_selected_meeting_document,

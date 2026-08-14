@@ -100,6 +100,14 @@ pub(crate) fn get_local_vad_model_status(app: AppHandle) -> Result<VadModelStatu
 
 #[tauri::command]
 pub(crate) async fn download_local_vad_model(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(download_local_vad_model_job(app))
+        .await
+        .map_err(|error| {
+            format!("VADモデルのバックグラウンド導入を完了できませんでした: {error}")
+        })?
+}
+
+async fn download_local_vad_model_job(app: AppHandle) -> Result<(), String> {
     if !cfg!(any(desktop, target_os = "android")) {
         return Err("このOS向けのVAD推論エンジンは準備中です。".into());
     }

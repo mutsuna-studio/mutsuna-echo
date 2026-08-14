@@ -26,6 +26,7 @@ pub(crate) struct AudioSelectionState {
     inference_active: AtomicBool,
     diarization_cancelled: AtomicBool,
     progress: Mutex<Option<TranscriptionProgress>>,
+    background_error: Mutex<Option<String>>,
 }
 
 const TRANSCRIPTION_PROGRESS_EVENT: &str = "transcription-progress";
@@ -59,6 +60,7 @@ pub(crate) struct TranscriptionSession {
     transcribing: bool,
     diarizing: bool,
     progress: Option<TranscriptionProgress>,
+    background_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -408,6 +410,11 @@ pub(crate) fn get_transcription_session(
             .lock()
             .map_err(|_| "文字起こし進捗を取得できませんでした。".to_string())?
             .clone(),
+        background_error: state
+            .background_error
+            .lock()
+            .map_err(|_| "バックグラウンド処理の結果を取得できませんでした。".to_string())?
+            .take(),
     })
 }
 
@@ -781,9 +788,27 @@ fn selected_file_path(selected: FilePath) -> Result<PathBuf, String> {
 #[tauri::command]
 pub(crate) async fn transcribe_selected_audio(
     app: AppHandle,
-    state: State<'_, AudioSelectionState>,
     request: TranscriptionRequest,
 ) -> Result<TranscriptionResult, String> {
+    // Keep the actual job independent from the WebView IPC request. A reload or
+    // dropped invoke must not detach an expensive blocking inference thread
+    // from the code that persists its result and clears the session state.
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        clear_background_error(&worker_app);
+        let result = run_transcription_job(worker_app.clone(), request).await;
+        record_background_error(&worker_app, &result);
+        result
+    })
+    .await
+    .map_err(|error| format!("文字起こしバックグラウンド処理を完了できませんでした: {error}"))?
+}
+
+async fn run_transcription_job(
+    app: AppHandle,
+    request: TranscriptionRequest,
+) -> Result<TranscriptionResult, String> {
+    let state = app.state::<AudioSelectionState>();
     let diarization_speaker_count = request
         .diarization
         .as_ref()
@@ -1014,9 +1039,24 @@ fn diarization_metadata(
 #[tauri::command]
 pub(crate) async fn diarize_selected_transcription(
     app: AppHandle,
-    state: State<'_, AudioSelectionState>,
     request: DiarizeTranscriptionRequest,
 ) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        clear_background_error(&worker_app);
+        let result = run_diarization_job(worker_app.clone(), request).await;
+        record_background_error(&worker_app, &result);
+        result
+    })
+    .await
+    .map_err(|error| format!("話者分離バックグラウンド処理を完了できませんでした: {error}"))?
+}
+
+async fn run_diarization_job(
+    app: AppHandle,
+    request: DiarizeTranscriptionRequest,
+) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    let state = app.state::<AudioSelectionState>();
     if request
         .speaker_count
         .is_some_and(|count| !(1..=10).contains(&count))
@@ -1102,6 +1142,25 @@ pub(crate) async fn diarize_selected_transcription(
         let _ = (app, request, selected);
         Err("この端末ではローカル話者分離を利用できません。".into())
     }
+}
+
+fn clear_background_error(app: &AppHandle) {
+    let state = app.state::<AudioSelectionState>();
+    *state
+        .background_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn record_background_error<T>(app: &AppHandle, result: &Result<T, String>) {
+    let Some(error) = result.as_ref().err() else {
+        return;
+    };
+    let state = app.state::<AudioSelectionState>();
+    *state
+        .background_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
 }
 
 #[tauri::command]

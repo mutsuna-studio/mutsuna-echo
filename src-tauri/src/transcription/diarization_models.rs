@@ -129,6 +129,14 @@ pub(crate) fn get_local_diarization_model_status(
 
 #[tauri::command]
 pub(crate) async fn download_local_diarization_models(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(download_local_diarization_models_job(app))
+        .await
+        .map_err(|error| {
+            format!("話者分離モデルのバックグラウンド導入を完了できませんでした: {error}")
+        })?
+}
+
+async fn download_local_diarization_models_job(app: AppHandle) -> Result<(), String> {
     if !cfg!(any(desktop, target_os = "android")) {
         return Err("このOS向けのローカル話者分離は準備中です。".into());
     }

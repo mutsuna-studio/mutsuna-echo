@@ -100,6 +100,7 @@
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
     transcribing: boolean;
+    transcriptionError: string | null;
     processingCurrentMeeting: boolean;
     progress: TranscriptionProgress | null;
     canTranscribe: boolean;
@@ -164,6 +165,7 @@
     providers,
     provider,
     transcribing,
+    transcriptionError,
     processingCurrentMeeting,
     progress,
     canTranscribe,
@@ -339,12 +341,17 @@
       localRecognitionModeWorking = false;
     }
   }
-  const selectedRunSummary = $derived(runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? runs[0] ?? null);
+  const selectedRunSummary = $derived(
+    selectedTranscriptionId
+      ? runs.find((run) => run.transcriptionId === selectedTranscriptionId) ?? null
+      : null
+  );
   const loadingRunSummary = $derived(runs.find((run) => run.transcriptionId === runLoadingId) ?? null);
   const selectedSummarySource = $derived(summarySourceState?.selection ?? null);
   const compactSaveStatus = $derived.by(() => {
     if (saveState === "saving") return "保存中…";
     if (saveState === "unsaved") return "未保存";
+    if (saveState === "notSaved") return "履歴に未保存";
     if (saveState === "error") return "保存エラー";
     return "保存済み";
   });
@@ -663,7 +670,7 @@
                 {:else}
                   {#if selectedRunSummary}<span>{selectedRunSummary.sequence}回目</span><span>{runModelLabel(selectedRunSummary)}</span>{/if}
                   {#if selectedRun?.edited}<span>編集済み</span>{/if}
-                  <span class:error={saveState === "error"} class:pending={saveState === "saving" || saveState === "unsaved"}>{compactSaveStatus}</span>
+                  <span class:error={saveState === "error" || saveState === "notSaved"} class:pending={saveState === "saving" || saveState === "unsaved"}>{compactSaveStatus}</span>
                 {/if}
               </div>
             </div>
@@ -699,6 +706,13 @@
               </span>
             </div>
           </section>
+
+          {#if transcriptionError}
+            <p class="transcription-attempt-error" role="alert">
+              <strong>直前の文字起こしを完了または保存できませんでした。</strong>
+              <span>{transcriptionError}</span>
+            </p>
+          {/if}
 
           <Dialog bind:open={retranscriptionDialogOpen}>
             <DialogContent class="retranscription-dialog">
@@ -911,6 +925,8 @@
   .meeting-workspace { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
 
   .transcription-overview { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0 10px; border-bottom: 1px solid var(--border); }
+  .transcription-attempt-error { display: grid; gap: 3px; margin: 10px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--border)); border-radius: var(--radius-md); color: var(--destructive); background: color-mix(in srgb, var(--destructive) 6%, transparent); }
+  .transcription-attempt-error span { font-size: 0.82rem; line-height: 1.45; overflow-wrap: anywhere; }
   .current-transcription { display: flex; min-width: 0; align-items: center; gap: 12px; }
   .current-transcription > strong { flex: none; font-size: 0.78rem; }
   .current-transcription-meta { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px; }

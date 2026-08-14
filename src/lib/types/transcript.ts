@@ -73,7 +73,7 @@ export type TranscriptionHistory = {
   selectedTranscriptionId: string | null;
 };
 
-export type TranscriptSaveState = "saved" | "unsaved" | "saving" | "error";
+export type TranscriptSaveState = "saved" | "unsaved" | "saving" | "notSaved" | "error";
 
 export type TranscriptionResult = {
   transcript: Transcript;
@@ -130,6 +130,7 @@ export type TranscriptionSession = {
   transcribing: boolean;
   diarizing: boolean;
   progress: TranscriptionProgress | null;
+  backgroundError: string | null;
 };
 
 export type TranscriptionStage = "preparing" | "detectingSpeech" | "transcribing" | "recoveringSpeech" | "finalizing" | "complete";

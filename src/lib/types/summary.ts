@@ -20,6 +20,7 @@ export type SummaryAgentInstallStatus = {
   version: string;
   installed: boolean;
   external: boolean;
+  installing: boolean;
   installable: boolean;
   statusMessage: string;
 };

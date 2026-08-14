@@ -74,6 +74,7 @@
         version: "preview",
         installed: true,
         external: false,
+        installing: false,
         installable: true,
         statusMessage: provider.statusMessage
       }));
@@ -85,6 +86,18 @@
       .catch((error) => { if (!cancelled) onError(errorText(error)); })
       .finally(() => { if (!cancelled) loading = false; });
     return () => { cancelled = true; };
+  });
+
+  $effect(() => {
+    if (preview || !agents.some((agent) => agent.installing)) return;
+    const timer = window.setInterval(() => {
+      void refresh()
+        .then(() => {
+          if (!agents.some((agent) => agent.installing)) return onChanged();
+        })
+        .catch((error) => onError(errorText(error)));
+    }, 1_000);
+    return () => window.clearInterval(timer);
   });
 
   $effect(() => {
@@ -136,7 +149,7 @@
       <div class="agent-copy">
         <div class="agent-title">
           <strong>{agent.label}</strong>
-          <span class:ready={agent.installed} class="agent-status">{#if agent.installed}<CircleCheck aria-hidden="true" />{/if}{agent.installed ? "利用可能" : "未追加"}</span>
+          <span class:ready={agent.installed} class="agent-status">{#if agent.installed}<CircleCheck aria-hidden="true" />{/if}{agent.installed ? "利用可能" : agent.installing ? "追加中" : "未追加"}</span>
         </div>
         {#if agent.external}<small>このアプリの外で管理されています</small>{/if}
       </div>
@@ -161,7 +174,7 @@
         {#if agent.installed && !agent.external}
           <Button variant="outline" type="button" onclick={() => remove(agent)} disabled={disabled || Boolean(workingId)} loading={workingId === agent.id}>削除</Button>
         {:else if !agent.installed}
-          <Button type="button" onclick={() => install(agent)} disabled={disabled || loading || Boolean(workingId) || !agent.installable} loading={workingId === agent.id}>追加</Button>
+          <Button type="button" onclick={() => install(agent)} disabled={disabled || loading || Boolean(workingId) || !agent.installable} loading={workingId === agent.id || agent.installing}>追加</Button>
         {/if}
       </div>
     </div>

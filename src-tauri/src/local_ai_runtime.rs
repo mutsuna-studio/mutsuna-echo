@@ -234,6 +234,14 @@ pub(crate) fn is_installed_compatible(_app: &AppHandle) -> bool {
 
 #[tauri::command]
 pub(crate) async fn install_local_ai_runtime(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(install_local_ai_runtime_job(app))
+        .await
+        .map_err(|error| {
+            format!("ローカルAI実行環境のバックグラウンド導入を完了できませんでした: {error}")
+        })?
+}
+
+async fn install_local_ai_runtime_job(app: AppHandle) -> Result<(), String> {
     let _guard = InstallGuard::acquire()?;
     let result = install_runtime(&app).await;
     if let Err(error) = &result {
@@ -251,6 +259,12 @@ pub(crate) fn cancel_local_ai_runtime_install() {
 
 #[tauri::command]
 pub(crate) async fn install_local_transcription_bundle(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(install_local_transcription_bundle_job(app))
+        .await
+        .map_err(|error| format!("ローカル文字起こし一括導入を完了できませんでした: {error}"))?
+}
+
+async fn install_local_transcription_bundle_job(app: AppHandle) -> Result<(), String> {
     let _guard = InstallGuard::acquire()?;
     let result: Result<(), String> = async {
         if read_installed_manifest(&app).is_err() {

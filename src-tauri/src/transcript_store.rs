@@ -213,8 +213,8 @@ pub(crate) struct TranscriptionHistory {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptSegmentChange {
-    segment_id: String,
-    text: String,
+    pub(crate) segment_id: String,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Deserialize)]

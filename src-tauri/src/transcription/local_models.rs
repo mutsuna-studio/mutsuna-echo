@@ -181,6 +181,14 @@ pub(crate) async fn download_local_stt_model(
     app: AppHandle,
     model_id: String,
 ) -> Result<(), String> {
+    tauri::async_runtime::spawn(download_local_stt_model_job(app, model_id))
+        .await
+        .map_err(|error| {
+            format!("STTモデルのバックグラウンド導入を完了できませんでした: {error}")
+        })?
+}
+
+async fn download_local_stt_model_job(app: AppHandle, model_id: String) -> Result<(), String> {
     if !cfg!(any(desktop, target_os = "android")) {
         return Err("このOS向けのReazonSpeech推論エンジンは準備中です。".into());
     }
