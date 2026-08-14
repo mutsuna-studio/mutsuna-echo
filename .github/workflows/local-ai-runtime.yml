@@ -20,7 +20,14 @@ jobs:
         with: { persist-credentials: false }
       - name: Validate runtime tag
         shell: bash
-        run: test "${GITHUB_EVENT_NAME}" = "workflow_dispatch" || test "${GITHUB_REF_NAME}" = "$RUNTIME_RELEASE_TAG"
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            exit 0
+          fi
+          case "${GITHUB_REF_NAME}" in
+            "$RUNTIME_RELEASE_TAG"|"$RUNTIME_RELEASE_TAG"-retry.*) ;;
+            *) exit 1 ;;
+          esac
 
   build:
     needs: validate
