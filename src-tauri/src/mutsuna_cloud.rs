@@ -8,7 +8,7 @@ use url::Url;
 
 use crate::credentials::CredentialId;
 
-const DEFAULT_API_BASE_URL: &str = "https://cloud.mutsuna.jp";
+const DEFAULT_API_BASE_URL: &str = "https://echo.mutsuna.jp";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const IDEMPOTENT_REQUEST_ATTEMPTS: usize = 3;
