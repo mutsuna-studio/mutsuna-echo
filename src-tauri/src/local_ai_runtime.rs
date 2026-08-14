@@ -499,16 +499,28 @@ fn install_archive(app: &AppHandle, archive: &[u8]) -> Result<(), String> {
         }
         verify_directory(&temporary)?;
         let final_directory = installation_directory(app)?;
-        if final_directory.exists() {
-            fs::remove_dir_all(&final_directory).map_err(|error| error.to_string())?;
-        }
-        fs::rename(&temporary, &final_directory)
-            .map_err(|error| format!("実行環境をインストールできませんでした: {error}"))
+        commit_installation(&temporary, &final_directory)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
     result
+}
+
+#[cfg(not(target_os = "android"))]
+fn commit_installation(temporary: &Path, final_directory: &Path) -> Result<(), String> {
+    let parent = final_directory
+        .parent()
+        .ok_or("実行環境のインストール先が不正です。")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("実行環境のインストール先を作成できませんでした: {error}"))?;
+    if final_directory.exists() {
+        fs::remove_dir_all(final_directory).map_err(|error| {
+            format!("既存の実行環境を置き換える準備ができませんでした: {error}")
+        })?;
+    }
+    fs::rename(temporary, final_directory)
+        .map_err(|error| format!("実行環境をインストールできませんでした: {error}"))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -767,5 +779,44 @@ mod tests {
             .decode(EMPTY_ARCHIVE_SIGNATURE)
             .expect("synthetic signature should decode");
         assert!(verify_signature_with_key(b"", &raw_signature, SYNTHETIC_PUBLIC_KEY).is_ok());
+    }
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn commit_installation_creates_version_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-runtime-install-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let temporary = root.join("staging");
+        let final_directory = root.join("1.13.4-1").join("windows-x86_64");
+        fs::create_dir_all(&temporary).expect("create staging directory");
+        fs::write(temporary.join("runtime.dll"), b"synthetic runtime")
+            .expect("write synthetic runtime");
+
+        commit_installation(&temporary, &final_directory).expect("commit installation");
+
+        assert!(!temporary.exists());
+        assert_eq!(
+            fs::read(final_directory.join("runtime.dll")).expect("read installed runtime"),
+            b"synthetic runtime"
+        );
+        fs::remove_dir_all(&root).expect("remove test fixture");
+    }
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn commit_installation_preserves_staging_when_parent_creation_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "mutsuna-runtime-install-failure-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let temporary = root.join("staging");
+        let blocking_file = root.join("blocked");
+        let final_directory = blocking_file.join("windows-x86_64");
+        fs::create_dir_all(&temporary).expect("create staging directory");
+        fs::write(&blocking_file, b"not a directory").expect("write blocking file");
+
+        assert!(commit_installation(&temporary, &final_directory).is_err());
+        assert!(temporary.is_dir());
+        fs::remove_dir_all(&root).expect("remove test fixture");
     }
 }
