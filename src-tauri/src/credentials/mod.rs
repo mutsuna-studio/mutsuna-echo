@@ -18,6 +18,7 @@ pub(crate) enum CredentialId {
     CloudflareOAuthAccountId,
     CloudflareOAuthAccountName,
     CloudflareOAuthAccounts,
+    MutsunaCloudAccessToken,
 }
 
 impl CredentialId {
@@ -31,6 +32,7 @@ impl CredentialId {
             Self::CloudflareOAuthAccountId => "cloudflare-oauth-account-id",
             Self::CloudflareOAuthAccountName => "cloudflare-oauth-account-name",
             Self::CloudflareOAuthAccounts => "cloudflare-oauth-accounts",
+            Self::MutsunaCloudAccessToken => "mutsuna-cloud-access-token",
         }
     }
 
@@ -44,6 +46,7 @@ impl CredentialId {
             Self::CloudflareOAuthAccountId => "Cloudflare OAuth Account ID",
             Self::CloudflareOAuthAccountName => "Cloudflare OAuthアカウント名",
             Self::CloudflareOAuthAccounts => "Cloudflare OAuthアカウント一覧",
+            Self::MutsunaCloudAccessToken => "Mutsuna Cloudアクセストークン",
         }
     }
 
@@ -111,6 +114,7 @@ mod tests {
             CredentialId::CloudflareOAuthAccountId,
             CredentialId::CloudflareOAuthAccountName,
             CredentialId::CloudflareOAuthAccounts,
+            CredentialId::MutsunaCloudAccessToken,
         ] {
             assert!(
                 android_contract.contains(&format!("\"{}\"", credential.id())),

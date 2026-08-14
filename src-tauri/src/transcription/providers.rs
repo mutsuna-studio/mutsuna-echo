@@ -14,7 +14,8 @@ enum ProviderKind {
 #[serde(rename_all = "camelCase")]
 enum ProviderSetup {
     ApiKey,
-    OAuth,
+    OAuthOrApiKey,
+    CloudAccount,
     ModelDownload,
 }
 
@@ -82,6 +83,15 @@ const CLOUDFLARE_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabili
     context_terms: true,
 };
 
+const MUTSUNA_CLOUD_CAPABILITIES: TranscriptionCapabilities = TranscriptionCapabilities {
+    timing_granularity: TimingGranularity::Word,
+    speaker_labels: false,
+    confidence_scores: false,
+    external_diarization: true,
+    context_text: false,
+    context_terms: false,
+};
+
 #[derive(Debug, Clone, Copy)]
 struct ProviderDefinition {
     id: &'static str,
@@ -117,10 +127,20 @@ const CLOUDFLARE_DEFINITION: ProviderDefinition = ProviderDefinition {
     id: "cloudflare",
     label: "Cloudflare Workers AI",
     kind: ProviderKind::Cloud,
-    setup: ProviderSetup::OAuth,
+    setup: ProviderSetup::OAuthOrApiKey,
     default_model_label: "Whisper Large v3 Turbo",
     capability_summary: "多言語・単語タイムスタンプ",
     capabilities: CLOUDFLARE_CAPABILITIES,
+};
+
+const MUTSUNA_CLOUD_DEFINITION: ProviderDefinition = ProviderDefinition {
+    id: "mutsunaCloud",
+    label: "Mutsuna Cloud",
+    kind: ProviderKind::Cloud,
+    setup: ProviderSetup::CloudAccount,
+    default_model_label: "Mutsuna STT Standard",
+    capability_summary: "APIキー不要・クレジット制・タイムスタンプ",
+    capabilities: MUTSUNA_CLOUD_CAPABILITIES,
 };
 
 const LOCAL_DEFINITION: ProviderDefinition = ProviderDefinition {
@@ -174,6 +194,13 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
             format!("資格情報の保存状態を確認できませんでした: {error}"),
         ),
     };
+    let mutsuna_cloud = match crate::mutsuna_cloud::cached_status(app) {
+        Ok(status) => mutsuna_cloud(status),
+        Err(error) => unavailable_provider(
+            MUTSUNA_CLOUD_DEFINITION,
+            format!("Mutsuna Cloudの接続状態を確認できませんでした: {error}"),
+        ),
+    };
     let vad_installed =
         super::vad_models::installed_model_path(app).is_ok_and(|path| path.is_some());
     let runtime_ready = crate::local_ai_runtime::is_installed_compatible(app);
@@ -187,7 +214,7 @@ pub(crate) fn list(app: &AppHandle) -> Result<Vec<TranscriptionProviderDescripto
         ),
         Err(error) => unavailable_provider(LOCAL_DEFINITION, error),
     };
-    Ok(vec![elevenlabs, soniox, cloudflare, local])
+    Ok(vec![mutsuna_cloud, elevenlabs, soniox, cloudflare, local])
 }
 
 fn unavailable_provider(
@@ -293,6 +320,39 @@ fn cloudflare(configured: bool) -> TranscriptionProviderDescriptor {
     }
 }
 
+fn mutsuna_cloud(
+    status: crate::mutsuna_cloud::MutsunaCloudStatus,
+) -> TranscriptionProviderDescriptor {
+    let configured = status.connected();
+    let ready = configured && status.can_use();
+    TranscriptionProviderDescriptor {
+        id: MUTSUNA_CLOUD_DEFINITION.id,
+        label: MUTSUNA_CLOUD_DEFINITION.label,
+        kind: MUTSUNA_CLOUD_DEFINITION.kind,
+        setup: MUTSUNA_CLOUD_DEFINITION.setup,
+        availability: if ready {
+            ProviderAvailability::Ready
+        } else {
+            ProviderAvailability::Unavailable
+        },
+        ready,
+        configured,
+        model_id: Some(super::mutsuna_cloud::MODEL_ID.into()),
+        model_label: MUTSUNA_CLOUD_DEFINITION.default_model_label.into(),
+        capability_summary: MUTSUNA_CLOUD_DEFINITION.capability_summary,
+        capabilities: MUTSUNA_CLOUD_DEFINITION.capabilities,
+        status_message: if ready {
+            "Mutsuna Cloudのクレジットで文字起こしできます。".into()
+        } else if configured {
+            "Mutsuna Cloudのアカウント状態またはクレジット残高を確認してください。".into()
+        } else {
+            "Mutsuna Cloudへ接続するとAPIキーなしで利用できます。".into()
+        },
+        pricing_usd_per_hour: None,
+        pricing_verified_on: None,
+    }
+}
+
 fn local_provider(
     installed: Option<&InstalledLocalModel>,
     vad_installed: bool,
@@ -348,9 +408,12 @@ fn local_provider(
 }
 
 #[tauri::command]
-pub(crate) fn get_transcription_providers(
+pub(crate) async fn get_transcription_providers(
     app: AppHandle,
 ) -> Result<Vec<TranscriptionProviderDescriptor>, String> {
+    // Keep `ready` tied to the server-authoritative account/credit state even
+    // when this command races the dedicated status request during startup.
+    let _ = crate::mutsuna_cloud::refresh_status(&app).await;
     list(&app)
 }
 
@@ -364,8 +427,8 @@ pub(crate) fn list_installed_local_stt_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_provider, soniox, InstalledLocalModel, ProviderAvailability, ProviderKind,
-        ProviderSetup, TimingGranularity,
+        local_provider, mutsuna_cloud, soniox, InstalledLocalModel, ProviderAvailability,
+        ProviderKind, ProviderSetup, TimingGranularity,
     };
 
     #[test]
@@ -440,5 +503,37 @@ mod tests {
         assert!(provider.capabilities.context_text);
         assert!(provider.capabilities.context_terms);
         assert_eq!(provider.pricing_usd_per_hour, Some(0.10));
+    }
+
+    #[test]
+    fn mutsuna_cloud_requires_a_native_account_connection() {
+        let disconnected = mutsuna_cloud(crate::mutsuna_cloud::MutsunaCloudStatus::disconnected());
+        assert!(!disconnected.ready);
+        assert!(!disconnected.configured);
+        assert!(matches!(disconnected.setup, ProviderSetup::CloudAccount));
+        assert!(matches!(
+            disconnected.availability,
+            ProviderAvailability::Unavailable
+        ));
+
+        let connected = mutsuna_cloud(crate::mutsuna_cloud::MutsunaCloudStatus::for_test(true));
+        assert!(connected.ready);
+        assert!(connected.configured);
+        assert_eq!(
+            connected.model_id.as_deref(),
+            Some("mutsuna-stt-standard-v1")
+        );
+        assert!(matches!(
+            connected.availability,
+            ProviderAvailability::Ready
+        ));
+
+        let unavailable = mutsuna_cloud(crate::mutsuna_cloud::MutsunaCloudStatus::for_test(false));
+        assert!(unavailable.configured);
+        assert!(!unavailable.ready);
+        assert!(matches!(
+            unavailable.availability,
+            ProviderAvailability::Unavailable
+        ));
     }
 }

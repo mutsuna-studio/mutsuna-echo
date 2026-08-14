@@ -330,9 +330,7 @@ fn transcribe_speech_regions(
                 &regions,
                 &mut pending,
                 &mut tokens,
-                &mut completed_chunks,
-                total_chunks,
-                primary_progress_end,
+                (&mut completed_chunks, total_chunks, primary_progress_end),
             )?;
         }
         Ok(())
@@ -355,9 +353,7 @@ fn transcribe_speech_regions(
         &regions,
         &mut pending,
         &mut tokens,
-        &mut completed_chunks,
-        total_chunks,
-        primary_progress_end,
+        (&mut completed_chunks, total_chunks, primary_progress_end),
     )?;
     if accurate {
         recover_sparse_utterances(
@@ -656,10 +652,9 @@ fn flush_recognition_batch(
     regions: &[vad::SpeechRegion],
     pending: &mut Vec<PendingRecognition>,
     tokens: &mut Vec<TranscriptToken>,
-    completed_chunks: &mut u32,
-    total_chunks: u32,
-    progress_end: f64,
+    progress: (&mut u32, u32, f64),
 ) -> Result<(), String> {
+    let (completed_chunks, total_chunks, progress_end) = progress;
     if pending.is_empty() {
         return Ok(());
     }

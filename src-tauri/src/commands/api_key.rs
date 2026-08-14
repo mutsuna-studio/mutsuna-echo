@@ -165,6 +165,9 @@ async fn validate_provider_api_key(
         | crate::credentials::CredentialId::CloudflareOAuthAccounts => {
             Err("Cloudflare認証情報はOAuth接続で管理されます。".into())
         }
+        crate::credentials::CredentialId::MutsunaCloudAccessToken => {
+            Err("Mutsuna Cloudは専用の接続画面から設定してください。".into())
+        }
     }
 }
 

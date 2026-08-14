@@ -607,6 +607,7 @@ fn prepare_for_provider(
             }
         }
         TranscriptionProvider::Soniox | TranscriptionProvider::Cloudflare => {}
+        TranscriptionProvider::MutsunaCloud => context = None,
     }
     if context.as_ref().is_some_and(TranscriptionContext::is_empty) {
         context = None;
@@ -670,6 +671,7 @@ pub(crate) fn validate_for_provider(
                 );
             }
         }
+        TranscriptionProvider::MutsunaCloud => {}
         TranscriptionProvider::Local => {
             if context.terms.len() > 500 {
                 return Err("ローカル文字起こしで使用できる重要用語は500件までです。".into());

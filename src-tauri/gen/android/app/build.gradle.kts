@@ -128,4 +128,8 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }
 
-apply(from = "tauri.build.gradle.kts")
+// Tauri creates this ignored file for full app builds. JVM and instrumentation
+// contract compilation can run directly from Gradle without native build wiring.
+if (file("tauri.build.gradle.kts").exists()) {
+    apply(from = "tauri.build.gradle.kts")
+}

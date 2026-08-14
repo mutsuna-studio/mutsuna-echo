@@ -2,5 +2,15 @@
 /src/main/jniLibs/**/*.so
 /src/main/assets/tauri.conf.json
 /tauri.build.gradle.kts
+/src/main/java/jp/mutsuna/echo/Ipc.kt
+/src/main/java/jp/mutsuna/echo/Logger.kt
+/src/main/java/jp/mutsuna/echo/PermissionHelper.kt
+/src/main/java/jp/mutsuna/echo/Rust.kt
+/src/main/java/jp/mutsuna/echo/RustWebChromeClient.kt
+/src/main/java/jp/mutsuna/echo/RustWebView.kt
+/src/main/java/jp/mutsuna/echo/RustWebViewClient.kt
+/src/main/java/jp/mutsuna/echo/TauriActivity.kt
+/src/main/java/jp/mutsuna/echo/WryActivity.kt
+/src/main/java/jp/mutsuna/echo/proguard-wry.pro
 /proguard-tauri.pro
 /tauri.properties

@@ -1438,7 +1438,7 @@ fn transcript_path_in(
 fn validate_provider_id(provider_id: &str) -> Result<(), String> {
     if provider_id.is_empty()
         || !provider_id.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            character.is_ascii_alphanumeric() || character == '-'
         })
     {
         return Err("文字起こしプロバイダーIDが不正です。".to_string());
@@ -1838,7 +1838,11 @@ mod tests {
         let meeting_id = uuid::Uuid::now_v7().to_string();
         let elevenlabs = transcript_path_in(root, &meeting_id, "elevenlabs").expect("path");
         let assemblyai = transcript_path_in(root, &meeting_id, "assemblyai").expect("path");
+        let mutsuna_cloud =
+            transcript_path_in(root, &meeting_id, "mutsunaCloud").expect("camel-case path");
         assert_ne!(elevenlabs, assemblyai);
+        assert_ne!(elevenlabs, mutsuna_cloud);
+        assert!(transcript_path_in(root, &meeting_id, "../mutsunaCloud").is_err());
     }
 
     #[test]

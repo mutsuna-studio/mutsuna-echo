@@ -28,6 +28,7 @@
   import Settings from "@lucide/svelte/icons/settings";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import CloudflareConnectionSettings from "./lib/components/CloudflareConnectionSettings.svelte";
+  import MutsunaCloudSettings from "./lib/components/MutsunaCloudSettings.svelte";
   import AppUpdateManager from "./lib/components/AppUpdateManager.svelte";
   import ThirdPartyLicenses from "./lib/components/ThirdPartyLicenses.svelte";
   import { checkAndroidUpdate, isAndroid, waitForAndroidUpdateCheck } from "./lib/androidUpdate";
@@ -49,12 +50,14 @@
     type TranscriptionProviderDefinition,
     type TranscriptionProviderId,
     type LocalDiarizationModelStatus,
-    type CloudflareConnectionStatus
+    type CloudflareConnectionStatus,
+    type MutsunaCloudStatus
   } from "./lib/providers";
   import type { PendingAction } from "./lib/types/pending-action";
   import type { RecentMeetingSummary } from "./lib/types/recording";
   import type { GenerationAttemptSummary, SummaryModelDefinition, SummaryProgress, SummaryProviderDefinition } from "./lib/types/summary";
   import type { MeetingDocument } from "./lib/types/meeting-document";
+  import { MUTSUNA_CLOUD_COMMANDS } from "./lib/mutsunaCloud";
   import type {
     SelectedAudioFile,
     EditableTranscript,
@@ -88,7 +91,8 @@
     { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・辞書", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "cloudflare", label: "Cloudflare Workers AI", kind: "cloud", setup: "oauth", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Cloudflareへの接続が必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
+    { id: "cloudflare", label: "Cloudflare Free", kind: "cloud", setup: "oauthOrApiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Cloudflareへの接続が必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" },
+    { id: "mutsunaCloud", label: "Mutsuna Cloud", kind: "cloud", setup: "cloudAccount", availability: "unavailable", ready: false, configured: false, modelId: "mutsuna-stt-standard-v1", modelLabel: "Mutsuna Cloud 文字起こし", capabilitySummary: "APIキー不要・クレジット制", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Mutsuna Cloudへの接続が必要", pricingUsdPerHour: null, pricingVerifiedOn: null }
   ];
   const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
     {
@@ -238,13 +242,17 @@
   let cloudflareUsageLoading = $state(false);
   let cloudflareConnecting = $state(false);
   let cloudflareOAuthLeftApp = false;
+  let mutsunaCloudConnecting = $state(false);
+  let mutsunaCloudDisconnecting = $state(false);
+  let mutsunaCloudPurchasing = $state(false);
   let recordingBusy = $state(false);
   let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
-  let cloudflareConnection = $state.raw<CloudflareConnectionStatus | null>(summarySettingsPreview ? { connected: false, accountName: null, needsReauthentication: false, accountSelectionRequired: false, accounts: [], oauthConfigured: true } : null);
+  let cloudflareConnection = $state.raw<CloudflareConnectionStatus | null>(summarySettingsPreview ? { connected: false, authMethod: null, accountName: null, needsReauthentication: false, accountSelectionRequired: false, accounts: [], oauthConfigured: true, legacyConfigured: false } : null);
+  let mutsunaCloudStatus = $state.raw<MutsunaCloudStatus | null>(summarySettingsPreview ? { connected: false, canUse: false, availableCredits: null, accountStatus: null } : null);
   let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [], corrections: [] });
   let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "", correctionsText: "" });
   let globalContextSaveState = $state<ContextSaveState>("saved");
@@ -396,7 +404,7 @@
   });
 
   const saving = $derived(savingProviderId !== null);
-  const busy = $derived(loading || saving || deleting || cloudflareConnecting || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
+  const busy = $derived(loading || saving || deleting || cloudflareConnecting || mutsunaCloudConnecting || mutsunaCloudDisconnecting || mutsunaCloudPurchasing || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
   const processingMeetingStatus = $derived(
     summaryGenerating
       ? "要約中"
@@ -492,6 +500,9 @@
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
+  );
+  const mutsunaCloudProvider = $derived(
+    transcriptionProviders.find((provider) => provider.id === "mutsunaCloud") ?? null
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(
@@ -589,6 +600,61 @@
 
   async function refreshCloudflareConnection() {
     cloudflareConnection = await invoke<CloudflareConnectionStatus>("get_cloudflare_connection_status");
+  }
+
+  async function refreshMutsunaCloudStatus() {
+    mutsunaCloudStatus = await invoke<MutsunaCloudStatus>(MUTSUNA_CLOUD_COMMANDS.getStatus);
+  }
+
+  async function connectMutsunaCloud() {
+    if (mutsunaCloudConnecting) return;
+    mutsunaCloudConnecting = true;
+    try {
+      await invoke<MutsunaCloudStatus>(MUTSUNA_CLOUD_COMMANDS.connect);
+      await Promise.all([refreshMutsunaCloudStatus(), refreshProviders()]);
+      if (mutsunaCloudStatus?.canUse) {
+        showSuccessToast("Mutsuna Cloudへ接続しました。");
+      } else {
+        showWarningToast("Mutsuna Cloudへ接続しました。", "クレジット残高またはアカウント状態を確認してください。");
+      }
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      mutsunaCloudConnecting = false;
+    }
+  }
+
+  async function disconnectMutsunaCloud() {
+    if (mutsunaCloudDisconnecting) return;
+    mutsunaCloudDisconnecting = true;
+    try {
+      await invoke<MutsunaCloudStatus>(MUTSUNA_CLOUD_COMMANDS.disconnect);
+      await Promise.all([refreshMutsunaCloudStatus(), refreshProviders()]);
+      showSuccessToast("Mutsuna Cloudの接続を解除しました。");
+    } catch (error) {
+      showError(errorText(error));
+    } finally {
+      mutsunaCloudDisconnecting = false;
+    }
+  }
+
+  async function purchaseMutsunaCloudCredits() {
+    if (mutsunaCloudPurchasing || !mutsunaCloudStatus?.connected) return;
+    mutsunaCloudPurchasing = true;
+    try {
+      await invoke<void>(MUTSUNA_CLOUD_COMMANDS.purchaseCredits);
+      showSuccessToast(
+        "購入画面を開きました。",
+        "購入完了後、Mutsuna Cloudのクレジット残高へ反映されます。"
+      );
+    } catch {
+      showErrorToast(
+        "購入画面を開けませんでした。",
+        "接続を確認し、時間をおいて再度お試しください。"
+      );
+    } finally {
+      mutsunaCloudPurchasing = false;
+    }
   }
 
   async function refreshCloudflareState() {
@@ -1227,10 +1293,11 @@
             if (!cancelled && payload.meetingId === selectedMeetingId) summaryProgress = payload;
           })
         ]);
-        const [nextProviders, nextSummaryProviders, nextCloudflareConnection, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
+        const [nextProviders, nextSummaryProviders, nextCloudflareConnection, nextMutsunaCloudStatus, session, pendingResult, nextMeetings, nextGlobalContext] = await Promise.all([
           invoke<TranscriptionProviderDefinition[]>("get_transcription_providers"),
           invoke<SummaryProviderDefinition[]>("get_summary_providers"),
           invoke<CloudflareConnectionStatus>("get_cloudflare_connection_status"),
+          invoke<MutsunaCloudStatus>(MUTSUNA_CLOUD_COMMANDS.getStatus),
           invoke<TranscriptionSession>("get_transcription_session"),
           invoke<PendingAction | null>("get_pending_action")
             .then((action) => ({ action, error: "" }))
@@ -1247,6 +1314,7 @@
         if (cancelled) return;
         transcriptionProviders = nextProviders;
         cloudflareConnection = nextCloudflareConnection;
+        mutsunaCloudStatus = nextMutsunaCloudStatus;
         setGlobalContextFromSettings(nextGlobalContext);
         globalContextLoading = false;
         summaryProviders = nextSummaryProviders;
@@ -1414,14 +1482,14 @@
     };
   });
 
-  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string): Promise<boolean> {
+  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string, accountId?: string): Promise<boolean> {
     if (savingProviderId !== null) return false;
     savingProviderId = providerId;
     let saved = false;
 
     try {
       const modelsAccessible = await withTimeout(
-        invoke<boolean>("save_provider_api_key", { providerId, apiKey }),
+        invoke<boolean>("save_provider_api_key", { providerId, apiKey, accountId }),
         API_KEY_SAVE_TIMEOUT_MS,
         "APIキーの確認に時間がかかっています。通信状態を確認して、もう一度お試しください。"
       );
@@ -1443,6 +1511,11 @@
     }
     if (saved && providerId === "elevenlabs") void refreshUsage();
     if (saved && providerId === "soniox") clearSonioxUsage();
+    if (saved && providerId === "cloudflare") {
+      await refreshCloudflareConnection();
+      void refreshCloudflareUsage();
+      await refreshSummaryProviders();
+    }
     return saved;
   }
 
@@ -1456,6 +1529,11 @@
         usageError = "";
       }
       if (providerId === "soniox") clearSonioxUsage();
+      if (providerId === "cloudflare") {
+        await refreshCloudflareConnection();
+        clearCloudflareUsage();
+        await refreshSummaryProviders();
+      }
       showSuccessToast("APIキーを削除しました。");
     } catch (error) {
       showError(errorText(error));
@@ -2288,12 +2366,15 @@
                     status={cloudflareConnection}
                     {loading}
                     connecting={cloudflareConnecting}
+                    saving={savingProviderId === "cloudflare"}
                     onCancelConnect={cancelCloudflareOAuth}
                     {deleting}
                     {busy}
                     onConnect={connectCloudflare}
                     onSelectAccount={selectCloudflareAccount}
                     onDisconnectOAuth={disconnectCloudflareOAuth}
+                    onSaveManual={(apiToken, accountId) => saveApiKey("cloudflare", apiToken, accountId)}
+                    onDeleteManual={() => deleteApiKey("cloudflare")}
                   />
                   <PowerSettings disabled={updating} onError={showError} />
                   <AppUpdateManager
@@ -2313,6 +2394,19 @@
                   </div>
                   <div class="transcription-model-manager">
                     <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshLocalModels} onMessage={showMessage} onError={showError} />
+                    {#if mutsunaCloudProvider}
+                      <MutsunaCloudSettings
+                        status={mutsunaCloudStatus}
+                        {loading}
+                        connecting={mutsunaCloudConnecting}
+                        disconnecting={mutsunaCloudDisconnecting}
+                        purchasing={mutsunaCloudPurchasing}
+                        {busy}
+                        onConnect={connectMutsunaCloud}
+                        onDisconnect={disconnectMutsunaCloud}
+                        onPurchase={purchaseMutsunaCloudCredits}
+                      />
+                    {/if}
                     {#each apiKeyProviders as provider (provider.id)}
                       <ApiKeySettings
                         {provider}
