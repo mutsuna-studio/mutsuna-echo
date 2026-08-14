@@ -22,13 +22,13 @@ Cloudflare Dashboard の対象アカウントで **Manage Account > OAuth client
 | Token endpoint authentication method | `none` |
 | PKCE | Required, `S256` |
 | Redirect URL | `http://127.0.0.1:8976/oauth/cloudflare/callback` |
-| Dashboard scopes | **AI & Machine Learning** → **Workers AI** → **Read** |
-| Authorization request scopes | `ai.read offline_access` |
+| Dashboard scopes | **Account Settings** → **Read**、**AI & Machine Learning** → **Workers AI** → **Read** |
+| Authorization request scopes | `account-settings.read ai.read offline_access` |
 | Client Secret | 使用しない |
 
-ダッシュボードの権限一覧では `account:read`、`ai:read`、`offline_access` という文字列を探しません。`Workers AI` の `Read` だけを選択します。`Edit` は不要です。
+ダッシュボードの権限一覧ではscope IDの文字列ではなく、`Account Settings` と `Workers AI` の `Read` を選択します。
 
-アプリの認可リクエストでは、選択した権限の scope ID である `ai.read` と、refresh token を要求する標準スコープ `offline_access` を送信します。`offline_access` はダッシュボードの権限項目ではありません。Workers AI の実行 API は公式 API reference 上 `Workers AI Read` または `Workers AI Write` を受け付けるため、Mutsuna Echo は最小権限の read scope だけを要求します。
+アプリの認可リクエストでは、許可済みアカウントの取得に `account-settings.read`、モデル一覧の参照とモデル実行に `ai.read`、refresh tokenの取得に標準スコープ `offline_access` を送信します。`offline_access` はダッシュボードの権限項目ではありません。Workers AIの書き込み操作は行わないため、`ai.write` は要求しません。
 
 OAuth の consent 画面自体が許可対象アカウントを選択します。認証後、Mutsuna Echo は `GET /client/v4/accounts` で許可済みアカウントだけを列挙します。1件なら自動選択し、複数ならアカウント名から選択させます。OAuth 利用者に Account ID の手入力は求めません。
 
@@ -46,6 +46,14 @@ Client ID は公開 identifier であり secret ではありません。ビル�
 $env:MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID = "Cloudflare Dashboard の Client ID"
 pnpm tauri build
 ```
+
+ローカル開発では、リポジトリ直下の `.env` も利用できます。
+
+```dotenv
+MUTSUNA_CLOUDFLARE_OAUTH_CLIENT_ID="Cloudflare Dashboard の Client ID"
+```
+
+`pnpm tauri dev` と `pnpm tauri build` はこの値をRust/nativeビルドへ渡します。シェルやCIで同名の環境変数が明示されている場合は、その値を `.env` より優先します。値を変更した後はTauriの開発プロセスを再起動してください。
 
 Rust の `option_env!` で compile-time public configuration として取り込まれます。未設定ビルドは panic せず、設定画面に「このビルドにはCloudflare OAuth Client IDが設定されていません」と表示します。fork は独自の Public OAuth Client を作成し、同じ環境変数へ独自 Client ID を設定してください。Client Secret は追加しないでください。
 

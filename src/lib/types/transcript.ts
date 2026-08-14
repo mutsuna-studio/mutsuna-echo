@@ -132,12 +132,13 @@ export type TranscriptionSession = {
   progress: TranscriptionProgress | null;
 };
 
-export type TranscriptionStage = "preparing" | "detectingSpeech" | "transcribing";
+export type TranscriptionStage = "preparing" | "detectingSpeech" | "transcribing" | "recoveringSpeech" | "finalizing" | "complete";
 
 export type TranscriptionProgress = {
   stage: TranscriptionStage;
   completedChunks: number;
   totalChunks: number | null;
+  overallProgress?: number | null;
 };
 
 export type LocalDiarizationStage =
@@ -174,10 +175,12 @@ export type CloudflareUsage = {
   usedDurationMs: number;
   estimatedNeurons: number;
   transcriptionCount: number;
+  textGenerationCount: number;
   periodStart: string;
   dailyUsedDurationMs: number;
   dailyEstimatedNeurons: number;
   dailyTranscriptionCount: number;
+  dailyTextGenerationCount: number;
   dailyFreeAllocationNeurons: number;
   dailyRemainingNeurons: number;
   dailyUsagePercent: number;

@@ -12,8 +12,6 @@ mod windows_dpapi;
 pub(crate) enum CredentialId {
     ElevenLabs,
     Soniox,
-    CloudflareApiToken,
-    CloudflareAccountId,
     CloudflareOAuthAccessToken,
     CloudflareOAuthRefreshToken,
     CloudflareOAuthExpiresAt,
@@ -27,8 +25,6 @@ impl CredentialId {
         match self {
             Self::ElevenLabs => "elevenlabs",
             Self::Soniox => "soniox",
-            Self::CloudflareApiToken => "cloudflare-api-token",
-            Self::CloudflareAccountId => "cloudflare-account-id",
             Self::CloudflareOAuthAccessToken => "cloudflare-oauth-access-token",
             Self::CloudflareOAuthRefreshToken => "cloudflare-oauth-refresh-token",
             Self::CloudflareOAuthExpiresAt => "cloudflare-oauth-expires-at",
@@ -42,8 +38,6 @@ impl CredentialId {
         match self {
             Self::ElevenLabs => "ElevenLabs",
             Self::Soniox => "Soniox",
-            Self::CloudflareApiToken => "Cloudflare APIトークン",
-            Self::CloudflareAccountId => "Cloudflare Account ID",
             Self::CloudflareOAuthAccessToken => "Cloudflare OAuthアクセストークン",
             Self::CloudflareOAuthRefreshToken => "Cloudflare OAuthリフレッシュトークン",
             Self::CloudflareOAuthExpiresAt => "Cloudflare OAuth有効期限",
@@ -57,7 +51,6 @@ impl CredentialId {
         match provider_id {
             "elevenlabs" => Ok(Self::ElevenLabs),
             "soniox" => Ok(Self::Soniox),
-            "cloudflare" => Ok(Self::CloudflareApiToken),
             _ => Err("APIキーを保存できないプロバイダーです。".into()),
         }
     }
@@ -112,8 +105,6 @@ mod tests {
         for credential in [
             CredentialId::ElevenLabs,
             CredentialId::Soniox,
-            CredentialId::CloudflareApiToken,
-            CredentialId::CloudflareAccountId,
             CredentialId::CloudflareOAuthAccessToken,
             CredentialId::CloudflareOAuthRefreshToken,
             CredentialId::CloudflareOAuthExpiresAt,
@@ -127,5 +118,12 @@ mod tests {
                 credential.id()
             );
         }
+    }
+
+    #[test]
+    fn legacy_cloudflare_api_credentials_are_not_supported() {
+        let error = CredentialId::from_provider_id("cloudflare")
+            .expect_err("Cloudflare must only be configured through OAuth");
+        assert!(error.contains("保存できない"));
     }
 }

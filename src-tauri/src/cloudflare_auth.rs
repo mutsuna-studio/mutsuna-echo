@@ -1,6 +1,10 @@
 use std::{
     io::{Read, Write},
     net::TcpListener,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -20,13 +24,14 @@ const TOKEN_URL: &str = "https://dash.cloudflare.com/oauth2/token";
 const REVOKE_URL: &str = "https://dash.cloudflare.com/oauth2/revoke";
 const ACCOUNTS_URL: &str = "https://api.cloudflare.com/client/v4/accounts";
 const REDIRECT_URI: &str = "http://127.0.0.1:8976/oauth/cloudflare/callback";
-const OAUTH_SCOPES: &str = "ai.read offline_access";
+const OAUTH_SCOPES: &str = "account-settings.read ai.read offline_access";
 const FLOW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REFRESH_SKEW_SECONDS: i64 = 60;
 
 pub(crate) struct CloudflareAuthState {
     oauth_flow: tokio::sync::Mutex<()>,
+    oauth_cancelled: Arc<AtomicBool>,
     refresh: tokio::sync::Mutex<()>,
 }
 
@@ -34,21 +39,15 @@ impl Default for CloudflareAuthState {
     fn default() -> Self {
         Self {
             oauth_flow: tokio::sync::Mutex::new(()),
+            oauth_cancelled: Arc::new(AtomicBool::new(false)),
             refresh: tokio::sync::Mutex::new(()),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CloudflareAuthMethod {
-    OAuth,
-    ApiToken,
-}
-
 pub(crate) struct CloudflareAuthContext {
     pub(crate) account_id: SecretString,
     pub(crate) access_token: SecretString,
-    pub(crate) auth_method: CloudflareAuthMethod,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,13 +61,11 @@ pub(crate) struct CloudflareAccountOption {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudflareConnectionStatus {
     connected: bool,
-    auth_method: Option<&'static str>,
     account_name: Option<String>,
     needs_reauthentication: bool,
     account_selection_required: bool,
     accounts: Vec<CloudflareAccountOption>,
     oauth_configured: bool,
-    legacy_configured: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,16 +180,31 @@ fn authorization_url(
     Ok(url.into())
 }
 
-fn write_callback_page(stream: &mut std::net::TcpStream, success: bool) {
+fn escape_callback_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn write_callback_page(
+    stream: &mut std::net::TcpStream,
+    success: bool,
+    error_message: Option<&str>,
+) {
     let (title, message) = if success {
         (
             "Cloudflareへの接続を確認しました",
-            "Mutsuna Echoへ戻ってください。",
+            "接続情報を保存しました。Mutsuna Echoへ戻ってください。".to_string(),
         )
     } else {
         (
             "Cloudflareへの接続を完了できませんでした",
-            "Mutsuna Echoへ戻って、もう一度お試しください。",
+            error_message
+                .map(escape_callback_html)
+                .unwrap_or_else(|| "Mutsuna Echoへ戻って、もう一度お試しください。".to_string()),
         )
     };
     let body = format!(
@@ -205,12 +217,18 @@ fn write_callback_page(stream: &mut std::net::TcpStream, success: bool) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn wait_for_callback(listener: TcpListener) -> Result<OAuthCallback, String> {
+fn wait_for_callback(
+    listener: TcpListener,
+    cancelled: &AtomicBool,
+) -> Result<OAuthCallback, String> {
     listener
         .set_nonblocking(true)
         .map_err(|_| "OAuth callbackの待受を開始できませんでした。".to_string())?;
     let started = Instant::now();
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Cloudflare OAuthをキャンセルしました。".into());
+        }
         if started.elapsed() >= FLOW_TIMEOUT {
             return Err(
                 "Cloudflare OAuthがタイムアウトしました。もう一度接続してください。".into(),
@@ -244,7 +262,7 @@ fn wait_for_callback(listener: TcpListener) -> Result<OAuthCallback, String> {
                         stream,
                     });
                 }
-                write_callback_page(&mut stream, false);
+                write_callback_page(&mut stream, false, None);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -264,16 +282,32 @@ fn validate_callback(callback: &Url, flow: &PendingFlow) -> Result<String, Strin
     if flow.created_at.elapsed() >= FLOW_TIMEOUT {
         return Err("Cloudflare OAuthの有効時間が切れました。もう一度接続してください。".into());
     }
-    if let Some(error) = callback_value(callback, "error") {
-        return match error.as_str() {
-            "access_denied" => Err("Cloudflare OAuthがキャンセルされました。".into()),
-            _ => Err("Cloudflareで認証を許可できませんでした。".into()),
-        };
-    }
     let returned_state = callback_value(callback, "state")
         .ok_or_else(|| "OAuth stateを確認できませんでした。".to_string())?;
     if returned_state.as_bytes() != flow.state.as_bytes() {
         return Err("OAuth stateが一致しないため、接続を拒否しました。".into());
+    }
+    if let Some(error) = callback_value(callback, "error") {
+        return match error.as_str() {
+            "access_denied" => Err("Cloudflare OAuthがキャンセルされました。".into()),
+            "invalid_scope" => Err(
+                "Cloudflare OAuth Clientに必要な権限が登録されていません。Cloudflare DashboardでAccount Settings ReadとWorkers AI Readを追加し、保存してから再接続してください。"
+                    .into(),
+            ),
+            "unauthorized_client" => Err(
+                "Cloudflare OAuth Clientでこの認証方法が許可されていません。Authorization CodeとRefresh Tokenを有効にしてから再接続してください。"
+                    .into(),
+            ),
+            "invalid_request" => Err(
+                "Cloudflare OAuth Clientの設定と認証要求が一致しません。Client ID、リダイレクトURL、権限を確認してください。"
+                    .into(),
+            ),
+            "server_error" | "temporarily_unavailable" => Err(
+                "Cloudflareの認証サービスを一時的に利用できません。時間を置いて再接続してください。"
+                    .into(),
+            ),
+            _ => Err("Cloudflareで認証を許可できませんでした。".into()),
+        };
     }
     callback_value(callback, "code")
         .filter(|code| !code.trim().is_empty())
@@ -322,6 +356,18 @@ async fn parse_token_response(
         (_, Some("invalid_grant")) => {
             Err("Cloudflare OAuthの認証期限が切れました。再接続してください。".into())
         }
+        (_, Some("invalid_client")) => Err(
+            "Cloudflare OAuth Clientを認証できませんでした。Client IDとToken authentication methodを確認してください。"
+                .into(),
+        ),
+        (_, Some("invalid_scope")) => Err(
+            "Cloudflare OAuth Clientの許可scopeと更新要求が一致しません。Cloudflareへ再接続してください。"
+                .into(),
+        ),
+        (_, Some("unsupported_grant_type")) => Err(
+            "Cloudflare OAuth ClientでRefresh Tokenが許可されていません。grant typeの設定を確認してください。"
+                .into(),
+        ),
         (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN, _) => {
             Err("Cloudflare OAuthを認証できませんでした。再接続してください。".into())
         }
@@ -367,7 +413,7 @@ async fn fetch_accounts(
         .await
         .map_err(|_| "Cloudflareアカウント一覧を読み取れませんでした。".to_string())?;
     if !envelope.success || envelope.result.is_empty() {
-        return Err("OAuthで利用可能なCloudflareアカウントがありません。".into());
+        return Err("OAuthで利用可能なCloudflareアカウントがありません。認可画面でWorkers AIを使うアカウントを選択してください。".into());
     }
     Ok(envelope.result)
 }
@@ -376,12 +422,23 @@ fn persist_verified<S: CredentialStorage>(
     storage: &mut S,
     values: &[(CredentialId, &SecretString)],
 ) -> Result<(), String> {
-    let mut previous = Vec::with_capacity(values.len());
-    for (id, _) in values {
-        previous.push((
-            *id,
-            storage.has(*id)?.then(|| storage.load(*id)).transpose()?,
-        ));
+    persist_verified_with_deletions(storage, values, &[])
+}
+
+fn persist_verified_with_deletions<S: CredentialStorage>(
+    storage: &mut S,
+    values: &[(CredentialId, &SecretString)],
+    deletions: &[CredentialId],
+) -> Result<(), String> {
+    let mut ids = values.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    for id in deletions {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    let mut previous = Vec::with_capacity(ids.len());
+    for id in ids {
+        previous.push((id, storage.has(id)?.then(|| storage.load(id)).transpose()?));
     }
     let result = (|| {
         for (id, expected) in values {
@@ -392,6 +449,12 @@ fn persist_verified<S: CredentialStorage>(
                     "{}を端末へ正しく保存できませんでした。",
                     id.label()
                 ));
+            }
+        }
+        for id in deletions {
+            storage.delete(*id)?;
+            if storage.has(*id)? {
+                return Err(format!("{}を端末から削除できませんでした。", id.label()));
             }
         }
         Ok(())
@@ -421,13 +484,6 @@ fn stored_accounts(app: &AppHandle) -> Vec<CloudflareAccountOption> {
         .unwrap_or_default()
 }
 
-fn legacy_configured(app: &AppHandle) -> Result<bool, String> {
-    Ok(
-        crate::credentials::has(app, CredentialId::CloudflareApiToken)?
-            && crate::credentials::has(app, CredentialId::CloudflareAccountId)?,
-    )
-}
-
 fn oauth_has_tokens(app: &AppHandle) -> Result<bool, String> {
     Ok(
         crate::credentials::has(app, CredentialId::CloudflareOAuthAccessToken)?
@@ -441,29 +497,20 @@ fn oauth_connected(app: &AppHandle) -> Result<bool, String> {
         && crate::credentials::has(app, CredentialId::CloudflareOAuthAccountId)?)
 }
 
-fn stored_auth_method<S: CredentialStorage>(
-    storage: &S,
-) -> Result<Option<CloudflareAuthMethod>, String> {
-    let oauth = storage.has(CredentialId::CloudflareOAuthAccessToken)?
+fn oauth_is_configured<S: CredentialStorage>(storage: &S) -> Result<bool, String> {
+    Ok(storage.has(CredentialId::CloudflareOAuthAccessToken)?
         && storage.has(CredentialId::CloudflareOAuthRefreshToken)?
         && storage.has(CredentialId::CloudflareOAuthExpiresAt)?
-        && storage.has(CredentialId::CloudflareOAuthAccountId)?;
-    if oauth {
-        return Ok(Some(CloudflareAuthMethod::OAuth));
-    }
-    let legacy = storage.has(CredentialId::CloudflareApiToken)?
-        && storage.has(CredentialId::CloudflareAccountId)?;
-    Ok(legacy.then_some(CloudflareAuthMethod::ApiToken))
+        && storage.has(CredentialId::CloudflareOAuthAccountId)?)
 }
 
 pub(crate) fn is_configured(app: &AppHandle) -> Result<bool, String> {
-    Ok(stored_auth_method(&AppCredentialStorage(app))?.is_some())
+    oauth_is_configured(&AppCredentialStorage(app))
 }
 
 pub(crate) fn connection_status(app: &AppHandle) -> Result<CloudflareConnectionStatus, String> {
     let oauth_tokens = oauth_has_tokens(app)?;
     let oauth_connected = oauth_connected(app)?;
-    let legacy = legacy_configured(app)?;
     let accounts = if oauth_tokens && !oauth_connected {
         stored_accounts(app)
     } else {
@@ -477,20 +524,12 @@ pub(crate) fn connection_status(app: &AppHandle) -> Result<CloudflareConnectionS
         None
     };
     Ok(CloudflareConnectionStatus {
-        connected: oauth_connected || legacy,
-        auth_method: if oauth_connected {
-            Some("oauth")
-        } else if legacy {
-            Some("apiToken")
-        } else {
-            None
-        },
+        connected: oauth_connected,
         account_name,
         needs_reauthentication: false,
         account_selection_required: oauth_tokens && !oauth_connected && !accounts.is_empty(),
         accounts,
         oauth_configured: oauth_client_id().is_some(),
-        legacy_configured: legacy,
     })
 }
 
@@ -521,11 +560,10 @@ async fn request_refresh(
     parse_token_response(response, "Cloudflare OAuth tokenの更新に失敗しました。").await
 }
 
-async fn refresh_oauth(app: &AppHandle, state: &CloudflareAuthState) -> Result<(), String> {
-    let _guard = state.refresh.lock().await;
+async fn refresh_oauth_locked(app: &AppHandle, force: bool) -> Result<(), String> {
     let expires = crate::credentials::load(app, CredentialId::CloudflareOAuthExpiresAt)?;
     let expires_at = expires.expose_secret().parse::<i64>().unwrap_or_default();
-    if !token_needs_refresh(expires_at, Utc::now().timestamp()) {
+    if !force && !token_needs_refresh(expires_at, Utc::now().timestamp()) {
         return Ok(());
     }
     let client_id =
@@ -554,25 +592,45 @@ async fn refresh_oauth(app: &AppHandle, state: &CloudflareAuthState) -> Result<(
     )
 }
 
+async fn refresh_oauth(app: &AppHandle, state: &CloudflareAuthState) -> Result<(), String> {
+    let _guard = state.refresh.lock().await;
+    refresh_oauth_locked(app, false).await
+}
+
+pub(crate) async fn recover_unauthorized_credentials(
+    app: &AppHandle,
+    rejected_access_token: &SecretString,
+) -> Result<CloudflareAuthContext, String> {
+    if !oauth_connected(app)? {
+        return Err("Cloudflareへ再接続してください。".into());
+    }
+    let state = app.state::<CloudflareAuthState>();
+    let _guard = state.refresh.lock().await;
+    let current_access = crate::credentials::load(app, CredentialId::CloudflareOAuthAccessToken)?;
+    if access_token_needs_recovery(&current_access, rejected_access_token) {
+        refresh_oauth_locked(app, true).await.map_err(|error| {
+            format!("Cloudflare APIが認証を拒否し、OAuth tokenの更新にも失敗しました: {error}")
+        })?;
+    }
+    Ok(CloudflareAuthContext {
+        account_id: crate::credentials::load(app, CredentialId::CloudflareOAuthAccountId)?,
+        access_token: crate::credentials::load(app, CredentialId::CloudflareOAuthAccessToken)?,
+    })
+}
+
+fn access_token_needs_recovery(current: &SecretString, rejected: &SecretString) -> bool {
+    current.expose_secret() == rejected.expose_secret()
+}
+
 pub(crate) async fn resolve_valid_credentials(
     app: &AppHandle,
 ) -> Result<CloudflareAuthContext, String> {
     if oauth_connected(app)? {
         let state = app.state::<CloudflareAuthState>();
-        refresh_oauth(app, &state).await.map_err(|_| {
-            "Cloudflare OAuthを更新できませんでした。Cloudflareへ再接続してください。".to_string()
-        })?;
+        refresh_oauth(app, &state).await?;
         return Ok(CloudflareAuthContext {
             account_id: crate::credentials::load(app, CredentialId::CloudflareOAuthAccountId)?,
             access_token: crate::credentials::load(app, CredentialId::CloudflareOAuthAccessToken)?,
-            auth_method: CloudflareAuthMethod::OAuth,
-        });
-    }
-    if legacy_configured(app)? {
-        return Ok(CloudflareAuthContext {
-            account_id: crate::credentials::load(app, CredentialId::CloudflareAccountId)?,
-            access_token: crate::credentials::load(app, CredentialId::CloudflareApiToken)?,
-            auth_method: CloudflareAuthMethod::ApiToken,
         });
     }
     Err("Cloudflareへ接続してください。".into())
@@ -594,6 +652,7 @@ pub(crate) async fn start_cloudflare_oauth(
         .oauth_flow
         .try_lock()
         .map_err(|_| "Cloudflare OAuthはすでに進行中です。".to_string())?;
+    state.oauth_cancelled.store(false, Ordering::Release);
     let client_id =
         oauth_client_id().ok_or_else(|| "Cloudflare OAuthが設定されていません。".to_string())?;
     let listener = TcpListener::bind("127.0.0.1:8976").map_err(|_| {
@@ -603,9 +662,11 @@ pub(crate) async fn start_cloudflare_oauth(
     let auth_url = authorization_url(client_id, &flow, &challenge)?;
     tauri_plugin_opener::open_url(&auth_url, None::<&str>)
         .map_err(|_| "システムブラウザでCloudflareを開けませんでした。".to_string())?;
-    let mut callback = tauri::async_runtime::spawn_blocking(move || wait_for_callback(listener))
-        .await
-        .map_err(|_| "OAuth callback処理が停止しました。".to_string())??;
+    let cancelled = Arc::clone(&state.oauth_cancelled);
+    let mut callback =
+        tauri::async_runtime::spawn_blocking(move || wait_for_callback(listener, &cancelled))
+            .await
+            .map_err(|_| "OAuth callback処理が停止しました。".to_string())??;
     let result = async {
         let code = validate_callback(&callback.url, &flow)?;
         let client = oauth_http_client()?;
@@ -642,16 +703,29 @@ pub(crate) async fn start_cloudflare_oauth(
             values.push((CredentialId::CloudflareOAuthAccountId, &selected_id));
             values.push((CredentialId::CloudflareOAuthAccountName, &selected_name));
         }
-        persist_verified(&mut AppCredentialStorage(&app), &values)?;
-        if accounts.len() > 1 {
-            crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountId)?;
-            crate::credentials::delete(&app, CredentialId::CloudflareOAuthAccountName)?;
-        }
+        let deletions = (accounts.len() != 1).then_some([
+            CredentialId::CloudflareOAuthAccountId,
+            CredentialId::CloudflareOAuthAccountName,
+        ]);
+        persist_verified_with_deletions(
+            &mut AppCredentialStorage(&app),
+            &values,
+            deletions.as_ref().map_or(&[], |ids| ids.as_slice()),
+        )?;
         connection_status(&app)
     }
     .await;
-    write_callback_page(&mut callback.stream, result.is_ok());
+    write_callback_page(
+        &mut callback.stream,
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
     result
+}
+
+#[tauri::command]
+pub(crate) fn cancel_cloudflare_oauth(state: State<'_, CloudflareAuthState>) {
+    state.oauth_cancelled.store(true, Ordering::Release);
 }
 
 #[tauri::command]
@@ -833,11 +907,37 @@ mod tests {
     }
 
     #[test]
+    fn oauth_invalid_scope_is_actionable() {
+        let (flow, _) = create_pending_flow().expect("create state");
+        let callback = Url::parse(&format!(
+            "{REDIRECT_URI}?error=invalid_scope&error_description=synthetic&state={}",
+            flow.state
+        ))
+        .expect("callback URL");
+        let error = validate_callback(&callback, &flow).expect_err("invalid scope rejected");
+        assert!(error.contains("Account Settings Read"));
+        assert!(error.contains("Workers AI Read"));
+        assert!(!error.contains("synthetic"));
+    }
+
+    #[test]
+    fn oauth_error_still_requires_matching_state() {
+        let (flow, _) = create_pending_flow().expect("create state");
+        let callback = Url::parse(&format!("{REDIRECT_URI}?error=invalid_scope&state=wrong"))
+            .expect("callback URL");
+        assert!(validate_callback(&callback, &flow)
+            .expect_err("mismatch rejected")
+            .contains("一致しない"));
+    }
+
+    #[test]
     fn callback_page_waits_for_the_oauth_result() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind callback server");
         let address = listener.local_addr().expect("callback address");
-        let waiter =
-            std::thread::spawn(move || wait_for_callback(listener).expect("receive callback"));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let waiter = std::thread::spawn(move || {
+            wait_for_callback(listener, &cancelled).expect("receive callback")
+        });
         let mut browser = std::net::TcpStream::connect(address).expect("connect callback server");
         browser
             .set_read_timeout(Some(Duration::from_millis(150)))
@@ -858,7 +958,7 @@ mod tests {
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
         ));
 
-        write_callback_page(&mut callback.stream, true);
+        write_callback_page(&mut callback.stream, true, None);
         drop(callback);
         browser
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -869,6 +969,45 @@ mod tests {
             .expect("read callback page");
         assert!(response.contains("Cloudflareへの接続を確認しました"));
         assert!(!response.contains("接続を完了できませんでした"));
+    }
+
+    #[test]
+    fn callback_wait_can_be_cancelled_after_browser_is_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind callback server");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let wait_cancelled = Arc::clone(&cancelled);
+        let waiter = std::thread::spawn(move || wait_for_callback(listener, &wait_cancelled));
+        cancelled.store(true, Ordering::Release);
+        let error = match waiter.join().expect("callback waiter") {
+            Ok(_) => panic!("cancelled callback wait must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("キャンセル"));
+    }
+
+    #[test]
+    fn callback_failure_page_shows_only_escaped_user_facing_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind callback page server");
+        let address = listener.local_addr().expect("callback page address");
+        let reader = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept callback page");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("read callback page");
+            response
+        });
+        let mut stream = std::net::TcpStream::connect(address).expect("connect callback page");
+        write_callback_page(
+            &mut stream,
+            false,
+            Some("Cloudflareアカウントを確認する権限がありません。<token>"),
+        );
+        drop(stream);
+        let response = reader.join().expect("callback page reader");
+        assert!(response.contains("Cloudflareアカウントを確認する権限がありません。"));
+        assert!(response.contains("&lt;token&gt;"));
+        assert!(!response.contains("<token>"));
     }
 
     #[test]
@@ -928,7 +1067,8 @@ mod tests {
         let (flow, challenge) = create_pending_flow().expect("create flow");
         let url = authorization_url("public-client", &flow, &challenge).expect("auth URL");
         assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("scope=ai.read+offline_access"));
+        assert!(url.contains("scope=account-settings.read+ai.read+offline_access"));
+        assert!(!url.contains("ai.write"));
         assert!(!url.contains(flow.verifier.expose_secret()));
         assert!(!url.contains("client_secret"));
     }
@@ -937,13 +1077,11 @@ mod tests {
     fn connection_status_serialization_never_contains_secrets() {
         let status = CloudflareConnectionStatus {
             connected: true,
-            auth_method: Some("oauth"),
             account_name: Some("Synthetic Account".into()),
             needs_reauthentication: false,
             account_selection_required: false,
             accounts: Vec::new(),
             oauth_configured: true,
-            legacy_configured: false,
         };
         let json = serde_json::to_string(&status).expect("serialize status");
         for forbidden in [
@@ -958,17 +1096,9 @@ mod tests {
     }
 
     #[test]
-    fn auth_resolver_prefers_oauth_then_legacy() {
+    fn auth_resolver_requires_complete_oauth_credentials() {
         let mut storage = FakeStorage::default();
-        assert_eq!(stored_auth_method(&storage).expect("empty resolver"), None);
-        storage.values.extend([
-            (CredentialId::CloudflareApiToken, "legacy-token".into()),
-            (CredentialId::CloudflareAccountId, "legacy-account".into()),
-        ]);
-        assert_eq!(
-            stored_auth_method(&storage).expect("legacy resolver"),
-            Some(CloudflareAuthMethod::ApiToken)
-        );
+        assert!(!oauth_is_configured(&storage).expect("empty resolver"));
         storage.values.extend([
             (CredentialId::CloudflareOAuthAccessToken, "access".into()),
             (CredentialId::CloudflareOAuthRefreshToken, "refresh".into()),
@@ -978,10 +1108,7 @@ mod tests {
                 "oauth-account".into(),
             ),
         ]);
-        assert_eq!(
-            stored_auth_method(&storage).expect("OAuth resolver"),
-            Some(CloudflareAuthMethod::OAuth)
-        );
+        assert!(oauth_is_configured(&storage).expect("OAuth resolver"));
     }
 
     #[test]
@@ -989,6 +1116,14 @@ mod tests {
         assert!(token_needs_refresh(1_000, 1_000));
         assert!(token_needs_refresh(1_050, 1_000));
         assert!(!token_needs_refresh(1_061, 1_000));
+    }
+
+    #[test]
+    fn unauthorized_recovery_refreshes_only_the_rejected_token() {
+        let rejected = SecretString::from("rejected-access".to_string());
+        let current = SecretString::from("current-access".to_string());
+        assert!(access_token_needs_recovery(&rejected, &rejected));
+        assert!(!access_token_needs_recovery(&current, &rejected));
     }
 
     #[test]
@@ -1020,6 +1155,33 @@ mod tests {
         .expect_err("refresh fails");
         assert!(error.contains("再接続"));
         failure_server.join().expect("failure server");
+
+        let (client_error_url, client_error_server) = mock_response(
+            "401 Unauthorized",
+            r#"{"error":"invalid_client","error_description":"synthetic secret"}"#,
+        );
+        let error = tauri::async_runtime::block_on(request_refresh(
+            &client,
+            &client_error_url,
+            "public-client",
+            &refresh,
+        ))
+        .expect_err("invalid client fails");
+        assert!(error.contains("Token authentication method"));
+        assert!(!error.contains("synthetic secret"));
+        client_error_server.join().expect("client error server");
+
+        let (grant_error_url, grant_error_server) =
+            mock_response("400 Bad Request", r#"{"error":"unsupported_grant_type"}"#);
+        let error = tauri::async_runtime::block_on(request_refresh(
+            &client,
+            &grant_error_url,
+            "public-client",
+            &refresh,
+        ))
+        .expect_err("unsupported grant fails");
+        assert!(error.contains("Refresh Token"));
+        grant_error_server.join().expect("grant error server");
     }
 
     #[test]

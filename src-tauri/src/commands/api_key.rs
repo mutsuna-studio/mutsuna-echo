@@ -157,15 +157,13 @@ async fn validate_provider_api_key(
             crate::transcription::soniox::validate_api_key(api_key).await?;
             Ok(true)
         }
-        crate::credentials::CredentialId::CloudflareApiToken
-        | crate::credentials::CredentialId::CloudflareAccountId
-        | crate::credentials::CredentialId::CloudflareOAuthAccessToken
+        crate::credentials::CredentialId::CloudflareOAuthAccessToken
         | crate::credentials::CredentialId::CloudflareOAuthRefreshToken
         | crate::credentials::CredentialId::CloudflareOAuthExpiresAt
         | crate::credentials::CredentialId::CloudflareOAuthAccountId
         | crate::credentials::CredentialId::CloudflareOAuthAccountName
         | crate::credentials::CredentialId::CloudflareOAuthAccounts => {
-            Err("CloudflareではAPIトークンとAccount IDを一緒に設定してください。".into())
+            Err("Cloudflare認証情報はOAuth接続で管理されます。".into())
         }
     }
 }
@@ -175,30 +173,7 @@ pub(crate) async fn save_provider_api_key(
     app: AppHandle,
     provider_id: String,
     api_key: String,
-    account_id: Option<String>,
 ) -> Result<bool, String> {
-    if provider_id == "cloudflare" {
-        let account_id = normalized_secret(
-            account_id.unwrap_or_default(),
-            "Cloudflare Account IDを入力してください。",
-        )?;
-        let api_key = normalized_secret(api_key, "Cloudflare APIトークンを入力してください。")?;
-        crate::transcription::cloudflare::validate_credentials(&account_id, &api_key).await?;
-        persist_verified(
-            &mut AppCredentialStorage(&app),
-            &[
-                (
-                    crate::credentials::CredentialId::CloudflareApiToken,
-                    &api_key,
-                ),
-                (
-                    crate::credentials::CredentialId::CloudflareAccountId,
-                    &account_id,
-                ),
-            ],
-        )?;
-        return Ok(true);
-    }
     let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
     let api_key = normalized_secret(api_key, "APIキーを入力してください。")?;
     eprintln!("[api-key] validation started provider={provider_id}");
@@ -222,13 +197,6 @@ pub(crate) async fn save_provider_api_key(
 
 #[tauri::command]
 pub(crate) fn delete_provider_api_key(app: AppHandle, provider_id: String) -> Result<(), String> {
-    if provider_id == "cloudflare" {
-        crate::credentials::delete(&app, crate::credentials::CredentialId::CloudflareApiToken)?;
-        return crate::credentials::delete(
-            &app,
-            crate::credentials::CredentialId::CloudflareAccountId,
-        );
-    }
     let credential = crate::credentials::CredentialId::from_provider_id(&provider_id)?;
     crate::credentials::delete(&app, credential)
 }
@@ -236,7 +204,7 @@ pub(crate) fn delete_provider_api_key(app: AppHandle, provider_id: String) -> Re
 /// Validate and store the API key in the operating system's credential store.
 #[tauri::command]
 pub(crate) async fn save_api_key(app: AppHandle, api_key: String) -> Result<bool, String> {
-    save_provider_api_key(app, "elevenlabs".into(), api_key, None).await
+    save_provider_api_key(app, "elevenlabs".into(), api_key).await
 }
 
 /// Report whether a key is configured without returning the secret to the UI.
@@ -352,44 +320,6 @@ mod tests {
 
         assert!(error.contains("正しく保存できませんでした"));
         assert!(!storage.values.contains_key(&CredentialId::Soniox));
-    }
-
-    #[test]
-    fn cloudflare_pair_failure_restores_both_previous_values() {
-        let mut storage = FakeCredentialStorage {
-            values: HashMap::from([
-                (CredentialId::CloudflareApiToken, "old-token".into()),
-                (CredentialId::CloudflareAccountId, "old-account".into()),
-            ]),
-            fail_save_at: Some(2),
-            ..Default::default()
-        };
-        let token = SecretString::from("new-token".to_string());
-        let account = SecretString::from("new-account".to_string());
-
-        persist_verified(
-            &mut storage,
-            &[
-                (CredentialId::CloudflareApiToken, &token),
-                (CredentialId::CloudflareAccountId, &account),
-            ],
-        )
-        .expect_err("second write must roll back the pair");
-
-        assert_eq!(
-            storage
-                .values
-                .get(&CredentialId::CloudflareApiToken)
-                .map(String::as_str),
-            Some("old-token")
-        );
-        assert_eq!(
-            storage
-                .values
-                .get(&CredentialId::CloudflareAccountId)
-                .map(String::as_str),
-            Some("old-account")
-        );
     }
 
     #[test]

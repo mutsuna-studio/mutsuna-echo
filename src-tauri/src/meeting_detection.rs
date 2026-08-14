@@ -13,11 +13,13 @@ use tauri::{
     AppHandle, Manager, Runtime, WebviewWindowBuilder,
 };
 #[cfg(debug_assertions)]
-use tauri::{Emitter, RunEvent, WindowEvent};
+use tauri::{Emitter, RunEvent, WebviewUrl, WindowEvent};
 
 use crate::recording::{types::RecordingPhase, RecordingService};
 
 const OVERLAY_LABEL: &str = "meeting-overlay";
+#[cfg(debug_assertions)]
+const PROCESSING_PREVIEW_LABEL: &str = "processing-preview";
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const REQUIRED_CONSECUTIVE_SCANS: u8 = 2;
 #[cfg(debug_assertions)]
@@ -32,6 +34,24 @@ pub enum OverlayPreviewMode {
     Finalizing,
     Completed,
     Error,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessingPreviewMode {
+    Transcription,
+    Summary,
+}
+
+#[cfg(debug_assertions)]
+impl ProcessingPreviewMode {
+    fn app_url(self) -> &'static str {
+        match self {
+            Self::Transcription => "index.html?preview=processing-stage",
+            Self::Summary => "index.html?preview=processing-stage&kind=summary",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -287,6 +307,17 @@ pub fn close_overlay_preview(state: tauri::State<'_, MeetingDetectionState>) {
     state.set_preview_mode(None);
 }
 
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn show_processing_preview(
+    app: AppHandle,
+    mode: ProcessingPreviewMode,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || show_processing_preview_window(&app, mode))
+        .await
+        .map_err(|error| format!("待機画面プレビューの表示処理を待機できませんでした: {error}"))?
+}
+
 fn start_watcher<R: Runtime>(app: AppHandle<R>) {
     if let Err(error) = std::thread::Builder::new()
         .name("mutsuna-meeting-detection".into())
@@ -381,6 +412,46 @@ fn show_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         config.x = Some(position.x as f64 / scale + size.width as f64 / scale - width - 24.0);
         config.y = Some(position.y as f64 / scale + size.height as f64 / scale - height - 48.0);
     }
+    WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| error.to_string())?
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(debug_assertions)]
+fn show_processing_preview_window<R: Runtime>(
+    app: &AppHandle<R>,
+    mode: ProcessingPreviewMode,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(PROCESSING_PREVIEW_LABEL) {
+        window.destroy().map_err(|error| error.to_string())?;
+    }
+
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .cloned()
+        .ok_or_else(|| "main window configuration is missing".to_string())?;
+    config.label = PROCESSING_PREVIEW_LABEL.into();
+    config.title = "Mutsuna Echo - 待機画面プレビュー".into();
+    config.url = WebviewUrl::App(mode.app_url().into());
+    config.width = 1280.0;
+    config.height = 720.0;
+    config.min_width = Some(600.0);
+    config.min_height = Some(640.0);
+    config.center = true;
+    config.resizable = true;
+    config.maximizable = true;
+    config.minimizable = true;
+    config.decorations = true;
+    config.always_on_top = false;
+    config.skip_taskbar = false;
+    config.focus = true;
+
     WebviewWindowBuilder::from_config(app, &config)
         .map_err(|error| error.to_string())?
         .build()
@@ -608,7 +679,7 @@ mod platform {
 #[cfg(test)]
 mod tests {
     #[cfg(debug_assertions)]
-    use super::OverlayPreviewMode;
+    use super::{OverlayPreviewMode, ProcessingPreviewMode};
     use super::{
         classify_window, DetectionTracker, MeetingCandidate, MeetingDetectionState, MeetingProvider,
     };
@@ -671,5 +742,18 @@ mod tests {
         };
         assert!(state.observe(Some(candidate.clone())).is_none());
         assert!(state.observe(Some(candidate)).is_some());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn processing_preview_modes_open_the_matching_debug_route() {
+        assert_eq!(
+            ProcessingPreviewMode::Transcription.app_url(),
+            "index.html?preview=processing-stage"
+        );
+        assert_eq!(
+            ProcessingPreviewMode::Summary.app_url(),
+            "index.html?preview=processing-stage&kind=summary"
+        );
     }
 }

@@ -21,7 +21,7 @@
     deleting: boolean;
     hasApiKey: boolean;
     busy: boolean;
-    onSave: (apiKey: string, accountId?: string) => Promise<boolean>;
+    onSave: (apiKey: string) => Promise<boolean>;
     onDelete: () => void;
   }
 

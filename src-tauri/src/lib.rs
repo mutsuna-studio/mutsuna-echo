@@ -73,6 +73,7 @@ pub fn run() {
             commands::api_key::delete_provider_api_key,
             cloudflare_auth::get_cloudflare_connection_status,
             cloudflare_auth::start_cloudflare_oauth,
+            cloudflare_auth::cancel_cloudflare_oauth,
             cloudflare_auth::select_cloudflare_oauth_account,
             cloudflare_auth::disconnect_cloudflare_oauth,
             transcription::providers::get_transcription_providers,
@@ -169,6 +170,8 @@ pub fn run() {
             meeting_detection::get_overlay_preview_mode,
             #[cfg(all(desktop, debug_assertions))]
             meeting_detection::close_overlay_preview,
+            #[cfg(all(desktop, debug_assertions))]
+            meeting_detection::show_processing_preview,
             #[cfg(desktop)]
             resident::prepare_transcription_handoff
         ])

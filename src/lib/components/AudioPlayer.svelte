@@ -30,10 +30,11 @@
     seekRequest: AudioSeekRequest | null;
     onPositionChange: (positionMs: number, followTimeline: boolean) => void;
     onPlayingChange?: (playing: boolean) => void;
+    onWaveformChange?: (peaks: readonly number[]) => void;
     onError: (message: string) => void;
   };
 
-  let { audio, seekRequest, onPositionChange, onPlayingChange = () => {}, onError }: Props = $props();
+  let { audio, seekRequest, onPositionChange, onPlayingChange = () => {}, onWaveformChange = () => {}, onError }: Props = $props();
   let backend = $state<AudioPlaybackBackend | null>(null);
   let element = $state<HTMLAudioElement | null>(null);
   let playing = $state(false);
@@ -150,14 +151,14 @@
     const meetingId = audio.meetingId;
     let active = true;
     let stopListening: (() => void) | undefined;
-    waveformPeaks = [];
+    publishWaveform([]);
     waveformCompletedPoints = 0;
     waveformLoading = true;
     (async () => {
       try {
         stopListening = await listen<AudioWaveformProgress>("audio-waveform-progress", ({ payload }) => {
           if (!active || payload.meetingId !== meetingId) return;
-          waveformPeaks = payload.peaks;
+          publishWaveform(payload.peaks);
           waveformCompletedPoints = payload.completedPoints;
         });
         if (!active) {
@@ -171,7 +172,7 @@
       try {
         const waveform = await invoke<AudioWaveformData>("get_selected_audio_waveform", { meetingId, points: 320 });
         if (active && waveform.meetingId === meetingId) {
-          waveformPeaks = waveform.peaks;
+          publishWaveform(waveform.peaks);
           waveformCompletedPoints = waveform.points;
         }
       } catch (error) {
@@ -202,6 +203,11 @@
       return;
     }
     await startPlayback();
+  }
+
+  function publishWaveform(peaks: number[]) {
+    waveformPeaks = peaks;
+    onWaveformChange(peaks);
   }
 
   async function pausePlayback() {

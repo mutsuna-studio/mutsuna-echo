@@ -10,8 +10,6 @@ class CredentialNamesTest {
     val credentials = listOf(
       "elevenlabs",
       "soniox",
-      "cloudflare-api-token",
-      "cloudflare-account-id",
       "cloudflare-oauth-access-token",
       "cloudflare-oauth-refresh-token",
       "cloudflare-oauth-expires-at",

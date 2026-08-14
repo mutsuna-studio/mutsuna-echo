@@ -35,7 +35,7 @@ export type SummaryProgress = {
   meetingId: string;
   completedSteps: number;
   totalSteps: number;
-  stage: "summarizing" | "waiting" | "streaming" | "retrying" | "merging" | "checking" | "complete";
+  stage: "summarizing" | "waiting" | "streaming" | "retrying" | "merging" | "mechanically-repairing" | "repairing" | "checking" | "complete";
   activeStep?: number;
   attempt?: number;
   maxAttempts?: number;

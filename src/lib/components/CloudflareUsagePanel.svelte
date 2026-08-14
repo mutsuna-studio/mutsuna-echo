@@ -41,7 +41,7 @@
   {#if loading && !usage}
     <p class="usage-placeholder" role="status">利用状況を集計しています…</p>
   {:else}
-    <h3 class="usage-subheading">本日の無料枠（UTC基準）</h3>
+    <h3 class="usage-subheading">本日の無償利用枠（UTC基準）</h3>
     <div class="usage-grid">
       <div>
         <span>使用量</span>
@@ -61,14 +61,14 @@
       </div>
     </div>
     {#if usage}
-      <progress class="usage-progress" max="100" value={Math.min(usage.dailyUsagePercent, 100)} aria-label={`本日の無料枠を${usage.dailyUsagePercent.toFixed(1)}%使用`}></progress>
-      <p class="usage-meta">本日：{formatOptionalDuration(usage.dailyUsedDurationMs)}・{usage.dailyTranscriptionCount.toLocaleString("ja-JP")}回</p>
+      <progress class="usage-progress" max="100" value={Math.min(usage.dailyUsagePercent, 100)} aria-label={`本日の無償利用枠を${usage.dailyUsagePercent.toFixed(1)}%使用`}></progress>
+      <p class="usage-meta">本日：文字起こし {formatOptionalDuration(usage.dailyUsedDurationMs)}（{usage.dailyTranscriptionCount.toLocaleString("ja-JP")}回）・テキスト生成 {usage.dailyTextGenerationCount.toLocaleString("ja-JP")}回</p>
     {/if}
 
     <h3 class="usage-subheading monthly">今月の利用状況</h3>
     <div class="usage-grid">
       <div>
-        <span>利用額（無料枠適用前）</span>
+        <span>利用額（無償利用枠適用前）</span>
         <strong>{usage ? formatActualCost(usage.estimatedCostUsd) : "未取得"}</strong>
       </div>
       <div>
@@ -81,15 +81,18 @@
       </div>
       <div>
         <span>実行回数</span>
-        <strong>{usage ? `${usage.transcriptionCount.toLocaleString("ja-JP")}回` : "未取得"}</strong>
+        <strong>{usage ? `${(usage.transcriptionCount + usage.textGenerationCount).toLocaleString("ja-JP")}回` : "未取得"}</strong>
       </div>
     </div>
+    {#if usage}
+      <p class="usage-meta">文字起こし {usage.transcriptionCount.toLocaleString("ja-JP")}回・テキスト生成 {usage.textGenerationCount.toLocaleString("ja-JP")}回</p>
+    {/if}
   {/if}
 
   {#if error}
     <Alert class="usage-warning" variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>
   {/if}
   <p class="usage-note">
-    このアプリの履歴を公式単価（音声1分あたり$0.0005・46.63 Neurons）で集計した推定値です。無料枠はCloudflareアカウント全体で1日10,000 Neuronsです。ほかのWorkerやアプリの利用分は含まれないため、実際の残量とは異なる場合があります。
+    このアプリの文字起こし履歴とテキスト生成履歴を、利用モデルの公式単価で集計した推定値です。無償利用枠はCloudflareアカウント全体で1日10,000 Neuronsです。ほかのWorkerやアプリの利用分は含まれないため、実際の残量とは異なる場合があります。
   </p>
 </Card>

@@ -122,13 +122,23 @@ fn transcribe_speech_regions(
     hotwords: Option<&str>,
     accurate: bool,
 ) -> Result<(Vec<TranscriptToken>, Vec<TranscriptSegment>), String> {
+    const VAD_PROGRESS_END: f64 = 0.20;
+    const ACCURATE_PRIMARY_PROGRESS_END: f64 = 0.85;
+    const TRANSCRIPTION_PROGRESS_END: f64 = 0.95;
+    let primary_progress_end = if accurate {
+        ACCURATE_PRIMARY_PROGRESS_END
+    } else {
+        TRANSCRIPTION_PROGRESS_END
+    };
     let total_vad_units = vad_total_units(audio_duration_ms);
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(
+        TranscriptionProgress::scaled(
             TranscriptionStage::DetectingSpeech,
             0,
-            Some(total_vad_units),
+            total_vad_units,
+            0.0,
+            VAD_PROGRESS_END,
         ),
     );
     let mut published_vad_units = 0u32;
@@ -209,10 +219,12 @@ fn transcribe_speech_regions(
                     published_vad_units = completed;
                     publish_transcription_progress(
                         app,
-                        TranscriptionProgress::new(
+                        TranscriptionProgress::scaled(
                             TranscriptionStage::DetectingSpeech,
                             completed,
-                            Some(total_vad_units),
+                            total_vad_units,
+                            0.0,
+                            VAD_PROGRESS_END,
                         ),
                     );
                 }
@@ -262,16 +274,24 @@ fn transcribe_speech_regions(
     if published_vad_units < total_vad_units {
         publish_transcription_progress(
             app,
-            TranscriptionProgress::new(
+            TranscriptionProgress::scaled(
                 TranscriptionStage::DetectingSpeech,
                 total_vad_units,
-                Some(total_vad_units),
+                total_vad_units,
+                0.0,
+                VAD_PROGRESS_END,
             ),
         );
     }
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, Some(total_chunks)),
+        TranscriptionProgress::scaled(
+            TranscriptionStage::Transcribing,
+            0,
+            total_chunks,
+            VAD_PROGRESS_END,
+            primary_progress_end,
+        ),
     );
     if total_chunks == 0 {
         return Ok((Vec::new(), Vec::new()));
@@ -312,6 +332,7 @@ fn transcribe_speech_regions(
                 &mut tokens,
                 &mut completed_chunks,
                 total_chunks,
+                primary_progress_end,
             )?;
         }
         Ok(())
@@ -336,6 +357,7 @@ fn transcribe_speech_regions(
         &mut tokens,
         &mut completed_chunks,
         total_chunks,
+        primary_progress_end,
     )?;
     if accurate {
         recover_sparse_utterances(
@@ -346,8 +368,6 @@ fn transcribe_speech_regions(
             &utterances,
             hotwords,
             &mut tokens,
-            &mut completed_chunks,
-            total_chunks,
         )?;
     }
     recognition_timer.finish();
@@ -414,22 +434,25 @@ fn recover_sparse_utterances(
     utterances: &[vad::SpeechRegion],
     hotwords: Option<&str>,
     tokens: &mut Vec<TranscriptToken>,
-    completed_chunks: &mut u32,
-    primary_chunks: u32,
 ) -> Result<(), String> {
     let candidates = sparse_utterance_candidates(tokens, utterances);
     if candidates.is_empty() {
+        publish_transcription_progress(
+            app,
+            TranscriptionProgress::scaled(TranscriptionStage::RecoveringSpeech, 1, 1, 0.85, 0.95),
+        );
         eprintln!("processing_recovery candidates=0 augmented=0 added_tokens=0");
         return Ok(());
     }
     let recovery_chunks = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
-    let total_chunks = primary_chunks.saturating_add(recovery_chunks);
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(
-            TranscriptionStage::Transcribing,
-            *completed_chunks,
-            Some(total_chunks),
+        TranscriptionProgress::scaled(
+            TranscriptionStage::RecoveringSpeech,
+            0,
+            recovery_chunks,
+            0.85,
+            0.95,
         ),
     );
     let batch_size = crate::compute_tuning::stt_batch_size(
@@ -446,6 +469,7 @@ fn recover_sparse_utterances(
     let mut pending = Vec::with_capacity(batch_size);
     let mut augmented = 0usize;
     let mut added_tokens = 0usize;
+    let mut completed_chunks = 0u32;
     let mut accept = |region_index: usize, sample_rate: u32, samples: &[f32]| {
         let stream = create_stream(recognizer, hotwords);
         stream.accept_waveform(sample_rate as i32, samples);
@@ -460,8 +484,8 @@ fn recover_sparse_utterances(
                 &candidates,
                 &mut pending,
                 tokens,
-                completed_chunks,
-                total_chunks,
+                &mut completed_chunks,
+                recovery_chunks,
                 &mut augmented,
                 &mut added_tokens,
             )?;
@@ -484,8 +508,8 @@ fn recover_sparse_utterances(
         &candidates,
         &mut pending,
         tokens,
-        completed_chunks,
-        total_chunks,
+        &mut completed_chunks,
+        recovery_chunks,
         &mut augmented,
         &mut added_tokens,
     )?;
@@ -571,10 +595,12 @@ fn flush_recovery_batch(
     }
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(
-            TranscriptionStage::Transcribing,
+        TranscriptionProgress::scaled(
+            TranscriptionStage::RecoveringSpeech,
             *completed_chunks,
-            Some(total_chunks),
+            total_chunks,
+            0.85,
+            0.95,
         ),
     );
     Ok(())
@@ -632,6 +658,7 @@ fn flush_recognition_batch(
     tokens: &mut Vec<TranscriptToken>,
     completed_chunks: &mut u32,
     total_chunks: u32,
+    progress_end: f64,
 ) -> Result<(), String> {
     if pending.is_empty() {
         return Ok(());
@@ -662,10 +689,12 @@ fn flush_recognition_batch(
     }
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(
+        TranscriptionProgress::scaled(
             TranscriptionStage::Transcribing,
             *completed_chunks,
-            Some(total_chunks),
+            total_chunks,
+            0.20,
+            progress_end,
         ),
     );
     Ok(())

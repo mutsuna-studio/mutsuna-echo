@@ -71,6 +71,7 @@
   import type { MeetingDocument } from "../types/meeting-document";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
+  import ProcessingStage from "./ProcessingStage.svelte";
   import SummarySourceSheet from "./SummarySourceSheet.svelte";
   import TranscriptView from "./TranscriptView.svelte";
   import TranscriptionContextEditor from "./TranscriptionContextEditor.svelte";
@@ -99,6 +100,7 @@
     providers: readonly TranscriptionProviderDefinition[];
     provider: TranscriptionProviderId;
     transcribing: boolean;
+    processingCurrentMeeting: boolean;
     progress: TranscriptionProgress | null;
     canTranscribe: boolean;
     diarizing: boolean;
@@ -162,6 +164,7 @@
     providers,
     provider,
     transcribing,
+    processingCurrentMeeting,
     progress,
     canTranscribe,
     diarizing,
@@ -214,6 +217,7 @@
   ));
 
   let detailTab = $state<"summary" | "transcript" | "info">("transcript");
+  let audioWaveformPeaks = $state.raw<number[]>([]);
   const detailTabs = ["summary", "transcript", "info"] as const;
   let workspaceElement = $state<HTMLElement | null>(null);
   let tabSwipe = $state<{ x: number; y: number } | null>(null);
@@ -360,6 +364,7 @@
   });
 
   function startTranscription() {
+    retranscriptionDialogOpen = false;
     if (provider !== "local" || diarizationSpeakerCount === "off") {
       onTranscribe(undefined);
       return;
@@ -385,9 +390,33 @@
       if (progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
       return "発話を検出中…";
     }
+    if (progress?.stage === "recoveringSpeech" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     if (progress?.stage === "transcribing" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     return "文字起こし中…";
   });
+  const transcriptionProcessing = $derived(transcribing && processingCurrentMeeting);
+  const transcriptionProgressStatus = $derived.by(() => {
+    if (progress?.stage === "detectingSpeech") return "発話を探しています";
+    if (progress?.stage === "transcribing") return progress.totalChunks != null
+      ? `文字起こし中 ${progress.completedChunks} / ${progress.totalChunks}`
+      : "文字起こし中";
+    if (progress?.stage === "recoveringSpeech") return progress.totalChunks != null
+      ? `聞き漏らしを確認中 ${progress.completedChunks} / ${progress.totalChunks}`
+      : "聞き漏らしを確認中";
+    if (progress?.stage === "finalizing") return "文字起こしを保存しています";
+    if (progress?.stage === "complete") return "文字起こしが完了しました";
+    return "文字起こしを準備中";
+  });
+  const transcriptionProgressDetail = $derived.by(() => {
+    if (progress?.stage === "detectingSpeech") return "音声から会話の区間を見つけています";
+    if (progress?.stage === "transcribing") return "聞き取ったことばを読みやすく整えています";
+    if (progress?.stage === "recoveringSpeech") return "短い発話や文末の聞き漏らしを補っています";
+    if (progress?.stage === "finalizing") return "結果を会議へ反映しています";
+    if (progress?.stage === "complete") return "すべての処理が完了しました";
+    return "音声とモデルを準備しています";
+  });
+  const transcriptionProgressValue = $derived(progress?.overallProgress != null ? progress.overallProgress * 100 : null);
+  const transcriptionProgressMax = $derived(progress?.overallProgress != null ? 100 : null);
   const contextStatus = $derived.by(() => {
     if (!selectedProvider) return "モデルを選択してください";
     if (!contextEnabled) return "カスタム指示・辞書: オフ";
@@ -561,6 +590,7 @@
           {seekRequest}
           onPositionChange={handlePlaybackPosition}
           onPlayingChange={(playing) => playbackPlaying = playing}
+          onWaveformChange={(peaks) => audioWaveformPeaks = [...peaks]}
           {onError}
         />
       </div>
@@ -613,7 +643,16 @@
           onShowSource={showSummarySource}
         />
       {:else if detailTab === "transcript"}
-        {#if transcript}
+        {#if transcriptionProcessing}
+          <ProcessingStage
+            kind="transcription"
+            status={transcriptionProgressStatus}
+            detail={transcriptionProgressDetail}
+            progressValue={transcriptionProgressValue}
+            progressMax={transcriptionProgressMax}
+            waveformPeaks={audioWaveformPeaks}
+          />
+        {:else if transcript}
           <section class="transcription-overview" aria-label="現在の文字起こし" aria-busy={runLoadingId !== null}>
             <div class="current-transcription">
               <strong>{runLoadingId ? "切り替えています" : "現在の文字起こし"}</strong>

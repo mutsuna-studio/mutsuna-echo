@@ -232,6 +232,14 @@ fn api_error(status: StatusCode, envelope: Option<&ApiEnvelope<serde_json::Value
     }
 }
 
+pub(crate) fn is_authentication_error(error: &str) -> bool {
+    const MESSAGE: &str = "Cloudflareの認証情報が無効または期限切れです。";
+    error == MESSAGE
+        || error
+            .strip_suffix(MESSAGE)
+            .is_some_and(|prefix| prefix.ends_with(": "))
+}
+
 pub(crate) async fn validate_credentials(
     account: &SecretString,
     api_token: &SecretString,
@@ -269,13 +277,27 @@ pub(crate) enum TextGenerationProgress {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextGenerationOutput {
+    pub(crate) text: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) usage_estimated: bool,
+}
+
+#[derive(Debug, Default)]
+struct TextGenerationUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
 pub(crate) async fn generate_text<F>(
     account: &SecretString,
     api_token: &SecretString,
     model_id: &str,
     prompt: &str,
     mut on_progress: F,
-) -> Result<String, String>
+) -> Result<TextGenerationOutput, String>
 where
     F: FnMut(TextGenerationProgress),
 {
@@ -334,7 +356,7 @@ async fn request_text_generation<F>(
     model_id: &str,
     prompt: &str,
     on_stream_started: F,
-) -> Result<String, TextGenerationError>
+) -> Result<TextGenerationOutput, TextGenerationError>
 where
     F: FnOnce(),
 {
@@ -383,16 +405,18 @@ where
         });
     }
     on_stream_started();
-    read_text_generation_stream(response).await
+    read_text_generation_stream(response, prompt).await
 }
 
 async fn read_text_generation_stream(
     response: reqwest::Response,
-) -> Result<String, TextGenerationError> {
+    prompt: &str,
+) -> Result<TextGenerationOutput, TextGenerationError> {
     let mut stream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     let mut event_data = Vec::<String>::new();
     let mut output = String::new();
+    let mut usage = TextGenerationUsage::default();
     loop {
         let next = tokio::time::timeout(TEXT_GENERATION_IDLE_TIMEOUT, stream.next())
             .await
@@ -421,8 +445,8 @@ async fn read_text_generation_stream(
                 retryable: true,
             })?;
             if line.is_empty() {
-                if consume_text_generation_event(&mut event_data, &mut output)? {
-                    return Ok(output);
+                if consume_text_generation_event(&mut event_data, &mut output, &mut usage)? {
+                    return finish_text_generation(output, usage, prompt);
                 }
             } else if let Some(data) = line.strip_prefix("data:") {
                 event_data.push(data.trim_start().to_string());
@@ -438,20 +462,39 @@ async fn read_text_generation_stream(
             event_data.push(data.trim_start().to_string());
         }
     }
-    consume_text_generation_event(&mut event_data, &mut output)?;
+    consume_text_generation_event(&mut event_data, &mut output, &mut usage)?;
+    finish_text_generation(output, usage, prompt)
+}
+
+fn finish_text_generation(
+    output: String,
+    usage: TextGenerationUsage,
+    prompt: &str,
+) -> Result<TextGenerationOutput, TextGenerationError> {
     if output.trim().is_empty() {
         Err(TextGenerationError {
             message: "Cloudflare Workers AIから会議ノート本文を受信できませんでした。".into(),
             retryable: true,
         })
     } else {
-        Ok(output)
+        let usage_estimated = usage.input_tokens.is_none() || usage.output_tokens.is_none();
+        Ok(TextGenerationOutput {
+            input_tokens: usage
+                .input_tokens
+                .unwrap_or_else(|| estimate_text_tokens(prompt)),
+            output_tokens: usage
+                .output_tokens
+                .unwrap_or_else(|| estimate_text_tokens(&output)),
+            text: output,
+            usage_estimated,
+        })
     }
 }
 
 fn consume_text_generation_event(
     event_data: &mut Vec<String>,
     output: &mut String,
+    usage: &mut TextGenerationUsage,
 ) -> Result<bool, TextGenerationError> {
     if event_data.is_empty() {
         return Ok(false);
@@ -494,7 +537,32 @@ fn consume_text_generation_event(
     if let Some(text) = text {
         output.push_str(text);
     }
+    if let Some(value) = value.get("usage") {
+        usage.input_tokens = value
+            .get("prompt_tokens")
+            .or_else(|| value.get("input_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .or(usage.input_tokens);
+        usage.output_tokens = value
+            .get("completion_tokens")
+            .or_else(|| value.get("output_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .or(usage.output_tokens);
+    }
     Ok(false)
+}
+
+pub(crate) fn estimate_text_tokens(value: &str) -> u64 {
+    let mut ascii = 0_u64;
+    let mut non_ascii = 0_u64;
+    for character in value.chars() {
+        if character.is_ascii() {
+            ascii = ascii.saturating_add(1);
+        } else {
+            non_ascii = non_ascii.saturating_add(1);
+        }
+    }
+    ascii.saturating_add(3) / 4 + non_ascii
 }
 
 fn retryable_text_generation_status(status: StatusCode) -> bool {
@@ -889,7 +957,7 @@ pub(crate) async fn transcribe(
     let total_work = total_chunks.saturating_mul(2);
     publish_transcription_progress(
         app,
-        TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, Some(total_work)),
+        TranscriptionProgress::scaled(TranscriptionStage::Transcribing, 0, total_work, 0.05, 0.95),
     );
     let cache_directory = app
         .path()
@@ -917,10 +985,12 @@ pub(crate) async fn transcribe(
                 *progress = progress.saturating_add(1);
                 publish_transcription_progress(
                     &producer_app,
-                    TranscriptionProgress::new(
+                    TranscriptionProgress::scaled(
                         TranscriptionStage::Transcribing,
                         *progress,
-                        Some(total_work),
+                        total_work,
+                        0.05,
+                        0.95,
                     ),
                 );
             },
@@ -955,10 +1025,12 @@ pub(crate) async fn transcribe(
                 *progress = progress.saturating_add(1);
                 publish_transcription_progress(
                     &app,
-                    TranscriptionProgress::new(
+                    TranscriptionProgress::scaled(
                         TranscriptionStage::Transcribing,
                         *progress,
-                        Some(total_work),
+                        total_work,
+                        0.05,
+                        0.95,
                     ),
                 );
                 Ok::<_, String>((chunk, normalize(response)))
@@ -1013,10 +1085,10 @@ fn format_cost_usd(audio_duration_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_windows, consume_text_generation_event, format_cost_usd, merge_chunks, normalize,
-        retryable_text_generation_status, ChunkSpec, TextGenerationMessage, TextGenerationRequest,
-        WorkersAiTextGeneration, WorkersAiTranscript, CHUNK_CORE_MS, CHUNK_OVERLAP_MS, MODEL_ID,
-        TEXT_GENERATION_MAX_TOKENS,
+        chunk_windows, consume_text_generation_event, format_cost_usd, is_authentication_error,
+        merge_chunks, normalize, retryable_text_generation_status, ChunkSpec,
+        TextGenerationMessage, TextGenerationRequest, TextGenerationUsage, WorkersAiTextGeneration,
+        WorkersAiTranscript, CHUNK_CORE_MS, CHUNK_OVERLAP_MS, MODEL_ID, TEXT_GENERATION_MAX_TOKENS,
     };
     use crate::transcription::{TokenTimeSource, Transcript, TranscriptToken};
     use std::path::PathBuf;
@@ -1084,14 +1156,30 @@ mod tests {
     #[test]
     fn streaming_events_preserve_native_and_openai_text_deltas() {
         let mut output = String::new();
+        let mut usage = TextGenerationUsage::default();
         let mut native = vec![r#"{"response":"前半"}"#.to_string()];
         let mut compatible = vec![r#"{"choices":[{"delta":{"content":"後半"}}]}"#.to_string()];
+        let mut usage_event = vec![
+            r#"{"usage":{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}"#
+                .to_string(),
+        ];
         let mut done = vec!["[DONE]".to_string()];
 
-        assert!(!consume_text_generation_event(&mut native, &mut output).expect("native"));
-        assert!(!consume_text_generation_event(&mut compatible, &mut output).expect("compatible"));
-        assert!(consume_text_generation_event(&mut done, &mut output).expect("done"));
+        assert!(
+            !consume_text_generation_event(&mut native, &mut output, &mut usage).expect("native")
+        );
+        assert!(
+            !consume_text_generation_event(&mut compatible, &mut output, &mut usage)
+                .expect("compatible")
+        );
+        assert!(
+            !consume_text_generation_event(&mut usage_event, &mut output, &mut usage)
+                .expect("usage")
+        );
+        assert!(consume_text_generation_event(&mut done, &mut output, &mut usage).expect("done"));
         assert_eq!(output, "前半後半");
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(34));
     }
 
     #[test]
@@ -1110,6 +1198,22 @@ mod tests {
         ] {
             assert!(!retryable_text_generation_status(status));
         }
+    }
+
+    #[test]
+    fn oauth_unauthorized_error_is_classified_for_token_recovery() {
+        assert!(is_authentication_error(
+            "Cloudflareの認証情報が無効または期限切れです。"
+        ));
+        assert!(is_authentication_error(
+            "会議ノート生成を1回試行しましたが完了できませんでした: Cloudflareの認証情報が無効または期限切れです。"
+        ));
+        assert!(!is_authentication_error(
+            "Cloudflareの認証情報にWorkers AIの読み取り・実行権限がありません。"
+        ));
+        assert!(!is_authentication_error(
+            "Cloudflareの認証情報が無効または期限切れです。追加情報"
+        ));
     }
 
     #[test]

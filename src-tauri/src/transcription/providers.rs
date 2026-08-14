@@ -14,7 +14,7 @@ enum ProviderKind {
 #[serde(rename_all = "camelCase")]
 enum ProviderSetup {
     ApiKey,
-    OAuthOrApiKey,
+    OAuth,
     ModelDownload,
 }
 
@@ -115,11 +115,11 @@ const SONIOX_DEFINITION: ProviderDefinition = ProviderDefinition {
 
 const CLOUDFLARE_DEFINITION: ProviderDefinition = ProviderDefinition {
     id: "cloudflare",
-    label: "Cloudflare Free",
+    label: "Cloudflare Workers AI",
     kind: ProviderKind::Cloud,
-    setup: ProviderSetup::OAuthOrApiKey,
+    setup: ProviderSetup::OAuth,
     default_model_label: "Whisper Large v3 Turbo",
-    capability_summary: "多言語・単語タイムスタンプ・無料枠",
+    capability_summary: "多言語・単語タイムスタンプ",
     capabilities: CLOUDFLARE_CAPABILITIES,
 };
 
@@ -284,7 +284,7 @@ fn cloudflare(configured: bool) -> TranscriptionProviderDescriptor {
         capability_summary: CLOUDFLARE_DEFINITION.capability_summary,
         capabilities: CLOUDFLARE_DEFINITION.capabilities,
         status_message: if configured {
-            "Cloudflare Workers AIの無料枠を利用できます。".into()
+            "Cloudflare Workers AIへ接続済みです。".into()
         } else {
             "Cloudflareへ接続してください。APIトークンも詳細設定から利用できます。".into()
         },

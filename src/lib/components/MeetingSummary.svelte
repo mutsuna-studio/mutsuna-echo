@@ -19,6 +19,7 @@
     SummaryProviderDefinition,
     SummarySourceSelection
   } from "../types/summary";
+  import ProcessingStage from "./ProcessingStage.svelte";
 
   type Props = {
     transcript: EditableTranscript | null;
@@ -69,67 +70,78 @@
   const summary = $derived(status);
   const selectedModelLabel = $derived(modelsLoading ? "モデルを取得中…" : (modelOptions.find((option) => option.value === modelId)?.label ?? "モデルを選択"));
   const progressDetail = $derived.by(() => {
-    if (!progress) return null;
     const details: string[] = [];
+    details.push(`経過 ${formatElapsed(elapsedSeconds)}`);
+    if (!progress) return details[0];
     if (progress.totalSteps > 1 && progress.activeStep) details.push(`${progress.activeStep}/${progress.totalSteps}`);
     if (progress.attempt && progress.maxAttempts) details.push(`試行 ${progress.attempt}/${progress.maxAttempts}`);
     if (progress.stage === "retrying" && progress.retryDelaySeconds) details.push(`${progress.retryDelaySeconds}秒後`);
-    if (progress.receivedBytes) details.push(`${new Intl.NumberFormat("ja-JP").format(progress.receivedBytes)} bytes受信`);
     return details.length > 0 ? details.join(" · ") : null;
   });
   const compactProgressLabel = $derived.by(() => {
     if (progress?.stage === "retrying") return "再試行中";
     if (progress?.stage === "merging") return "統合中";
-    if (progress?.stage === "checking") return "会議ノートを仕上げ中";
-    if (!progressDetail && activities.length === 0) return "準備中…";
-    return null;
+    if (progress?.stage === "mechanically-repairing") return "生成結果を機械補正中";
+    if (progress?.stage === "repairing") return "生成結果を補正中";
+    if (progress?.stage === "checking") return "内容とタイトルを確認中";
+    if (progress?.stage === "streaming") return "生成結果を受信中";
+    if (progress?.stage === "waiting") return "AIの応答を待っています";
+    return "会議ノートを準備中";
   });
-  type Activity = {
-    kind: NonNullable<SummaryProgress["activityKind"]>;
-    text: string;
-    status?: string;
-  };
-
-  let activities = $state.raw<Activity[]>([]);
-  let activityRunActive = $state(false);
+  const visibleProgressStep = $derived(progress ? granularSummaryProgress(progress) : null);
   let saving = $state(false);
   let editableDocument = $state<MeetingDocument | null>(null);
   let dirty = $state(false);
   let editVersion = $state(0);
   let copied = $state(false);
+  let generationStartedAt = $state<number | null>(null);
+  let elapsedSeconds = $state(0);
+
+  function formatElapsed(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return minutes > 0 ? `${minutes}分${remainder.toString().padStart(2, "0")}秒` : `${remainder}秒`;
+  }
+
+  function granularSummaryProgress(value: SummaryProgress): number {
+    const total = Math.max(1, value.totalSteps);
+    const completed = Math.min(total, Math.max(0, value.completedSteps));
+    if (value.stage === "complete" || completed >= total) return total;
+
+    let fraction = 0.08;
+    if (value.stage === "waiting") fraction = 0.18;
+    else if (value.stage === "retrying") fraction = 0.22;
+    else if (value.stage === "streaming") {
+      const receivedBytes = Math.max(0, value.receivedBytes ?? 0);
+      fraction = receivedBytes > 0
+        ? 0.38 + 0.54 * (1 - Math.exp(-receivedBytes / 8_000))
+        : 0.38;
+    } else if (value.stage === "merging") fraction = 0.72;
+    else if (value.stage === "checking") fraction = 0.86;
+
+    return Math.min(total - 0.02, completed + fraction);
+  }
+
+  $effect(() => {
+    if (!generating) {
+      generationStartedAt = null;
+      elapsedSeconds = 0;
+      return;
+    }
+    const startedAt = untrack(() => generationStartedAt) ?? Date.now();
+    generationStartedAt = startedAt;
+    elapsedSeconds = Math.floor((Date.now() - startedAt) / 1_000);
+    const timer = window.setInterval(() => {
+      elapsedSeconds = Math.floor((Date.now() - startedAt) / 1_000);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  });
 
   $effect(() => {
     const document = status;
     if (!document || dirty || saving) return;
     if (editableDocument?.revision === document.revision) return;
     editableDocument = structuredClone(document);
-  });
-
-  $effect(() => {
-    const running = generating;
-    const update = progress;
-    if (running && !activityRunActive) activities = [];
-    activityRunActive = running;
-    if (!running) {
-      if (untrack(() => activities.length) > 0) activities = [];
-      return;
-    }
-    if (!update?.activityKind || !update.activityText) return;
-
-    const next: Activity = {
-      kind: update.activityKind,
-      text: update.activityText,
-      status: update.activityStatus
-    };
-    const current = untrack(() => activities);
-    const last = current[current.length - 1];
-    const replacesLast = last && (
-      (last.kind === "thought" && next.kind === "thought")
-      || (last.kind === next.kind && last.text === next.text)
-    );
-    activities = replacesLast
-      ? [...current.slice(0, -1), next]
-      : [...current.slice(-11), next];
   });
 
   const generation = $derived(summary?.generationRuns.find((run) => run.runId === summary.latestGenerationRunId));
@@ -259,24 +271,16 @@
 
 <section class="meeting-summary" aria-label="会議ノート">
   {#if generating}
-    <div class="summary-progress" role="status" aria-live="polite">
-      {#if compactProgressLabel}<span>{compactProgressLabel}</span>{/if}
-      {#if progressDetail}<small>{progressDetail}</small>{/if}
-      {#if activities.length > 0}
-        <div class="summary-activities" aria-label="AIエージェントの作業状況">
-          {#each activities as activity, index (`${index}:${activity.kind}:${activity.text}`)}
-            <div class="summary-activity">
-              <p>{activity.text}</p>
-            </div>
-          {/each}
-        </div>
-      {/if}
-      {#if (progress?.totalSteps ?? 1) > 1}
-        <progress max={progress?.totalSteps ?? 1} value={progress?.completedSteps ?? 0} aria-label="会議ノートの生成進捗"></progress>
-      {/if}
-    </div>
-  {/if}
-  {#if !generating && attempt?.status === "failed"}
+    <ProcessingStage
+      kind="summary"
+      status={compactProgressLabel}
+      detail={progressDetail}
+      progressValue={visibleProgressStep}
+      progressMax={progress?.totalSteps ?? null}
+      summarySourceLines={transcript?.segments.map((segment) => segment.text) ?? []}
+    />
+  {:else}
+  {#if attempt?.status === "failed"}
     <div class="generation-failure" role="alert">
       <AlertTriangle aria-hidden="true" />
       <div>
@@ -423,16 +427,11 @@
   {:else}
     <div class="empty-note blocked"><Sparkles aria-hidden="true" /><h2>先に文字起こしを作成してください</h2><p>会議ノートは文字起こしをもとに生成されます。「文字起こし」タブから作成してください。</p></div>
   {/if}
+  {/if}
 </section>
 
 <style>
   .meeting-summary { max-width: 880px; margin: 22px auto 0; }
-  .summary-progress { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px 12px; padding: 2px 2px 18px; color: var(--muted-foreground); font-size: 0.76rem; }
-  .summary-progress small { grid-column: 1 / -1; color: var(--muted-foreground); font-size: 0.69rem; }
-  .summary-activities { display: grid; max-height: 260px; grid-column: 1 / -1; gap: 7px; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in oklch, var(--muted) 18%, transparent); }
-  .summary-activity { padding: 9px 11px; border-radius: 7px; background: color-mix(in oklch, var(--muted) 35%, var(--background)); }
-  .summary-activity p { max-height: 7.5em; margin: 0; overflow: auto; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.5; white-space: pre-wrap; }
-  .summary-progress progress { width: 100%; height: 7px; grid-column: 1 / -1; accent-color: var(--primary); }
   .generation-failure { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px; margin-bottom: 18px; padding: 14px; border: 1px solid color-mix(in oklch, var(--destructive) 28%, var(--border)); border-radius: 10px; background: color-mix(in oklch, var(--destructive) 6%, var(--background)); }
   .generation-failure > :global(svg) { width: 18px; height: 18px; margin-top: 1px; color: var(--destructive); }
   .generation-failure div { min-width: 0; }

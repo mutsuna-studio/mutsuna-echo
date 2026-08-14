@@ -1,10 +1,15 @@
-use std::time::Duration;
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    sync::Mutex,
+    time::Duration,
+};
 
 use chrono::{DateTime, Datelike, Months, Utc};
 use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::transcription::elevenlabs::client::{api_error_kind, ApiErrorKind, ElevenLabsClient};
 
@@ -14,6 +19,8 @@ const USAGE_URL: &str =
 // ElevenLabs prices Scribe v2 at $0.22/hour. API credits represent
 // $0.0001 each (10,000 credits per USD), so one hour consumes 2,200 credits.
 const SCRIBE_V2_CREDITS_PER_HOUR: f64 = 2_200.0;
+const MAX_CLOUDFLARE_TEXT_USAGE_BYTES: u64 = 8 * 1024 * 1024;
+static CLOUDFLARE_TEXT_USAGE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 struct SubscriptionResponse {
@@ -57,10 +64,12 @@ pub(crate) struct CloudflareUsage {
     used_duration_ms: u64,
     estimated_neurons: f64,
     transcription_count: u64,
+    text_generation_count: u64,
     period_start: String,
     daily_used_duration_ms: u64,
     daily_estimated_neurons: f64,
     daily_transcription_count: u64,
+    daily_text_generation_count: u64,
     daily_free_allocation_neurons: f64,
     daily_remaining_neurons: f64,
     daily_usage_percent: f64,
@@ -72,6 +81,27 @@ pub(crate) struct CloudflareUsage {
 struct CloudflareUsageEstimate {
     cost_usd: f64,
     duration_ms: u64,
+    neurons: f64,
+    run_count: u64,
+    text_generation_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudflareTextUsageRecord {
+    occurred_at: String,
+    operation: String,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    estimated: bool,
+    cost_usd: f64,
+    neurons: f64,
+}
+
+#[derive(Debug, Default)]
+struct CloudflareTextUsageEstimate {
+    cost_usd: f64,
     neurons: f64,
     run_count: u64,
 }
@@ -360,10 +390,12 @@ pub(crate) fn get_cloudflare_usage(app: AppHandle) -> Result<CloudflareUsage, St
         used_duration_ms: monthly.duration_ms,
         estimated_neurons: monthly.neurons,
         transcription_count: monthly.run_count,
+        text_generation_count: monthly.text_generation_count,
         period_start: period_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         daily_used_duration_ms: daily.duration_ms,
         daily_estimated_neurons: daily.neurons,
         daily_transcription_count: daily.run_count,
+        daily_text_generation_count: daily.text_generation_count,
         daily_free_allocation_neurons: free_allocation,
         daily_remaining_neurons,
         daily_usage_percent,
@@ -401,12 +433,187 @@ fn estimate_cloudflare_usage_since(
     let used_duration_ms = (used_minutes * 60_000.0).round().max(0.0) as u64;
     let estimated_neurons =
         used_minutes * crate::transcription::cloudflare::NEURONS_PER_AUDIO_MINUTE;
+    let text = cloudflare_text_usage_since(app, since)?;
     Ok(CloudflareUsageEstimate {
-        cost_usd: estimated_cost_usd,
+        cost_usd: estimated_cost_usd + text.cost_usd,
         duration_ms: used_duration_ms,
-        neurons: estimated_neurons,
+        neurons: estimated_neurons + text.neurons,
         run_count: usage.run_count,
+        text_generation_count: text.run_count,
     })
+}
+
+pub(crate) fn record_cloudflare_text_usage(
+    app: &AppHandle,
+    operation: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    estimated: bool,
+) -> Result<(), String> {
+    let record = cloudflare_text_usage_record(
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        operation,
+        model,
+        input_tokens,
+        output_tokens,
+        estimated,
+    )?;
+    let bytes = serde_json::to_vec(&record)
+        .map_err(|error| format!("Cloudflareのテキスト利用状況を変換できませんでした: {error}"))?;
+    let _guard = CLOUDFLARE_TEXT_USAGE_LOCK
+        .lock()
+        .map_err(|_| "Cloudflareのテキスト利用状況を保存できませんでした。".to_string())?;
+    migrate_historical_cloudflare_text_usage(app)?;
+    let path = cloudflare_text_usage_path(app)?;
+    if path.metadata().is_ok_and(|metadata| {
+        metadata.len().saturating_add(bytes.len() as u64 + 1) > MAX_CLOUDFLARE_TEXT_USAGE_BYTES
+    }) {
+        return Err("Cloudflareのテキスト利用履歴が上限に達しました。".into());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Cloudflareの利用履歴保存先を作成できませんでした: {error}")
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("Cloudflareのテキスト利用履歴を開けませんでした: {error}"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_data())
+        .map_err(|error| format!("Cloudflareのテキスト利用履歴を保存できませんでした: {error}"))
+}
+
+fn cloudflare_text_usage_since(
+    app: &AppHandle,
+    since: DateTime<Utc>,
+) -> Result<CloudflareTextUsageEstimate, String> {
+    let _guard = CLOUDFLARE_TEXT_USAGE_LOCK
+        .lock()
+        .map_err(|_| "Cloudflareのテキスト利用状況を集計できませんでした。".to_string())?;
+    migrate_historical_cloudflare_text_usage(app)?;
+    let path = cloudflare_text_usage_path(app)?;
+    if !path.exists() {
+        return Ok(CloudflareTextUsageEstimate::default());
+    }
+    let metadata = path
+        .metadata()
+        .map_err(|error| format!("Cloudflareのテキスト利用履歴を確認できませんでした: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_CLOUDFLARE_TEXT_USAGE_BYTES {
+        return Err("Cloudflareのテキスト利用履歴が不正です。".into());
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| format!("Cloudflareのテキスト利用履歴を開けませんでした: {error}"))?;
+    let mut estimate = CloudflareTextUsageEstimate::default();
+    for line in BufReader::new(file).lines() {
+        let line = line
+            .map_err(|error| format!("Cloudflareのテキスト利用履歴を読めませんでした: {error}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: CloudflareTextUsageRecord = serde_json::from_str(&line)
+            .map_err(|_| "Cloudflareのテキスト利用履歴が壊れています。".to_string())?;
+        let occurred_at = DateTime::parse_from_rfc3339(&record.occurred_at)
+            .map_err(|_| "Cloudflareのテキスト利用日時を読み取れませんでした。".to_string())?
+            .with_timezone(&Utc);
+        if occurred_at < since {
+            continue;
+        }
+        estimate.cost_usd += record.cost_usd;
+        estimate.neurons += record.neurons;
+        estimate.run_count = estimate.run_count.saturating_add(1);
+    }
+    Ok(estimate)
+}
+
+fn cloudflare_text_usage_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("usage").join("cloudflare-text.jsonl"))
+        .map_err(|error| format!("Cloudflareの利用履歴保存先を確認できませんでした: {error}"))
+}
+
+fn cloudflare_text_usage_record(
+    occurred_at: String,
+    operation: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    estimated: bool,
+) -> Result<CloudflareTextUsageRecord, String> {
+    let (
+        input_cost_per_million,
+        output_cost_per_million,
+        input_neurons_per_million,
+        output_neurons_per_million,
+    ) = cloudflare_text_model_pricing(model)
+        .ok_or_else(|| "Cloudflareテキストモデルの利用単価を確認できませんでした。".to_string())?;
+    Ok(CloudflareTextUsageRecord {
+        occurred_at,
+        operation: operation.to_owned(),
+        model: model.to_owned(),
+        input_tokens,
+        output_tokens,
+        estimated,
+        cost_usd: input_tokens as f64 / 1_000_000.0 * input_cost_per_million
+            + output_tokens as f64 / 1_000_000.0 * output_cost_per_million,
+        neurons: input_tokens as f64 / 1_000_000.0 * input_neurons_per_million
+            + output_tokens as f64 / 1_000_000.0 * output_neurons_per_million,
+    })
+}
+
+fn migrate_historical_cloudflare_text_usage(app: &AppHandle) -> Result<(), String> {
+    let path = cloudflare_text_usage_path(app)?;
+    let marker = path.with_extension("v1-migrated");
+    if marker.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Cloudflareの利用履歴保存先を作成できませんでした: {error}")
+        })?;
+    }
+    let historical = crate::meeting_schema::historical_cloudflare_text_usage(app)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("Cloudflareのテキスト利用履歴を開けませんでした: {error}"))?;
+    for historical in historical {
+        let record = cloudflare_text_usage_record(
+            historical.occurred_at,
+            &historical.operation,
+            &historical.model,
+            historical.input_tokens,
+            historical.output_tokens,
+            true,
+        )?;
+        let bytes = serde_json::to_vec(&record).map_err(|error| {
+            format!("Cloudflareの過去のテキスト利用状況を変換できませんでした: {error}")
+        })?;
+        file.write_all(&bytes)
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| {
+                format!("Cloudflareの過去のテキスト利用履歴を保存できませんでした: {error}")
+            })?;
+    }
+    file.sync_data().map_err(|error| {
+        format!("Cloudflareの過去のテキスト利用履歴を保存できませんでした: {error}")
+    })?;
+    fs::write(marker, b"1\n")
+        .map_err(|error| format!("Cloudflareの利用履歴移行を確定できませんでした: {error}"))
+}
+
+fn cloudflare_text_model_pricing(model: &str) -> Option<(f64, f64, f64, f64)> {
+    match model {
+        "@cf/zai-org/glm-4.7-flash" => Some((0.060, 0.400, 5_500.0, 36_400.0)),
+        "@cf/ibm-granite/granite-4.0-h-micro" => Some((0.017, 0.112, 1_542.0, 10_158.0)),
+        "@cf/google/gemma-4-26b-a4b-it" => Some((0.100, 0.300, 9_091.0, 27_273.0)),
+        _ => None,
+    }
 }
 
 fn cloudflare_billed_duration_ms(app: &AppHandle, meeting_id: &str) -> Result<u64, String> {
@@ -428,8 +635,9 @@ fn cloudflare_billed_duration_ms(app: &AppHandle, meeting_id: &str) -> Result<u6
 #[cfg(test)]
 mod tests {
     use super::{
-        available_duration_ms, credits_to_duration_ms, is_speech_to_text_product, period_start_ms,
-        used_duration_ms, SubscriptionResponse, UsageResponse,
+        available_duration_ms, cloudflare_text_model_pricing, credits_to_duration_ms,
+        is_speech_to_text_product, period_start_ms, used_duration_ms, SubscriptionResponse,
+        UsageResponse,
     };
     use serde_json::json;
 
@@ -444,6 +652,15 @@ mod tests {
         };
 
         assert_eq!(available_duration_ms(&subscription), 75 * 60 * 60 * 1_000);
+    }
+
+    #[test]
+    fn uses_model_specific_cloudflare_text_pricing() {
+        assert_eq!(
+            cloudflare_text_model_pricing("@cf/zai-org/glm-4.7-flash"),
+            Some((0.060, 0.400, 5_500.0, 36_400.0))
+        );
+        assert!(cloudflare_text_model_pricing("@cf/unknown/model").is_none());
     }
 
     #[test]

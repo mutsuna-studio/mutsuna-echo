@@ -114,8 +114,7 @@ async fn transcribe_one(
                 return Err("選択したCloudflare Workers AIモデルには対応していません。".into());
             }
             let auth = crate::cloudflare_auth::resolve_valid_credentials(app).await?;
-            let _auth_method = auth.auth_method;
-            cloudflare::transcribe(
+            let result = cloudflare::transcribe(
                 app,
                 audio_path,
                 audio_duration_ms,
@@ -123,7 +122,26 @@ async fn transcribe_one(
                 &auth.access_token,
                 context,
             )
-            .await
+            .await;
+            match result {
+                Err(error) if cloudflare::is_authentication_error(&error) => {
+                    let refreshed = crate::cloudflare_auth::recover_unauthorized_credentials(
+                        app,
+                        &auth.access_token,
+                    )
+                    .await?;
+                    cloudflare::transcribe(
+                        app,
+                        audio_path,
+                        audio_duration_ms,
+                        &refreshed.account_id,
+                        &refreshed.access_token,
+                        context,
+                    )
+                    .await
+                }
+                result => result,
+            }
         }
         TranscriptionProvider::Local => {
             let installed = local_models::list_installed(app)?;

@@ -24,6 +24,8 @@ async function bootstrap() {
     ? (await import("./lib/components/MeetingOverlay.svelte")).default
     : previewName === "meeting-home-baseline"
       ? (await import("./lib/preview/MeetingHomeBaselinePreview.svelte")).default
+      : previewName === "processing-stage"
+        ? (await import("./lib/preview/ProcessingStagePreview.svelte")).default
       : (await import("./App.svelte")).default;
   mount(component, { target: mountTarget });
 }

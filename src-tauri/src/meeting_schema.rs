@@ -73,6 +73,75 @@ pub(crate) struct GenerationAttemptSummary {
     pub(crate) can_revalidate: bool,
 }
 
+pub(crate) struct HistoricalCloudflareTextUsage {
+    pub(crate) occurred_at: String,
+    pub(crate) operation: String,
+    pub(crate) model: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
+pub(crate) fn historical_cloudflare_text_usage(
+    app: &AppHandle,
+) -> Result<Vec<HistoricalCloudflareTextUsage>, String> {
+    let _guard = lock_store()?;
+    let mut usage = Vec::new();
+    for meeting in crate::meeting_store::list_stored_meetings(app)? {
+        let attempts = attempts_directory(app, &meeting.meeting_id)?;
+        if !attempts.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(attempts)
+            .map_err(|error| format!("生成試行の履歴を確認できませんでした: {error}"))?
+        {
+            let directory = entry
+                .map_err(|error| format!("生成試行の履歴を読めませんでした: {error}"))?
+                .path();
+            if !directory.is_dir() || !manifest_path(&directory).exists() {
+                continue;
+            }
+            let manifest = read_manifest(&directory)?;
+            if manifest.provider != "cloudflare" {
+                continue;
+            }
+            let model = manifest
+                .resolved_model
+                .as_deref()
+                .unwrap_or(&manifest.requested_model)
+                .to_owned();
+            for artifact in manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.kind == "rawResponse")
+            {
+                let path = directory.join(&artifact.path);
+                let metadata = path.metadata().map_err(|error| {
+                    format!("Cloudflare生成結果の利用量を確認できませんでした: {error}")
+                })?;
+                if !metadata.is_file() || metadata.len() > MAX_ATTEMPT_ARTIFACT_BYTES {
+                    return Err("Cloudflare生成結果の利用量を確認できませんでした。".into());
+                }
+                let output = fs::read_to_string(path).map_err(|error| {
+                    format!("Cloudflare生成結果の利用量を読めませんでした: {error}")
+                })?;
+                let output_tokens = crate::transcription::cloudflare::estimate_text_tokens(&output);
+                usage.push(HistoricalCloudflareTextUsage {
+                    occurred_at: artifact.created_at.clone(),
+                    operation: if artifact.stage == "quality-check" {
+                        "meetingNoteQualityCheck".into()
+                    } else {
+                        "meetingNote".into()
+                    },
+                    model: model.clone(),
+                    input_tokens: output_tokens,
+                    output_tokens,
+                });
+            }
+        }
+    }
+    Ok(usage)
+}
+
 pub(crate) fn begin_generation_attempt(
     app: &AppHandle,
     transcript: &SummaryTranscriptSnapshot,
@@ -360,6 +429,13 @@ fn parse_candidate_json(output: &str) -> Result<Value, String> {
     match serde_json::from_str(json) {
         Ok(value) => Ok(value),
         Err(direct_error) => {
+            let repaired = repair_missing_object_closers(json);
+            if let Some(value) = repaired
+                .as_deref()
+                .and_then(|repaired| serde_json::from_str(repaired).ok())
+            {
+                return Ok(value);
+            }
             for (index, character) in json.char_indices() {
                 if character != '{' {
                     continue;
@@ -397,6 +473,58 @@ fn parse_candidate_json(output: &str) -> Result<Value, String> {
             )
         }
     }
+}
+
+/// Repairs the narrow malformed-JSON pattern produced by some small models:
+/// an object inside an array is missing its `}` immediately before the array's
+/// closing `]`. Any repaired value is still parsed and schema-validated by the
+/// normal pipeline, so this does not relax validation of generated content.
+pub(crate) fn repair_missing_object_closers(json: &str) -> Option<String> {
+    let mut stack = Vec::new();
+    let mut repaired = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for character in json.chars() {
+        if in_string {
+            repaired.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '{' | '[' => stack.push(character),
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'{')
+                    && stack.get(stack.len().saturating_sub(2)) == Some(&'[')
+                {
+                    repaired.push('}');
+                    stack.pop();
+                    changed = true;
+                }
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+        repaired.push(character);
+    }
+
+    changed.then_some(repaired)
 }
 
 #[cfg(test)]
@@ -2463,6 +2591,23 @@ mod tests {
         );
         assert!(safe_artifact_path(Path::new("attempt"), "../meeting.json").is_err());
         assert!(safe_artifact_path(Path::new("attempt"), "/absolute.json").is_err());
+    }
+
+    #[test]
+    fn saved_response_parser_repairs_missing_object_closer_before_array_end() {
+        let parsed = parse_candidate_json(
+            r#"{"meeting":{},"summary":{"keyPoints":[{"evidence":[{"spans":[{"segmentId":"segment-1","startMs":1,"endMs":2],"quote":"根拠"}]}]}}"#,
+        )
+        .expect("repaired saved response");
+
+        assert_eq!(
+            parsed["summary"]["keyPoints"][0]["evidence"][0]["spans"][0]["segmentId"],
+            "segment-1"
+        );
+        assert_eq!(
+            parsed["summary"]["keyPoints"][0]["evidence"][0]["quote"],
+            "根拠"
+        );
     }
 
     #[test]

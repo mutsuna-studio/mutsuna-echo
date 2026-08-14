@@ -67,6 +67,9 @@ pub(crate) enum TranscriptionStage {
     Preparing,
     DetectingSpeech,
     Transcribing,
+    RecoveringSpeech,
+    Finalizing,
+    Complete,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +78,7 @@ pub(crate) struct TranscriptionProgress {
     stage: TranscriptionStage,
     completed_chunks: u32,
     total_chunks: Option<u32>,
+    overall_progress: Option<f64>,
 }
 
 impl TranscriptionProgress {
@@ -87,7 +91,29 @@ impl TranscriptionProgress {
             stage,
             completed_chunks,
             total_chunks,
+            overall_progress: None,
         }
+    }
+
+    pub(crate) fn with_overall_progress(mut self, overall_progress: f64) -> Self {
+        self.overall_progress = Some(overall_progress.clamp(0.0, 1.0));
+        self
+    }
+
+    pub(crate) fn scaled(
+        stage: TranscriptionStage,
+        completed_chunks: u32,
+        total_chunks: u32,
+        start: f64,
+        end: f64,
+    ) -> Self {
+        let ratio = if total_chunks == 0 {
+            1.0
+        } else {
+            f64::from(completed_chunks.min(total_chunks)) / f64::from(total_chunks)
+        };
+        Self::new(stage, completed_chunks, Some(total_chunks))
+            .with_overall_progress(start + (end - start) * ratio)
     }
 }
 
@@ -788,7 +814,8 @@ pub(crate) async fn transcribe_selected_audio(
         .map(|_| crate::compute_tuning::CombinedInferenceGuard::enter());
     publish_transcription_progress(
         &app,
-        TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None),
+        TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None)
+            .with_overall_progress(0.0),
     );
 
     let selected = state
@@ -810,7 +837,8 @@ pub(crate) async fn transcribe_selected_audio(
     ) {
         publish_transcription_progress(
             &app,
-            TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None),
+            TranscriptionProgress::new(TranscriptionStage::Transcribing, 0, None)
+                .with_overall_progress(0.05),
         );
     }
     let context = crate::transcription::context::effective_context(
@@ -908,6 +936,12 @@ pub(crate) async fn transcribe_selected_audio(
         None => (None, None),
     };
 
+    publish_transcription_progress(
+        &app,
+        TranscriptionProgress::new(TranscriptionStage::Finalizing, 0, Some(1))
+            .with_overall_progress(0.95),
+    );
+
     let (run, persistence_warning) = match crate::transcript_store::create_run_with_diarization(
         &app,
         &selected.descriptor.meeting_id,
@@ -922,6 +956,11 @@ pub(crate) async fn transcribe_selected_audio(
         ),
         Err(error) => (None, Some(error)),
     };
+    publish_transcription_progress(
+        &app,
+        TranscriptionProgress::new(TranscriptionStage::Complete, 1, Some(1))
+            .with_overall_progress(1.0),
+    );
     Ok(TranscriptionResult {
         transcript: outcome.transcript,
         run,
@@ -1152,7 +1191,24 @@ fn selected_meeting_id_from_state(
 mod tests {
     use std::{fs::File, io::Write, path::Path};
 
-    use super::{inspect_audio, parse_mdhd_timing, validate_audio_file, TranscriptionRequest};
+    use super::{
+        inspect_audio, parse_mdhd_timing, validate_audio_file, TranscriptionProgress,
+        TranscriptionRequest, TranscriptionStage,
+    };
+
+    #[test]
+    fn scaled_progress_is_bounded_and_reaches_phase_end() {
+        let start =
+            TranscriptionProgress::scaled(TranscriptionStage::Transcribing, 0, 10, 0.20, 0.95);
+        let middle =
+            TranscriptionProgress::scaled(TranscriptionStage::Transcribing, 5, 10, 0.20, 0.95);
+        let end =
+            TranscriptionProgress::scaled(TranscriptionStage::Transcribing, 12, 10, 0.20, 0.95);
+
+        assert_eq!(start.overall_progress, Some(0.20));
+        assert_eq!(middle.overall_progress, Some(0.575));
+        assert_eq!(end.overall_progress, Some(0.95));
+    }
 
     fn write_one_second_wav(path: &Path) {
         const SAMPLE_RATE: u32 = 8_000;

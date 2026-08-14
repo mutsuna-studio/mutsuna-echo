@@ -24,6 +24,7 @@
   } from "@mutsuna/ui/alert-dialog";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Settings from "@lucide/svelte/icons/settings";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import CloudflareConnectionSettings from "./lib/components/CloudflareConnectionSettings.svelte";
@@ -87,7 +88,7 @@
     { id: "local", label: "ローカルSTT", kind: "local", setup: "modelDownload", availability: "ready", ready: true, configured: true, modelId: "reazonspeech-k2", modelLabel: "ReazonSpeech K2 int8-fp32", capabilitySummary: "日本語・話者分離・辞書", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: false, externalDiarization: false, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "elevenlabs", label: "ElevenLabs", kind: "cloud", setup: "apiKey", availability: "ready", ready: true, configured: true, modelId: "scribe-v2", modelLabel: "Scribe v2 Realtime Long Model Name", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "word", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: false, contextTerms: true }, statusMessage: "利用可能", pricingUsdPerHour: null, pricingVerifiedOn: null },
     { id: "soniox", label: "Soniox", kind: "cloud", setup: "apiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "stt-rt-v4", modelLabel: "Soniox Speech-to-Text Realtime v4", capabilitySummary: "多言語・話者分離", capabilities: { timingGranularity: "token", speakerLabels: true, confidenceScores: true, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "APIキーが必要", pricingUsdPerHour: null, pricingVerifiedOn: null },
-    { id: "cloudflare", label: "Cloudflare Free", kind: "cloud", setup: "oauthOrApiKey", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Cloudflareへの接続が必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
+    { id: "cloudflare", label: "Cloudflare Workers AI", kind: "cloud", setup: "oauth", availability: "apiKeyRequired", ready: false, configured: false, modelId: "@cf/openai/whisper-large-v3-turbo", modelLabel: "Whisper Large v3 Turbo", capabilitySummary: "多言語・単語タイムスタンプ", capabilities: { timingGranularity: "word", speakerLabels: false, confidenceScores: false, externalDiarization: true, contextText: true, contextTerms: true }, statusMessage: "Cloudflareへの接続が必要", pricingUsdPerHour: 0.03, pricingVerifiedOn: "2026-08-11" }
   ];
   const SUMMARY_SETTINGS_PREVIEW_PROVIDERS: SummaryProviderDefinition[] = [
     {
@@ -202,6 +203,32 @@
   let transcribing = $state(false);
   let transcriptionProgress = $state<TranscriptionProgress | null>(null);
   let transcriptionSessionSyncing = false;
+  const transcriptionStageOrder: Record<TranscriptionProgress["stage"], number> = {
+    preparing: 0,
+    detectingSpeech: 1,
+    transcribing: 2,
+    recoveringSpeech: 3,
+    finalizing: 4,
+    complete: 5
+  };
+  function updateTranscriptionProgress(next: TranscriptionProgress | null) {
+    const current = transcriptionProgress;
+    if (transcribing && current) {
+      if (!next) return;
+      const currentOverall = current.overallProgress;
+      const nextOverall = next.overallProgress;
+      if (currentOverall != null && nextOverall != null) {
+        if (nextOverall + 0.000_001 < currentOverall) return;
+        if (
+          nextOverall <= currentOverall + 0.000_001
+          && transcriptionStageOrder[next.stage] < transcriptionStageOrder[current.stage]
+        ) return;
+      } else if (transcriptionStageOrder[next.stage] < transcriptionStageOrder[current.stage]) {
+        return;
+      }
+    }
+    transcriptionProgress = next;
+  }
   let diarizing = $state(false);
   let processingMeetingId = $state<string | null>(null);
   let diarizationProgress = $state<LocalDiarizationProgress | null>(null);
@@ -210,13 +237,14 @@
   let sonioxUsageLoading = $state(false);
   let cloudflareUsageLoading = $state(false);
   let cloudflareConnecting = $state(false);
+  let cloudflareOAuthLeftApp = false;
   let recordingBusy = $state(false);
   let updating = $state(false);
   let selectedAudio = $state<SelectedAudioFile | null>(null);
   let selectedMeetingId = $state<string | null>(null);
   let transcriptionProvider = $state<TranscriptionProviderId>(savedTranscriptionProvider());
   let transcriptionProviders = $state.raw<TranscriptionProviderDefinition[]>(summarySettingsPreview ? TRANSCRIPTION_SETTINGS_PREVIEW_PROVIDERS : []);
-  let cloudflareConnection = $state.raw<CloudflareConnectionStatus | null>(summarySettingsPreview ? { connected: false, authMethod: null, accountName: null, needsReauthentication: false, accountSelectionRequired: false, accounts: [], oauthConfigured: true, legacyConfigured: false } : null);
+  let cloudflareConnection = $state.raw<CloudflareConnectionStatus | null>(summarySettingsPreview ? { connected: false, accountName: null, needsReauthentication: false, accountSelectionRequired: false, accounts: [], oauthConfigured: true } : null);
   let globalContextSettings = $state.raw<GlobalTranscriptionContextSettings>({ contextEnabled: false, background: "", terms: [], corrections: [] });
   let globalContextDraft = $state.raw<ContextDraft>({ background: "", termsText: "", correctionsText: "" });
   let globalContextSaveState = $state<ContextSaveState>("saved");
@@ -380,6 +408,50 @@
             ? "話者分離中"
             : null
   );
+  const headerProcessingStatuses = $derived.by(() => {
+    const statuses: string[] = [];
+    if (transcribing) {
+      if (transcriptionProgress?.stage === "detectingSpeech") {
+        statuses.push(transcriptionProgress.totalChunks == null
+          ? "発話を検出中"
+          : `発話を検出中 ${transcriptionProgress.completedChunks}/${transcriptionProgress.totalChunks}`);
+      } else if (transcriptionProgress?.stage === "transcribing" && transcriptionProgress.totalChunks != null) {
+        statuses.push(`文字起こし中 ${transcriptionProgress.completedChunks}/${transcriptionProgress.totalChunks}`);
+      } else if (transcriptionProgress?.stage === "recoveringSpeech" && transcriptionProgress.totalChunks != null) {
+        statuses.push(`聞き漏らしを確認中 ${transcriptionProgress.completedChunks}/${transcriptionProgress.totalChunks}`);
+      } else if (transcriptionProgress?.stage === "finalizing") {
+        statuses.push("文字起こしを保存中");
+      } else if (transcriptionProgress?.stage === "complete") {
+        statuses.push("文字起こし完了");
+      } else {
+        statuses.push("文字起こし中");
+      }
+    }
+    if (diarizing) {
+      if (diarizationProgress?.stage === "loadingModel") statuses.push("話者分離モデルを準備中");
+      else if (diarizationProgress?.stage === "decodingAudio") statuses.push("音声を解析中");
+      else if (diarizationProgress?.stage === "diarizingChunks" && diarizationProgress.totalChunks != null) {
+        statuses.push(`話者分離中 ${diarizationProgress.completedChunks}/${diarizationProgress.totalChunks}`);
+      } else if (diarizationProgress?.stage === "stitchingSpeakers") statuses.push("話者を統合中");
+      else if (diarizationProgress?.stage === "finalizing") statuses.push("話者分離を保存中");
+      else statuses.push("話者分離中");
+    }
+    if (transcriptFormatting) statuses.push("文字起こしを整形中");
+    if (summaryGenerating) {
+      if (summaryProgress?.stage === "retrying") {
+        statuses.push(summaryProgress.retryDelaySeconds
+          ? `会議ノートを再試行中（${summaryProgress.retryDelaySeconds}秒後）`
+          : "会議ノートを再試行中");
+      } else if (summaryProgress?.stage === "merging") statuses.push("会議ノートを統合中");
+      else if (summaryProgress?.stage === "mechanically-repairing") statuses.push("会議ノートの生成結果を機械補正中");
+      else if (summaryProgress?.stage === "repairing") statuses.push("会議ノートの生成結果を補正中");
+      else if (summaryProgress?.stage === "checking") statuses.push("会議ノートを確認中");
+      else if (summaryProgress && summaryProgress.totalSteps > 1) {
+        statuses.push(`会議ノートを作成中 ${summaryProgress.completedSteps}/${summaryProgress.totalSteps}`);
+      } else statuses.push("会議ノートを作成中");
+    }
+    return statuses;
+  });
   const recordingDisabled = $derived(loading || saving || deleting || selecting || transcribing || diarizing || updating);
   const canDiarize = $derived(Boolean(
     selectedAudio
@@ -420,9 +492,6 @@
   );
   const apiKeyProviders = $derived(
     transcriptionProviders.filter((provider) => provider.setup === "apiKey")
-  );
-  const cloudflareProvider = $derived(
-    transcriptionProviders.find((provider) => provider.id === "cloudflare") ?? null
   );
   const providerConfigured = $derived(currentProvider?.ready ?? false);
   const canTranscribe = $derived(
@@ -530,6 +599,7 @@
 
   async function connectCloudflare() {
     if (cloudflareConnecting) return;
+    cloudflareOAuthLeftApp = false;
     cloudflareConnecting = true;
     try {
       cloudflareConnection = await invoke<CloudflareConnectionStatus>("start_cloudflare_oauth");
@@ -540,7 +610,8 @@
         showSuccessToast("Cloudflareへ接続しました。");
       }
     } catch (error) {
-      showError(errorText(error));
+      const message = errorText(error);
+      if (message !== "Cloudflare OAuthをキャンセルしました。") showError(message);
     } finally {
       cloudflareConnecting = false;
     }
@@ -671,6 +742,10 @@
   }
 
   async function selectMeeting(meeting: RecentMeetingSummary) {
+    await selectMeetingById(meeting.meetingId);
+  }
+
+  async function selectMeetingById(meetingId: string) {
     if (meetingBusy) return;
     meetingBusy = true;
     try {
@@ -678,9 +753,9 @@
       const contextSaved = await flushMeetingContext();
       if (transcriptSaveState === "error" || !contextSaved) return;
       selectedAudio = await invoke<SelectedAudioFile | null>("select_meeting_audio", {
-        meetingId: meeting.meetingId
+        meetingId
       });
-      selectedMeetingId = meeting.meetingId;
+      selectedMeetingId = meetingId;
       await restoreTranscriptionHistory();
       pushAppHistoryEntry();
       section = "meetings";
@@ -691,6 +766,22 @@
     } finally {
       meetingBusy = false;
     }
+  }
+
+  async function cancelCloudflareOAuth() {
+    if (!cloudflareConnecting) return;
+    await invoke("cancel_cloudflare_oauth");
+  }
+
+  async function openProcessingMeeting() {
+    const meetingId = processingMeetingId;
+    if (!meetingId) return;
+    if (selectedMeetingId === meetingId) {
+      section = "meetings";
+      mobileMeetingDetail = true;
+      return;
+    }
+    await selectMeetingById(meetingId);
   }
 
   async function revealMeeting(meeting: RecentMeetingSummary) {
@@ -1091,6 +1182,29 @@
   });
 
   $effect(() => {
+    const markOAuthAppLeft = () => {
+      if (cloudflareConnecting) cloudflareOAuthLeftApp = true;
+    };
+    const cancelOAuthAfterReturn = () => {
+      if (cloudflareConnecting && cloudflareOAuthLeftApp) void cancelCloudflareOAuth();
+    };
+    const trackOAuthVisibility = () => {
+      if (document.visibilityState === "hidden") markOAuthAppLeft();
+      else cancelOAuthAfterReturn();
+    };
+    window.addEventListener("blur", markOAuthAppLeft);
+    window.addEventListener("focus", cancelOAuthAfterReturn);
+    window.addEventListener("pageshow", cancelOAuthAfterReturn);
+    document.addEventListener("visibilitychange", trackOAuthVisibility);
+    return () => {
+      window.removeEventListener("blur", markOAuthAppLeft);
+      window.removeEventListener("focus", cancelOAuthAfterReturn);
+      window.removeEventListener("pageshow", cancelOAuthAfterReturn);
+      document.removeEventListener("visibilitychange", trackOAuthVisibility);
+    };
+  });
+
+  $effect(() => {
     if (summarySettingsPreview) return;
     let cancelled = false;
     let unlistenPending: UnlistenFn | undefined;
@@ -1104,7 +1218,7 @@
             if (!cancelled) void handlePendingAction(payload);
           }),
           listen<TranscriptionProgress>("transcription-progress", ({ payload }) => {
-            if (!cancelled) transcriptionProgress = payload;
+            if (!cancelled) updateTranscriptionProgress(payload);
           }),
           listen<LocalDiarizationProgress>("local-diarization-progress", ({ payload }) => {
             if (!cancelled) diarizationProgress = payload;
@@ -1146,7 +1260,7 @@
         processingMeetingId = session.transcribing || session.diarizing
           ? session.selectedAudio?.meetingId ?? null
           : null;
-        transcriptionProgress = session.progress;
+        updateTranscriptionProgress(session.progress);
         diarizationModelStatus = await invoke<LocalDiarizationModelStatus>("get_local_diarization_model_status");
         if (pendingResult.error) {
           pendingActionProblem = { action: null, message: pendingResult.error };
@@ -1181,7 +1295,7 @@
     try {
       const session = await invoke<TranscriptionSession>("get_transcription_session");
       const wasTranscribing = transcribing;
-      transcriptionProgress = session.progress;
+      updateTranscriptionProgress(session.progress);
       diarizing = session.diarizing;
       if (session.transcribing) {
         transcribing = true;
@@ -1300,14 +1414,14 @@
     };
   });
 
-  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string, accountId?: string): Promise<boolean> {
+  async function saveApiKey(providerId: TranscriptionProviderId, apiKey: string): Promise<boolean> {
     if (savingProviderId !== null) return false;
     savingProviderId = providerId;
     let saved = false;
 
     try {
       const modelsAccessible = await withTimeout(
-        invoke<boolean>("save_provider_api_key", { providerId, apiKey, accountId }),
+        invoke<boolean>("save_provider_api_key", { providerId, apiKey }),
         API_KEY_SAVE_TIMEOUT_MS,
         "APIキーの確認に時間がかかっています。通信状態を確認して、もう一度お試しください。"
       );
@@ -1329,11 +1443,6 @@
     }
     if (saved && providerId === "elevenlabs") void refreshUsage();
     if (saved && providerId === "soniox") clearSonioxUsage();
-    if (saved && providerId === "cloudflare") {
-      await refreshCloudflareConnection();
-      void refreshCloudflareUsage();
-      await refreshSummaryProviders();
-    }
     return saved;
   }
 
@@ -1347,11 +1456,6 @@
         usageError = "";
       }
       if (providerId === "soniox") clearSonioxUsage();
-      if (providerId === "cloudflare") {
-        await refreshCloudflareConnection();
-        clearCloudflareUsage();
-        await refreshSummaryProviders();
-      }
       showSuccessToast("APIキーを削除しました。");
     } catch (error) {
       showError(errorText(error));
@@ -1413,6 +1517,12 @@
           }
         }
       });
+      transcriptionProgress = {
+        stage: "complete",
+        completedChunks: 1,
+        totalChunks: 1,
+        overallProgress: 1
+      };
       if (selectedMeetingId === transcriptionMeetingId) {
         if (result.run) {
           setSelectedTranscriptionRun(result.run);
@@ -1582,6 +1692,7 @@
       summaryGenerating = false;
       if (processingMeetingId === operationMeetingId) processingMeetingId = null;
       summaryProgress = null;
+      if (summaryProviderId === "cloudflare") await refreshCloudflareUsage();
     }
   }
 
@@ -1849,6 +1960,7 @@
     } finally {
       transcriptFormatting = false;
       if (processingMeetingId === operationMeetingId) processingMeetingId = null;
+      if (useLlm && summaryProviderId === "cloudflare") await refreshCloudflareUsage();
     }
   }
 
@@ -2019,6 +2131,19 @@
     headerClass="app-main-header"
   >
     {#snippet headerActions()}
+      {#if headerProcessingStatuses.length > 0}
+        <button
+          class="header-processing-status"
+          type="button"
+          aria-live="polite"
+          aria-label={`${headerProcessingStatuses.join("、")}。処理中の会議を開く`}
+          title="処理中の会議を開く"
+          onclick={() => void openProcessingMeeting()}
+        >
+          <LoaderCircle aria-hidden="true" />
+          <span>{headerProcessingStatuses.join("・")}</span>
+        </button>
+      {/if}
       {#if section === "meetings"}
         <button class="mobile-header-settings" type="button" onclick={() => navigate("settings")} aria-label="設定を開く" title="設定">
           <Settings aria-hidden="true" />
@@ -2091,6 +2216,7 @@
           providers={transcriptionProviders}
           provider={transcriptionProvider}
           {transcribing}
+          processingCurrentMeeting={processingMeetingId === selectedMeetingId}
           progress={transcriptionProgress}
           {canTranscribe}
           {diarizing}
@@ -2158,6 +2284,17 @@
                   <h1>一般</h1>
                 </header>
                 <div class="settings-section native-settings-group">
+                  <CloudflareConnectionSettings
+                    status={cloudflareConnection}
+                    {loading}
+                    connecting={cloudflareConnecting}
+                    onCancelConnect={cancelCloudflareOAuth}
+                    {deleting}
+                    {busy}
+                    onConnect={connectCloudflare}
+                    onSelectAccount={selectCloudflareAccount}
+                    onDisconnectOAuth={disconnectCloudflareOAuth}
+                  />
                   <PowerSettings disabled={updating} onError={showError} />
                   <AppUpdateManager
                     disabled={busy && !updating}
@@ -2176,21 +2313,6 @@
                   </div>
                   <div class="transcription-model-manager">
                     <LocalModelManager disabled={busy} preview={summarySettingsPreview} onChanged={refreshLocalModels} onMessage={showMessage} onError={showError} />
-                    {#if cloudflareProvider}
-                      <CloudflareConnectionSettings
-                        status={cloudflareConnection}
-                        {loading}
-                        connecting={cloudflareConnecting}
-                        saving={savingProviderId === "cloudflare"}
-                        {deleting}
-                        {busy}
-                        onConnect={connectCloudflare}
-                        onSelectAccount={selectCloudflareAccount}
-                        onDisconnectOAuth={disconnectCloudflareOAuth}
-                        onSaveManual={(apiToken, accountId) => saveApiKey("cloudflare", apiToken, accountId)}
-                        onDeleteManual={() => deleteApiKey("cloudflare")}
-                      />
-                    {/if}
                     {#each apiKeyProviders as provider (provider.id)}
                       <ApiKeySettings
                         {provider}
@@ -2199,7 +2321,7 @@
                         {deleting}
                         hasApiKey={provider.configured}
                         {busy}
-                        onSave={(apiKey, accountId) => saveApiKey(provider.id, apiKey, accountId)}
+                        onSave={(apiKey) => saveApiKey(provider.id, apiKey)}
                         onDelete={() => deleteApiKey(provider.id)}
                       />
                     {/each}
