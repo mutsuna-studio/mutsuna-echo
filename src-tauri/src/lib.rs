@@ -14,6 +14,7 @@ mod local_ai_protocol;
 mod local_ai_runtime;
 #[cfg(desktop)]
 mod meeting_detection;
+mod meeting_jobs;
 mod meeting_schema;
 mod meeting_store;
 mod mutsuna_cloud;
@@ -139,6 +140,7 @@ pub fn run() {
             summary::delete_summary_agent,
             summary::get_selected_meeting_document,
             summary::get_meeting_ai_job_status,
+            meeting_jobs::list_active_meeting_jobs,
             summary::save_edited_meeting_document,
             summary::get_latest_generation_attempt,
             summary::generate_selected_meeting_document,

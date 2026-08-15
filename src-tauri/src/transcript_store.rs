@@ -607,7 +607,7 @@ fn dominant_speaker(start_ms: u64, end_ms: u64, turns: &[SpeakerTurn]) -> Option
         let start = start_ms.max(turn.start_ms);
         let end = end_ms.min(turn.end_ms);
         if end > start {
-            *overlap.entry(turn.speaker.as_str()).or_default() += end - start;
+            *overlap.entry(turn.speaker.as_str()).or_default() += end.saturating_sub(start);
         }
     }
     overlap

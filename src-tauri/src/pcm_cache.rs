@@ -105,8 +105,12 @@ impl PcmCacheFile {
             if end_sample <= start_sample {
                 return Err("PCMキャッシュの音声区間が空です。".into());
             }
-            let sample_count = usize::try_from(end_sample - start_sample)
-                .map_err(|_| "PCMキャッシュの音声区間が大きすぎます。".to_string())?;
+            let sample_count = usize::try_from(
+                end_sample
+                    .checked_sub(start_sample)
+                    .ok_or("PCMキャッシュの音声区間が不正です。")?,
+            )
+            .map_err(|_| "PCMキャッシュの音声区間が大きすぎます。".to_string())?;
             reader
                 .seek(SeekFrom::Start(start_sample.saturating_mul(4)))
                 .map_err(|error| format!("PCMキャッシュを移動できませんでした: {error}"))?;

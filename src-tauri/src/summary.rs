@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::transcript_store::SummaryTranscriptSnapshot;
+use crate::{
+    meeting_jobs::{MeetingJobGuard, MeetingJobKind},
+    transcript_store::SummaryTranscriptSnapshot,
+};
 
 const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
@@ -42,20 +45,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 static INSTALLING_SUMMARY_AGENTS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
-static ACTIVE_MEETING_AI_JOBS: LazyLock<Mutex<HashMap<String, MeetingAiJobKind>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum MeetingAiJobKind {
-    Summary,
-    Formatting,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MeetingAiJobStatus {
-    kind: MeetingAiJobKind,
+    kind: MeetingJobKind,
 }
 
 #[derive(Clone, Copy)]
@@ -441,11 +434,8 @@ pub(crate) fn get_meeting_ai_job_status(
     meeting_id: String,
 ) -> Result<Option<MeetingAiJobStatus>, String> {
     crate::meeting_store::validate_meeting_id(&meeting_id)?;
-    Ok(ACTIVE_MEETING_AI_JOBS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&meeting_id)
-        .copied()
+    Ok(crate::meeting_jobs::active_kind(&meeting_id)
+        .filter(|kind| matches!(kind, MeetingJobKind::Summary | MeetingJobKind::Formatting))
         .map(|kind| MeetingAiJobStatus { kind }))
 }
 
@@ -468,7 +458,27 @@ pub(crate) fn get_latest_generation_attempt(
     meeting_id: String,
 ) -> Result<Option<crate::meeting_schema::GenerationAttemptSummary>, String> {
     crate::meeting_store::validate_meeting_id(&meeting_id)?;
-    crate::meeting_schema::latest_generation_attempt(&app, &meeting_id)
+    let latest = crate::meeting_schema::latest_generation_attempt(&app, &meeting_id)?;
+    let active_kind = crate::meeting_jobs::active_kind(&meeting_id);
+    if let Some(attempt) = latest
+        .as_ref()
+        .filter(|attempt| generation_attempt_is_interrupted(attempt, active_kind))
+    {
+        crate::meeting_schema::generation_attempt_for(&app, &meeting_id, &attempt.attempt_id)?
+            .fail_if_active(
+                "interrupted",
+                "アプリの終了または再起動によって会議ノート生成が中断されました。",
+            )?;
+        return crate::meeting_schema::latest_generation_attempt(&app, &meeting_id);
+    }
+    Ok(latest)
+}
+
+fn generation_attempt_is_interrupted(
+    attempt: &crate::meeting_schema::GenerationAttemptSummary,
+    active_kind: Option<MeetingJobKind>,
+) -> bool {
+    attempt.status == "generating" && active_kind != Some(MeetingJobKind::Summary)
 }
 
 #[tauri::command]
@@ -487,7 +497,7 @@ async fn revalidate_generation_attempt_job(
     app: AppHandle,
     request: RevalidateGenerationAttemptRequest,
 ) -> Result<crate::meeting_schema::MeetingDocument, String> {
-    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Summary)?;
+    let _job_guard = MeetingJobGuard::begin(&request.meeting_id, MeetingJobKind::Summary)?;
     crate::meeting_store::validate_meeting_id(&request.meeting_id)?;
     let current = crate::transcript_store::selected_summary_snapshot(&app, &request.meeting_id)?
         .ok_or_else(|| "再検証する文字起こしがありません。".to_string())?;
@@ -554,7 +564,7 @@ async fn generate_meeting_document_job(
     app: AppHandle,
     request: GenerateSummaryRequest,
 ) -> Result<crate::meeting_schema::MeetingDocument, String> {
-    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Summary)?;
+    let _job_guard = MeetingJobGuard::begin(&request.meeting_id, MeetingJobKind::Summary)?;
     let _power_guard = crate::processing_power::acquire(&app, "会議ノートを生成中")?;
     generate(app, request).await
 }
@@ -573,38 +583,9 @@ async fn format_selected_transcript_job(
     app: AppHandle,
     request: FormatTranscriptRequest,
 ) -> Result<TranscriptFormattingResult, String> {
-    let _job_guard = MeetingAiJobGuard::begin(&request.meeting_id, MeetingAiJobKind::Formatting)?;
+    let _job_guard = MeetingJobGuard::begin(&request.meeting_id, MeetingJobKind::Formatting)?;
     let _power_guard = crate::processing_power::acquire(&app, "文字起こしを整形中")?;
     format_transcript(app, request).await
-}
-
-struct MeetingAiJobGuard {
-    meeting_id: String,
-}
-
-impl MeetingAiJobGuard {
-    fn begin(meeting_id: &str, kind: MeetingAiJobKind) -> Result<Self, String> {
-        crate::meeting_store::validate_meeting_id(meeting_id)?;
-        let mut active = ACTIVE_MEETING_AI_JOBS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if active.contains_key(meeting_id) {
-            return Err("この会議では要約または文章整形を実行中です。".into());
-        }
-        active.insert(meeting_id.to_string(), kind);
-        Ok(Self {
-            meeting_id: meeting_id.to_string(),
-        })
-    }
-}
-
-impl Drop for MeetingAiJobGuard {
-    fn drop(&mut self) {
-        ACTIVE_MEETING_AI_JOBS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.meeting_id);
-    }
 }
 
 pub(crate) async fn generate(
@@ -3390,13 +3371,29 @@ mod tests {
     }
 
     #[test]
-    fn meeting_ai_job_guard_rejects_duplicate_and_releases_meeting() {
-        let meeting_id = uuid::Uuid::now_v7().to_string();
-        let first = MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Summary)
-            .expect("first meeting job guard");
-        assert!(MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Formatting).is_err());
-        drop(first);
-        assert!(MeetingAiJobGuard::begin(&meeting_id, MeetingAiJobKind::Formatting).is_ok());
+    fn generating_attempt_is_interrupted_without_matching_active_job() {
+        let attempt = crate::meeting_schema::GenerationAttemptSummary {
+            attempt_id: uuid::Uuid::now_v7().to_string(),
+            transcription_id: uuid::Uuid::now_v7().to_string(),
+            source_revision: 0,
+            provider: "cloudflare".into(),
+            model: "model".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            status: "generating".into(),
+            stage: "parsed".into(),
+            error: None,
+            can_revalidate: false,
+        };
+
+        assert!(generation_attempt_is_interrupted(&attempt, None));
+        assert!(generation_attempt_is_interrupted(
+            &attempt,
+            Some(MeetingJobKind::Formatting)
+        ));
+        assert!(!generation_attempt_is_interrupted(
+            &attempt,
+            Some(MeetingJobKind::Summary)
+        ));
     }
 
     fn candidate(segment_id: &str) -> MeetingExtractionCandidate {

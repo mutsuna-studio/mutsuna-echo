@@ -10,7 +10,8 @@
   let { peaks = [], progress = 0 }: Props = $props();
   let canvas: HTMLCanvasElement;
   const captureCanvas: Attachment<HTMLCanvasElement> = (node) => { canvas = node; };
-  let renderedProgress = 0;
+  let renderedRows = [0, 0, 0];
+  let activeLineRow = 0;
   let lastArrivalKey: number | null = null;
   let currentLandingWidth = 0.09;
   let latestProgress = $derived(Math.min(1, Math.max(0, progress)));
@@ -87,9 +88,7 @@
       const actualProgress = latestProgress;
       const frameSeconds = Math.min(0.05, Math.max(0, (now - lastFrameAt) / 1000));
       lastFrameAt = now;
-      const progressBacklog = Math.max(0, actualProgress - renderedProgress);
-      const catchUpSpeed = 1 + Math.min(2.2, progressBacklog * 5);
-      if (!reduceMotion) animationElapsedSeconds += frameSeconds * catchUpSpeed;
+      if (!reduceMotion) animationElapsedSeconds += frameSeconds;
       const elapsedSeconds = reduceMotion ? 0.72 : animationElapsedSeconds;
       if (actualProgress < waveformTransitionTarget) {
         waveformProgress = actualProgress;
@@ -112,14 +111,17 @@
         flightProgressTarget = actualProgress;
         lastAnimationCycle = animationCycle;
       }
-      if (reduceMotion || actualProgress < renderedProgress) renderedProgress = actualProgress;
+      if (reduceMotion) {
+        renderedRows = rowsForProgress(actualProgress);
+        activeLineRow = firstIncompleteRow(renderedRows);
+      }
       context.clearRect(0, 0, cssWidth, cssHeight);
-      drawScene(context, values, renderedProgress, waveformProgress, flightProgressTarget, elapsedSeconds, cssWidth, cssHeight, primary, foreground, muted);
+      drawScene(context, values, renderedRows, activeLineRow, waveformProgress, flightProgressTarget, elapsedSeconds, cssWidth, cssHeight, primary, foreground, muted);
       const arrivalKey = getArrivalKey(elapsedSeconds);
       if (lastArrivalKey === null) {
         lastArrivalKey = arrivalKey;
       } else if (arrivalKey > lastArrivalKey) {
-        renderedProgress = advanceAfterLanding(renderedProgress, flightProgressTarget, currentLandingWidth);
+        activeLineRow = advanceAfterLanding(renderedRows, activeLineRow, currentLandingWidth);
         lastArrivalKey = arrivalKey;
       }
       frame = window.requestAnimationFrame(draw);
@@ -134,7 +136,8 @@
   function drawScene(
     context: CanvasRenderingContext2D,
     values: readonly number[],
-    completed: number,
+    completedRows: readonly number[],
+    activeLineRow: number,
     actualProgress: number,
     activeProgressTarget: number,
     elapsedSeconds: number,
@@ -178,14 +181,9 @@
       context.stroke();
     }
 
-    const totalCapacity = rowCapacities.reduce((total, capacity) => total + capacity, 0);
-    let remainingProgress = completed * totalCapacity;
-    let activeRow = 0;
-    let activeStart = left;
-
     context.lineWidth = 5;
     for (let row = 0; row < rowCapacities.length; row += 1) {
-      const completedInRow = Math.min(rowCapacities[row], Math.max(0, remainingProgress));
+      const completedInRow = Math.min(rowCapacities[row], Math.max(0, completedRows[row] ?? 0));
       if (completedInRow > 0) {
         context.globalAlpha = 0.68;
         context.strokeStyle = row === 0 ? primary : foreground;
@@ -194,21 +192,13 @@
         context.lineTo(left + span * completedInRow, textRows[row]);
         context.stroke();
       }
-      if (remainingProgress < rowCapacities[row] - 0.0001 || row === rowCapacities.length - 1) {
-        activeRow = row;
-        activeStart = left + span * completedInRow;
-        break;
-      }
-      remainingProgress -= rowCapacities[row];
-      activeRow = Math.min(row + 1, textRows.length - 1);
-      activeStart = left;
     }
 
+    const activeRow = Math.min(rowCapacities.length - 1, Math.max(0, activeLineRow));
+    const activeStart = left + span * Math.min(rowCapacities[activeRow], Math.max(0, completedRows[activeRow] ?? 0));
     const availableOnRow = left + span * rowCapacities[activeRow] - activeStart;
     const workingWidth = Math.max(0, Math.min(span * maximumFragmentWidth, availableOnRow));
-    const hasPendingProgress = activeProgressTarget > completed + 0.0001;
     for (let particle = 0; particle < activeOrigins.length; particle += 1) {
-      if (!hasPendingProgress) break;
       const start = emissionStarts[particle];
       const transfer = Math.min(1, Math.max(0, (cyclePhase - start) / transferDuration));
       if (transfer <= 0 || workingWidth <= 0) continue;
@@ -289,23 +279,29 @@
     return cycle * starts.length + arrivals;
   }
 
-  function advanceAfterLanding(current: number, target: number, landingWidth: number) {
-    const totalCapacity = rowCapacities.reduce((total, capacity) => total + capacity, 0);
-    const currentWidth = current * totalCapacity;
-    const targetWidth = target * totalCapacity;
-    if (targetWidth <= currentWidth) return target;
+  function advanceAfterLanding(rows: number[], activeRow: number, landingWidth: number) {
+    const capacity = rowCapacities[activeRow];
+    rows[activeRow] = Math.min(capacity, (rows[activeRow] ?? 0) + landingWidth);
+    if (rows[activeRow] < capacity - 0.0001) return activeRow;
 
-    let rowStart = 0;
-    for (const capacity of rowCapacities) {
-      const rowEnd = rowStart + capacity;
-      if (currentWidth < rowEnd - 0.0001) {
-        const availableOnRow = rowEnd - currentWidth;
-        const landedWidth = Math.min(landingWidth, availableOnRow, targetWidth - currentWidth);
-        return Math.min(target, (currentWidth + landedWidth) / totalCapacity);
-      }
-      rowStart = rowEnd;
-    }
-    return target;
+    const nextRow = (activeRow + 1) % rowCapacities.length;
+    rows[nextRow] = 0;
+    return nextRow;
+  }
+
+  function rowsForProgress(progress: number) {
+    const totalCapacity = rowCapacities.reduce((total, capacity) => total + capacity, 0);
+    let remaining = progress * totalCapacity;
+    return rowCapacities.map((capacity) => {
+      const completed = Math.min(capacity, Math.max(0, remaining));
+      remaining -= completed;
+      return completed;
+    });
+  }
+
+  function firstIncompleteRow(rows: readonly number[]) {
+    const incomplete = rowCapacities.findIndex((capacity, index) => (rows[index] ?? 0) < capacity - 0.0001);
+    return incomplete >= 0 ? incomplete : rowCapacities.length - 1;
   }
 
   function easeInOut(value: number) {

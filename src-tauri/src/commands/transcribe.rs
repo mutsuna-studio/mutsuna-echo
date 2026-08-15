@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        LazyLock, Mutex, Once,
     },
 };
 
@@ -12,15 +12,21 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
-use crate::transcription::{Transcript, TranscriptionProvider};
+use crate::{
+    meeting_jobs::{MeetingJobGuard, MeetingJobKind},
+    transcription::{Transcript, TranscriptionProvider},
+};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac"];
 const MAX_AUDIO_FILE_SIZE: u64 = 5_000_000_000;
+static PANIC_CAPTURE_INIT: Once = Once::new();
+static LAST_BACKGROUND_PANIC: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Default)]
 pub(crate) struct AudioSelectionState {
     selected: Mutex<Option<SelectedAudio>>,
     meeting_id: Mutex<Option<String>>,
+    processing_meeting_id: Mutex<Option<String>>,
     transcribing: AtomicBool,
     diarizing: AtomicBool,
     inference_active: AtomicBool,
@@ -57,6 +63,7 @@ impl SelectedAudioFile {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptionSession {
     selected_audio: Option<SelectedAudioFile>,
+    processing_meeting_id: Option<String>,
     transcribing: bool,
     diarizing: bool,
     progress: Option<TranscriptionProgress>,
@@ -403,6 +410,11 @@ pub(crate) fn get_transcription_session(
     };
     Ok(TranscriptionSession {
         selected_audio,
+        processing_meeting_id: state
+            .processing_meeting_id
+            .lock()
+            .map_err(|_| "処理対象のMeetingを取得できませんでした。".to_string())?
+            .clone(),
         transcribing: state.transcribing.load(Ordering::Acquire),
         diarizing: state.diarizing.load(Ordering::Acquire),
         progress: state
@@ -434,6 +446,11 @@ impl Drop for TranscriptionGuard<'_> {
             .progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .0
+            .processing_meeting_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -443,6 +460,11 @@ impl Drop for DiarizationGuard<'_> {
     fn drop(&mut self) {
         self.0.diarizing.store(false, Ordering::Release);
         self.0.inference_active.store(false, Ordering::Release);
+        *self
+            .0
+            .processing_meeting_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -648,7 +670,7 @@ fn mp4_box(data: &[u8], start: usize, limit: usize) -> Option<([u8; 4], usize, u
     let (size, header) = if size32 == 1 {
         (read_u64(data, start + 8)?, 16usize)
     } else if size32 == 0 {
-        ((limit - start) as u64, 8usize)
+        (u64::try_from(limit.checked_sub(start)?).ok()?, 8usize)
     } else {
         (size32, 8usize)
     };
@@ -790,6 +812,8 @@ pub(crate) async fn transcribe_selected_audio(
     app: AppHandle,
     request: TranscriptionRequest,
 ) -> Result<TranscriptionResult, String> {
+    initialize_background_panic_capture();
+    clear_last_background_panic();
     // Keep the actual job independent from the WebView IPC request. A reload or
     // dropped invoke must not detach an expensive blocking inference thread
     // from the code that persists its result and clears the session state.
@@ -801,7 +825,7 @@ pub(crate) async fn transcribe_selected_audio(
         result
     })
     .await
-    .map_err(|error| format!("文字起こしバックグラウンド処理を完了できませんでした: {error}"))?
+    .map_err(|error| background_task_join_error("文字起こし", error))?
 }
 
 async fn run_transcription_job(
@@ -837,18 +861,26 @@ async fn run_transcription_job(
     let _combined_inference = diarization_speaker_count
         .filter(|_| cfg!(desktop))
         .map(|_| crate::compute_tuning::CombinedInferenceGuard::enter());
-    publish_transcription_progress(
-        &app,
-        TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None)
-            .with_overall_progress(0.0),
-    );
-
     let selected = state
         .selected
         .lock()
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
+    *state
+        .processing_meeting_id
+        .lock()
+        .map_err(|_| "処理対象のMeetingを更新できませんでした。".to_string())? =
+        Some(selected.descriptor.meeting_id.clone());
+    let _meeting_job_guard = MeetingJobGuard::begin(
+        &selected.descriptor.meeting_id,
+        MeetingJobKind::Transcription,
+    )?;
+    publish_transcription_progress(
+        &app,
+        TranscriptionProgress::new(TranscriptionStage::Preparing, 0, None)
+            .with_overall_progress(0.0),
+    );
 
     // Selection metadata is cached for lightweight session polling, so validate
     // the actual file once more at the boundary where it is consumed.
@@ -1041,6 +1073,8 @@ pub(crate) async fn diarize_selected_transcription(
     app: AppHandle,
     request: DiarizeTranscriptionRequest,
 ) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
+    initialize_background_panic_capture();
+    clear_last_background_panic();
     let worker_app = app.clone();
     tauri::async_runtime::spawn(async move {
         clear_background_error(&worker_app);
@@ -1049,7 +1083,7 @@ pub(crate) async fn diarize_selected_transcription(
         result
     })
     .await
-    .map_err(|error| format!("話者分離バックグラウンド処理を完了できませんでした: {error}"))?
+    .map_err(|error| background_task_join_error("話者分離", error))?
 }
 
 async fn run_diarization_job(
@@ -1079,6 +1113,13 @@ async fn run_diarization_job(
         .map_err(|_| "選択したファイルの状態を取得できませんでした。".to_string())?
         .clone()
         .ok_or_else(|| "先に音声ファイルを選択してください。".to_string())?;
+    *state
+        .processing_meeting_id
+        .lock()
+        .map_err(|_| "処理対象のMeetingを更新できませんでした。".to_string())? =
+        Some(selected.descriptor.meeting_id.clone());
+    let _meeting_job_guard =
+        MeetingJobGuard::begin(&selected.descriptor.meeting_id, MeetingJobKind::Diarization)?;
     validate_audio_path(&selected.path)?;
     crate::transcript_store::diarization_target(
         &app,
@@ -1163,6 +1204,55 @@ fn record_background_error<T>(app: &AppHandle, result: &Result<T, String>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
 }
 
+fn initialize_background_panic_capture() {
+    PANIC_CAPTURE_INIT.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                })
+                .unwrap_or_else(|| "発生位置不明".into());
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicの内容を取得できませんでした".into());
+            *LAST_BACKGROUND_PANIC
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(format!("{location}: {message}"));
+            previous(info);
+        }));
+    });
+}
+
+fn clear_last_background_panic() {
+    *LAST_BACKGROUND_PANIC
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn background_task_join_error(operation: &str, error: impl std::fmt::Display) -> String {
+    let panic = LAST_BACKGROUND_PANIC
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    match panic {
+        Some(panic) => {
+            format!("{operation}バックグラウンド処理で内部エラーが発生しました（{panic}）。")
+        }
+        None => format!("{operation}バックグラウンド処理を完了できませんでした: {error}"),
+    }
+}
+
 #[tauri::command]
 pub(crate) fn cancel_selected_diarization(state: State<'_, AudioSelectionState>) {
     state.diarization_cancelled.store(true, Ordering::Release);
@@ -1200,6 +1290,7 @@ pub(crate) fn select_transcription_run(
     request: SelectTranscriptionRunRequest,
 ) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
     let meeting_id = selected_meeting_id_from_state(&state)?;
+    ensure_meeting_not_processing(&meeting_id)?;
     crate::transcript_store::select_run(&app, &meeting_id, &request.transcription_id)
 }
 
@@ -1210,6 +1301,7 @@ pub(crate) fn update_transcript_document(
     request: UpdateTranscriptDocumentRequest,
 ) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
     let meeting_id = selected_meeting_id_from_state(&state)?;
+    ensure_meeting_not_processing(&meeting_id)?;
     crate::transcript_store::update_run_segments(
         &app,
         &meeting_id,
@@ -1228,12 +1320,22 @@ pub(crate) fn reset_transcript_document(
     request: ResetTranscriptDocumentRequest,
 ) -> Result<crate::transcript_store::TranscriptionRunDetail, String> {
     let meeting_id = selected_meeting_id_from_state(&state)?;
+    ensure_meeting_not_processing(&meeting_id)?;
     crate::transcript_store::reset_run_document(
         &app,
         &meeting_id,
         &request.transcription_id,
         request.expected_revision,
     )
+}
+
+fn ensure_meeting_not_processing(meeting_id: &str) -> Result<(), String> {
+    if crate::meeting_jobs::active_kind(meeting_id).is_some() {
+        return Err(
+            "処理中の会議は文字起こしを変更できません。完了してからもう一度お試しください。".into(),
+        );
+    }
+    Ok(())
 }
 
 fn selected_meeting_id_from_state(

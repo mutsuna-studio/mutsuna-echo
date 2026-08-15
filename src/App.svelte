@@ -271,7 +271,7 @@
     transcriptionProgress = next;
   }
   let diarizing = $state(false);
-  let processingMeetingId = $state<string | null>(null);
+  let transcriptionProcessingMeetingId = $state<string | null>(null);
   let diarizationProgress = $state<LocalDiarizationProgress | null>(null);
   let diarizationModelStatus = $state.raw<LocalDiarizationModelStatus | null>(null);
   let usageLoading = $state(false);
@@ -309,11 +309,15 @@
   let summaryStatus = $state.raw<MeetingDocument | null>(null);
   let summaryAttempt = $state.raw<GenerationAttemptSummary | null>(null);
   let summaryGenerating = $state(false);
+  let summaryProcessingMeetingId = $state<string | null>(null);
+  let recoveredSummaryGenerating = false;
+  let summaryInvocationActive = false;
   let summaryProgress = $state.raw<SummaryProgress | null>(null);
   let generatedNameProposal = $state.raw<GeneratedNameProposal | null>(null);
   let generatedNameDialogOpen = $state(false);
   let generatedNameBusy = $state(false);
   let transcriptFormatting = $state(false);
+  let formattingProcessingMeetingId = $state<string | null>(null);
   let recoveredTranscriptFormatting = false;
   // Transcriptは大きな値なので、編集時も必要なSegmentだけを置換する。
   let transcript = $state.raw<EditableTranscript | null>(null);
@@ -444,13 +448,29 @@
   });
 
   const saving = $derived(savingProviderId !== null);
+  const transcriptionWaitingForDiarization = $derived(Boolean(
+    transcribing
+      && diarizing
+      && transcriptionProgress?.totalChunks != null
+      && transcriptionProgress.completedChunks >= transcriptionProgress.totalChunks
+      && (transcriptionProgress.stage === "transcribing" || transcriptionProgress.stage === "recoveringSpeech")
+  ));
   const busy = $derived(loading || saving || deleting || cloudflareConnecting || mutsunaCloudConnecting || mutsunaCloudDisconnecting || mutsunaCloudPurchasing || selecting || transcribing || diarizing || transcriptFormatting || recordingBusy || updating);
+  const processingMeetingId = $derived(
+    summaryGenerating && summaryProcessingMeetingId
+      ? summaryProcessingMeetingId
+      : transcriptFormatting && formattingProcessingMeetingId
+        ? formattingProcessingMeetingId
+        : (transcribing || diarizing) && transcriptionProcessingMeetingId
+          ? transcriptionProcessingMeetingId
+          : null
+  );
   const processingMeetingStatus = $derived(
     summaryGenerating
       ? "要約中"
       : transcriptFormatting
         ? "整形中"
-        : transcribing
+        : transcribing && !transcriptionWaitingForDiarization
           ? "文字起こし中"
           : diarizing
             ? "話者分離中"
@@ -458,7 +478,7 @@
   );
   const headerProcessingStatuses = $derived.by(() => {
     const statuses: string[] = [];
-    if (transcribing) {
+    if (transcribing && !transcriptionWaitingForDiarization) {
       if (transcriptionProgress?.stage === "detectingSpeech") {
         statuses.push(transcriptionProgress.totalChunks == null
           ? "発話を検出中"
@@ -506,7 +526,9 @@
       && selectedTranscriptionRun
       && selectedTranscriptionRun.transcript.tokens.some((token) => token.startMs != null)
       && !transcribing
+      && !diarizing
       && !transcriptFormatting
+      && !summaryGenerating
   ));
   const currentProvider = $derived(
     getTranscriptionProvider(transcriptionProviders, transcriptionProvider)
@@ -549,6 +571,7 @@
     providerConfigured
       && selectedAudio !== null
       && !busy
+      && !summaryGenerating
       && !globalContextLoading
       && !meetingContextLoading
       && meetingContextSaveState !== "error"
@@ -934,6 +957,10 @@
   }
 
   async function renameMeeting(meeting: RecentMeetingSummary, newFileName: string) {
+    if (meetingHasActiveProcessing(meeting.meetingId)) {
+      showWarningToast("処理中の会議名は変更できません。", "処理が完了してからもう一度お試しください。");
+      return;
+    }
     const requested = newFileName.trim();
     if (!requested || requested === meeting.fileName) return;
     try {
@@ -952,6 +979,10 @@
 
   async function deleteMeeting(meeting: RecentMeetingSummary, mode: "audioOnly" | "all") {
     if (meetingBusy) return;
+    if (meetingHasActiveProcessing(meeting.meetingId)) {
+      showWarningToast("処理中の会議は削除できません。", "処理が完了してからもう一度お試しください。");
+      return;
+    }
     meetingBusy = true;
     try {
       await flushTranscriptEdits();
@@ -1406,8 +1437,8 @@
         }
         transcribing = session.transcribing;
         diarizing = session.diarizing;
-        processingMeetingId = session.transcribing || session.diarizing
-          ? session.selectedAudio?.meetingId ?? null
+        transcriptionProcessingMeetingId = session.transcribing || session.diarizing
+          ? session.processingMeetingId
           : null;
         updateTranscriptionProgress(session.progress);
         if (session.backgroundError) showError(session.backgroundError);
@@ -1452,14 +1483,14 @@
       if (session.transcribing || session.diarizing) {
         transcribing = session.transcribing;
         diarizing = session.diarizing;
-        processingMeetingId = session.selectedAudio?.meetingId ?? processingMeetingId;
+        transcriptionProcessingMeetingId = session.processingMeetingId ?? transcriptionProcessingMeetingId;
         return;
       }
       selectedAudio = session.selectedAudio;
       selectedMeetingId = session.selectedAudio?.meetingId ?? selectedMeetingId;
       transcribing = false;
       diarizing = false;
-      if (wasProcessing && !summaryGenerating && !transcriptFormatting) processingMeetingId = null;
+      if (wasProcessing) transcriptionProcessingMeetingId = null;
       transcriptionProgress = null;
       diarizationProgress = null;
       if (wasProcessing && selectedAudio) {
@@ -1690,7 +1721,7 @@
         startedAt: new Date().toISOString()
       });
     }
-    processingMeetingId = transcriptionMeetingId;
+    transcriptionProcessingMeetingId = transcriptionMeetingId;
     const diarizationEnabled = diarizationSpeakerCount !== undefined && transcriptionProvider === "local";
     diarizing = diarizationEnabled;
     transcriptionProgress = { stage: "preparing", completedChunks: 0, totalChunks: null };
@@ -1778,7 +1809,7 @@
     } finally {
       transcribing = false;
       diarizing = false;
-      if (processingMeetingId === transcriptionMeetingId) processingMeetingId = null;
+      if (transcriptionProcessingMeetingId === transcriptionMeetingId) transcriptionProcessingMeetingId = null;
       transcriptionProgress = null;
       diarizationProgress = null;
     }
@@ -1817,29 +1848,47 @@
   }
 
   async function refreshSummaryStatus() {
-    if (!selectedMeetingId || !selectedTranscriptionRun) {
+    const meetingId = selectedMeetingId;
+    const transcriptionId = selectedTranscriptionId;
+    if (!meetingId || !selectedTranscriptionRun) {
       summaryStatus = null;
       summaryAttempt = null;
       return;
     }
     try {
-      [summaryStatus, summaryAttempt] = await Promise.all([
+      const [nextSummaryStatus, nextSummaryAttempt] = await Promise.all([
         invoke<MeetingDocument | null>("get_selected_meeting_document", {
-          meetingId: selectedMeetingId
+          meetingId
         }),
         invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
-          meetingId: selectedMeetingId
+          meetingId
         })
       ]);
+      if (selectedMeetingId !== meetingId || selectedTranscriptionId !== transcriptionId) return;
+      summaryStatus = nextSummaryStatus;
+      summaryAttempt = nextSummaryAttempt;
       if (summaryAttempt?.status === "generating") {
+        if (!summaryInvocationActive) recoveredSummaryGenerating = true;
         summaryGenerating = true;
-        processingMeetingId = selectedMeetingId;
+        summaryProcessingMeetingId = meetingId;
+      } else if (summaryProcessingMeetingId === meetingId) {
+        summaryGenerating = false;
+        summaryProcessingMeetingId = null;
+        summaryProgress = null;
       }
     } catch (error) {
       summaryStatus = null;
       summaryAttempt = null;
       showError(errorText(error));
     }
+  }
+
+  function meetingHasActiveProcessing(meetingId: string): boolean {
+    return Boolean(
+      ((transcribing || diarizing) && transcriptionProcessingMeetingId === meetingId)
+        || (transcriptFormatting && formattingProcessingMeetingId === meetingId)
+        || (summaryGenerating && summaryProcessingMeetingId === meetingId)
+    );
   }
 
   $effect(() => {
@@ -1854,7 +1903,7 @@
           summaryAttempt = latestAttempt;
           if (latestAttempt.status === "generating") return;
           summaryGenerating = false;
-          if (processingMeetingId === meetingId) processingMeetingId = null;
+          if (summaryProcessingMeetingId === meetingId) summaryProcessingMeetingId = null;
           summaryProgress = null;
           await refreshSummaryStatus();
           if (latestAttempt.status === "failed") {
@@ -1875,23 +1924,36 @@
   });
 
   async function syncMeetingAiJobStatus(reportError = false) {
-    const meetingId = selectedMeetingId;
-    if (!meetingId) return;
     try {
-      const status = await invoke<{ kind: "summary" | "formatting" } | null>("get_meeting_ai_job_status", { meetingId });
-      if (selectedMeetingId !== meetingId) return;
-      if (status?.kind === "formatting") {
+      const statuses = await invoke<Array<{ meetingId: string; kind: "transcription" | "diarization" | "summary" | "formatting" }>>("list_active_meeting_jobs");
+      const inferenceJob = statuses.find((status) => status.kind === "transcription" || status.kind === "diarization") ?? null;
+      const formattingJob = statuses.find((status) => status.kind === "formatting") ?? null;
+      const summaryJob = statuses.find((status) => status.kind === "summary") ?? null;
+
+      if (inferenceJob) transcriptionProcessingMeetingId = inferenceJob.meetingId;
+
+      if (formattingJob) {
         if (!transcriptFormatting) recoveredTranscriptFormatting = true;
         transcriptFormatting = true;
-        processingMeetingId = meetingId;
-        return;
-      }
-      if (recoveredTranscriptFormatting) {
+        formattingProcessingMeetingId = formattingJob.meetingId;
+      } else if (recoveredTranscriptFormatting) {
+        const completedMeetingId = formattingProcessingMeetingId;
         recoveredTranscriptFormatting = false;
         transcriptFormatting = false;
-        if (processingMeetingId === meetingId) processingMeetingId = null;
-        await restoreTranscriptionHistory();
+        formattingProcessingMeetingId = null;
+        if (completedMeetingId === selectedMeetingId) await restoreTranscriptionHistory();
         showSuccessToast("文章整形のバックグラウンド処理が終了しました。結果を確認してください。");
+      }
+
+      if (summaryJob) {
+        if (!summaryInvocationActive) recoveredSummaryGenerating = true;
+        summaryGenerating = true;
+        summaryProcessingMeetingId = summaryJob.meetingId;
+      } else if (recoveredSummaryGenerating) {
+        recoveredSummaryGenerating = false;
+        summaryGenerating = false;
+        summaryProcessingMeetingId = null;
+        summaryProgress = null;
       }
     } catch (error) {
       if (reportError) showError(errorText(error));
@@ -1947,26 +2009,27 @@
   }
 
   async function generateSummary() {
-    if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating || transcriptFormatting) return;
+    if (!selectedMeetingId || !selectedTranscriptionRun || summaryGenerating || transcriptFormatting || transcribing || diarizing) return;
     const operationMeetingId = selectedMeetingId;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error") return;
     summaryGenerating = true;
+    summaryInvocationActive = true;
+    summaryProcessingMeetingId = operationMeetingId;
     generatedNameDialogOpen = false;
     generatedNameProposal = null;
-    processingMeetingId = operationMeetingId;
     summaryAttempt = null;
     summaryProgress = null;
     try {
       summaryStatus = await invoke<MeetingDocument>("generate_selected_meeting_document", {
         request: {
-          meetingId: selectedMeetingId,
+          meetingId: operationMeetingId,
           providerId: summaryProviderId,
           modelId: summaryModelId
         }
       });
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
-        meetingId: selectedMeetingId
+        meetingId: operationMeetingId
       });
       await refreshGeneratedMeetingName(operationMeetingId, summaryStatus);
       showSuccessToast("会議ノートを生成しました。");
@@ -1976,37 +2039,43 @@
       }).catch(() => null);
       showError(errorText(error));
     } finally {
+      summaryInvocationActive = false;
       summaryGenerating = false;
-      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
+      if (summaryProcessingMeetingId === operationMeetingId) summaryProcessingMeetingId = null;
       summaryProgress = null;
       if (summaryProviderId === "cloudflare") await refreshCloudflareUsage();
     }
   }
 
   async function revalidateSummaryAttempt() {
-    if (!selectedMeetingId || !summaryAttempt?.canRevalidate || summaryGenerating || transcriptFormatting) return;
+    if (!selectedMeetingId || !summaryAttempt?.canRevalidate || summaryGenerating || transcriptFormatting || transcribing || diarizing) return;
     const attemptId = summaryAttempt.attemptId;
+    const operationMeetingId = selectedMeetingId;
     summaryGenerating = true;
+    summaryInvocationActive = true;
+    summaryProcessingMeetingId = operationMeetingId;
     summaryAttempt = null;
     try {
       summaryStatus = await invoke<MeetingDocument>("revalidate_generation_attempt", {
         request: {
-          meetingId: selectedMeetingId,
+          meetingId: operationMeetingId,
           attemptId
         }
       });
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
-        meetingId: selectedMeetingId
+        meetingId: operationMeetingId
       });
-      await refreshGeneratedMeetingName(selectedMeetingId, summaryStatus);
+      await refreshGeneratedMeetingName(operationMeetingId, summaryStatus);
       showSuccessToast("保存済みの生成結果を再検証しました。");
     } catch (error) {
       summaryAttempt = await invoke<GenerationAttemptSummary | null>("get_latest_generation_attempt", {
-        meetingId: selectedMeetingId
+        meetingId: operationMeetingId
       }).catch(() => summaryAttempt);
       showError(errorText(error));
     } finally {
+      summaryInvocationActive = false;
       summaryGenerating = false;
+      if (summaryProcessingMeetingId === operationMeetingId) summaryProcessingMeetingId = null;
     }
   }
 
@@ -2063,7 +2132,7 @@
 
   async function diarizeTranscript(speakerCount: number | null) {
     const run = selectedTranscriptionRun;
-    if (!run || !selectedAudio || diarizing) return;
+    if (!run || !selectedAudio || diarizing || transcribing || transcriptFormatting || summaryGenerating) return;
     const operationMeetingId = selectedAudio.meetingId;
     if (!diarizationModelStatus?.installed) {
       openDiarizationSettings();
@@ -2076,7 +2145,7 @@
       return;
     }
     diarizing = true;
-    processingMeetingId = operationMeetingId;
+    transcriptionProcessingMeetingId = operationMeetingId;
     diarizationProgress = { stage: "loadingModel", completedChunks: 0, totalChunks: null, processedMs: 0, totalMs: selectedAudio.durationMs };
     try {
       const saved = await invoke<TranscriptionRunDetail>("diarize_selected_transcription", {
@@ -2095,7 +2164,7 @@
       if (!message.includes("キャンセルしました")) showError(message);
     } finally {
       diarizing = false;
-      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
+      if (transcriptionProcessingMeetingId === operationMeetingId) transcriptionProcessingMeetingId = null;
       diarizationProgress = null;
     }
   }
@@ -2202,7 +2271,7 @@
 
   async function formatTranscript(): Promise<void> {
     const run = selectedTranscriptionRun;
-    if (!selectedMeetingId || !run || transcriptFormatting || summaryGenerating) return;
+    if (!selectedMeetingId || !run || transcriptFormatting || summaryGenerating || transcribing || diarizing) return;
     const operationMeetingId = selectedMeetingId;
     await flushTranscriptEdits();
     if (transcriptSaveState === "error" || !selectedTranscriptionRun) return;
@@ -2216,7 +2285,7 @@
       && Boolean(provider?.models.some((model) => model.id === summaryModelId));
 
     transcriptFormatting = true;
-    processingMeetingId = operationMeetingId;
+    formattingProcessingMeetingId = operationMeetingId;
     try {
       const result = await invoke<TranscriptFormattingResult>("format_selected_transcript", {
         request: {
@@ -2255,7 +2324,7 @@
       showError(errorText(error));
     } finally {
       transcriptFormatting = false;
-      if (processingMeetingId === operationMeetingId) processingMeetingId = null;
+      if (formattingProcessingMeetingId === operationMeetingId) formattingProcessingMeetingId = null;
       if (useLlm && summaryProviderId === "cloudflare") await refreshCloudflareUsage();
     }
   }
@@ -2506,17 +2575,17 @@
           {summaryProviderId}
           summaryModelId={summaryModelId}
           {summaryModelsLoading}
-          summaryGenerating={summaryGenerating}
+          summaryGenerating={summaryGenerating && summaryProcessingMeetingId === selectedMeetingId}
           {summaryProgress}
-          {transcriptFormatting}
+          transcriptFormatting={transcriptFormatting && formattingProcessingMeetingId === selectedMeetingId}
           providers={transcriptionProviders}
           provider={transcriptionProvider}
-          {transcribing}
+          transcribing={transcribing && transcriptionProcessingMeetingId === selectedMeetingId}
           transcriptionError={transcriptionAttemptMeetingId === selectedMeetingId ? transcriptionAttemptError : null}
-          processingCurrentMeeting={processingMeetingId === selectedMeetingId}
+          processingCurrentMeeting={transcriptionProcessingMeetingId === selectedMeetingId}
           progress={transcriptionProgress}
           {canTranscribe}
-          {diarizing}
+          diarizing={diarizing && transcriptionProcessingMeetingId === selectedMeetingId}
           {diarizationProgress}
           {canDiarize}
           diarizationModelReady={Boolean(diarizationModelStatus?.installed)}

@@ -420,7 +420,12 @@ fn merge_orphan_segments(
             .filter(|gap| next_gap.is_none_or(|next| *gap <= next));
         if merge_previous.is_some() {
             let orphan = segments.remove(index);
-            let previous = &mut segments[index - 1];
+            let Some(previous_index) = index.checked_sub(1) else {
+                segments.insert(index, orphan);
+                index = index.saturating_add(1);
+                continue;
+            };
+            let previous = &mut segments[previous_index];
             previous.end_ms = previous.end_ms.max(orphan.end_ms);
             previous.text.push_str(&orphan.text);
             index = index.saturating_sub(1);

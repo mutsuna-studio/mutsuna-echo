@@ -217,6 +217,7 @@
         || summaryStatus.sourceTranscript.revision !== selectedRun.revision + 1
       )
   ));
+  const currentMeetingProcessing = $derived(summaryGenerating || transcriptFormatting || transcribing || diarizing);
 
   let detailTab = $state<"summary" | "transcript" | "info">("transcript");
   let audioWaveformPeaks = $state.raw<number[]>([]);
@@ -401,7 +402,14 @@
     if (progress?.stage === "transcribing" && progress.totalChunks != null) return `${progress.completedChunks} / ${progress.totalChunks}`;
     return "文字起こし中…";
   });
-  const transcriptionProcessing = $derived(transcribing && processingCurrentMeeting);
+  const transcriptionWaitingForDiarization = $derived(Boolean(
+    transcribing
+      && diarizing
+      && progress?.totalChunks != null
+      && progress.completedChunks >= progress.totalChunks
+      && (progress.stage === "transcribing" || progress.stage === "recoveringSpeech")
+  ));
+  const transcriptionProcessing = $derived(transcribing && processingCurrentMeeting && !transcriptionWaitingForDiarization);
   const transcriptionProgressStatus = $derived.by(() => {
     if (progress?.stage === "detectingSpeech") return "発話を探しています";
     if (progress?.stage === "transcribing") return progress.totalChunks != null
@@ -574,7 +582,7 @@
         provider={selectedProvider}
         saveState={contextSaveState}
         loading={contextLoading}
-        disabled={transcribing}
+        disabled={currentMeetingProcessing}
         onBackgroundChange={onContextBackgroundChange}
         onTermsChange={onContextTermsChange}
         onCorrectionsChange={onContextCorrectionsChange}
@@ -640,7 +648,7 @@
           modelsLoading={summaryModelsLoading}
           generating={summaryGenerating}
           progress={summaryProgress}
-          blocked={transcriptFormatting}
+          blocked={transcriptFormatting || transcribing || diarizing}
           selectedSourceKey={selectedSummarySource?.key ?? null}
           onProviderChange={onSummaryProviderChange}
           onModelChange={onSummaryModelChange}
@@ -679,14 +687,14 @@
                 <DropdownMenu>
                   <DropdownMenuTrigger>
                     {#snippet child({ props })}
-                      <Button {...props} size="sm" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`} disabled={transcriptFormatting}>
+                      <Button {...props} size="sm" variant="ghost" type="button" icon={History} aria-label={`文字起こし履歴 ${runs.length}件`} disabled={currentMeetingProcessing}>
                         履歴を見る（{runs.length}件）
                       </Button>
                     {/snippet}
                   </DropdownMenuTrigger>
                   <DropdownMenuContent class="transcription-history-menu" align="end">
                     {#each runs as run (run.transcriptionId)}
-                      <DropdownMenuItem class="transcription-history-item" disabled={runLoadingId !== null} onclick={() => onRunChange(run.transcriptionId)}>
+                      <DropdownMenuItem class="transcription-history-item" disabled={currentMeetingProcessing || runLoadingId !== null} onclick={() => onRunChange(run.transcriptionId)}>
                         <span class="history-item-copy">
                           <strong>{run.sequence}回目・{runModelLabel(run)}</strong>
                           <small>{runDate(run.createdAt)}{run.edited ? "・編集済み" : ""}{run.costUsd != null ? `・実コスト ${formatActualCost(run.costUsd)}` : ""}</small>
@@ -696,13 +704,13 @@
                     {/each}
                     {#if selectedRun?.edited && saveState === "saved"}
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onclick={onResetTranscript}><RotateCcw aria-hidden="true" />原文に戻す</DropdownMenuItem>
+                      <DropdownMenuItem disabled={currentMeetingProcessing} onclick={onResetTranscript}><RotateCcw aria-hidden="true" />原文に戻す</DropdownMenuItem>
                     {/if}
                   </DropdownMenuContent>
                 </DropdownMenu>
               {/if}
               <span data-transcription-action>
-                <Button size="sm" variant="outline" type="button" icon={RefreshCw} onclick={() => retranscriptionDialogOpen = true} disabled={!selectedAudio || transcribing || diarizing || transcriptFormatting}>やり直す</Button>
+                <Button size="sm" variant="outline" type="button" icon={RefreshCw} onclick={() => retranscriptionDialogOpen = true} disabled={!selectedAudio || currentMeetingProcessing}>やり直す</Button>
               </span>
             </div>
           </section>
@@ -740,7 +748,7 @@
                     <span>話者分離</span>
                     <Select type="single" value={diarizationSpeakerCount} onValueChange={(value) => { if (value) diarizationSpeakerCount = value; }} disabled={transcribing || !diarizationModelReady}>
                       <SelectTrigger aria-label="話者分離"><span>{diarizationSpeakerCount === "off" ? "オフ" : diarizationSpeakerCount === "auto" ? "人数を自動判定" : `${diarizationSpeakerCount}人`}</span></SelectTrigger>
-                      <SelectContent><SelectItem value="off">オフ</SelectItem><SelectItem value="auto">人数を自動判定</SelectItem>{#each Array.from({ length: 9 }, (_, index) => index + 2) as count}<SelectItem value={String(count)}>{count}人</SelectItem>{/each}</SelectContent>
+                      <SelectContent><SelectItem value="off">オフ</SelectItem><SelectItem value="auto">人数を自動判定</SelectItem>{#each Array.from({ length: 9 }, (_, index) => index + 2) as count (count)}<SelectItem value={String(count)}>{count}人</SelectItem>{/each}</SelectContent>
                     </Select>
                   </label>
                   {#if !diarizationModelReady}<Button size="sm" variant="outline" type="button" onclick={onOpenDiarizationSettings}>話者分離モデルを追加</Button>{/if}
@@ -776,8 +784,8 @@
               onSeek={seekFromTranscript}
               onPlay={playFromTranscript}
               onPause={pauseFromTranscript}
-              editable={Boolean(selectedRun) && !diarizing && !runLoadingId}
-              formatting={transcriptFormatting || diarizing || Boolean(runLoadingId)}
+              editable={Boolean(selectedRun) && !currentMeetingProcessing && !runLoadingId}
+              formatting={currentMeetingProcessing || Boolean(runLoadingId)}
               {onEditSegment}
               {onEditSpeakerLabel}
               {onReplaceSegments}
@@ -838,7 +846,7 @@
                     <SelectContent>
                       <SelectItem value="off">話者分離: オフ</SelectItem>
                       <SelectItem value="auto">話者分離: 人数自動</SelectItem>
-                      {#each Array.from({ length: 9 }, (_, index) => index + 2) as count}
+                      {#each Array.from({ length: 9 }, (_, index) => index + 2) as count (count)}
                         <SelectItem value={String(count)}>話者分離: {count}人</SelectItem>
                       {/each}
                     </SelectContent>
@@ -859,7 +867,7 @@
         {/if}
       {:else if meeting}
         <dl class="meeting-info">
-          <div><dt>ファイル名</dt><dd>{#if meeting.source === "recording" && selectedAudio}{#if editingFileName}<InputGroup><InputGroupInput bind:ref={fileNameInput} bind:value={fileNameDraft} maxlength={123} aria-label="ファイル名を編集" onkeydown={handleFileNameKeydown} onblur={commitFileName} /><InputGroupAddon align="inline-end">{selectedFileExtension}</InputGroupAddon></InputGroup>{:else}<button class="file-name-display" type="button" aria-label="ファイル名を編集" onclick={startFileNameEditing}>{selectedAudio.name}</button>{/if}{:else}{meeting.fileName}{/if}</dd></div>
+          <div><dt>ファイル名</dt><dd>{#if meeting.source === "recording" && selectedAudio}{#if editingFileName}<InputGroup><InputGroupInput bind:ref={fileNameInput} bind:value={fileNameDraft} maxlength={123} aria-label="ファイル名を編集" disabled={currentMeetingProcessing} onkeydown={handleFileNameKeydown} onblur={commitFileName} /><InputGroupAddon align="inline-end">{selectedFileExtension}</InputGroupAddon></InputGroup>{:else}<button class="file-name-display" type="button" aria-label="ファイル名を編集" disabled={currentMeetingProcessing} onclick={startFileNameEditing}>{selectedAudio.name}</button>{/if}{:else}{meeting.fileName}{/if}</dd></div>
           <div><dt>{meeting.source === "recording" ? "録音日時" : "更新日時"}</dt><dd>{recordedAt ?? "読み込んだ音声"}</dd></div>
           <div><dt>長さ</dt><dd>{selectedAudio ? formatTimestamp(selectedAudio.durationMs) : "音声ファイルは削除済み"}</dd></div>
           <div><dt>ファイルサイズ</dt><dd>{formatFileSize(meeting.sizeBytes)}</dd></div>
@@ -874,7 +882,7 @@
             <strong id="meeting-delete-heading">会議を削除</strong>
             <span>音声だけを削除するか、文字起こしや会議ノートを含めて削除できます。</span>
           </div>
-          <Button size="sm" variant="outline" type="button" icon={Trash2} onclick={() => deleteDialogOpen = true}>削除方法を選ぶ</Button>
+          <Button size="sm" variant="outline" type="button" icon={Trash2} onclick={() => deleteDialogOpen = true} disabled={currentMeetingProcessing}>削除方法を選ぶ</Button>
         </section>
       {:else}
         <p class="meeting-info-loading" role="status">会議情報を読み込んでいます…</p>
@@ -909,10 +917,10 @@
         </AlertDialogDescription>
       </AlertDialogHeader>
       <div class="delete-options">
-        <AlertDialogAction variant="outline" onclick={() => deleteSelectedMeeting("audioOnly")}>
+        <AlertDialogAction variant="outline" onclick={() => deleteSelectedMeeting("audioOnly")} disabled={currentMeetingProcessing}>
           <span><strong>音声ファイルだけ削除</strong><small>文字起こしと会議ノートは残す</small></span>
         </AlertDialogAction>
-        <AlertDialogAction variant="destructive" onclick={() => deleteSelectedMeeting("all")}>
+        <AlertDialogAction variant="destructive" onclick={() => deleteSelectedMeeting("all")} disabled={currentMeetingProcessing}>
           <span><strong>会議をすべて削除</strong><small>音声・文字起こし・会議ノートを削除</small></span>
         </AlertDialogAction>
       </div>

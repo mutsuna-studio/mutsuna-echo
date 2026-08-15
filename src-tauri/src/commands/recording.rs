@@ -423,6 +423,11 @@ pub(crate) async fn delete_meeting(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::meeting_store::validate_meeting_id(&meeting_id)?;
+        if crate::meeting_jobs::active_kind(&meeting_id).is_some() {
+            return Err(
+                "処理中の会議は削除できません。完了してからもう一度お試しください。".into(),
+            );
+        }
         delete_meeting_audio_file(&app, &meeting_id)?;
         match mode {
             MeetingDeletionMode::AudioOnly => {
@@ -509,6 +514,9 @@ pub(crate) fn rename_meeting_audio(
     new_file_name: String,
 ) -> Result<(), String> {
     crate::meeting_store::validate_meeting_id(&meeting_id)?;
+    if crate::meeting_jobs::active_kind(&meeting_id).is_some() {
+        return Err("処理中の会議名は変更できません。完了してからもう一度お試しください。".into());
+    }
     #[cfg(target_os = "android")]
     {
         let new_file_name = validate_audio_file_name(&new_file_name, "m4a")?;

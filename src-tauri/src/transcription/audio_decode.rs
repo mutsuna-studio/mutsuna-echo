@@ -268,9 +268,9 @@ pub(crate) fn decode_mono_regions(
             if overlap_start >= overlap_end {
                 continue;
             }
-            let start = usize::try_from(overlap_start - packet_start)
+            let start = usize::try_from(overlap_start.saturating_sub(packet_start))
                 .map_err(|_| "音声区間の開始位置が大きすぎます。".to_string())?;
-            let end = usize::try_from(overlap_end - packet_start)
+            let end = usize::try_from(overlap_end.saturating_sub(packet_start))
                 .map_err(|_| "音声区間の終了位置が大きすぎます。".to_string())?;
             region.samples.extend_from_slice(&samples[start..end]);
         }
@@ -370,9 +370,9 @@ pub(crate) fn decode_mono_regions_resampled(
             if overlap_start >= overlap_end {
                 continue;
             }
-            let start = usize::try_from(overlap_start - packet_start)
+            let start = usize::try_from(overlap_start.saturating_sub(packet_start))
                 .map_err(|_| "音声区間の開始位置が大きすぎます。".to_string())?;
-            let end = usize::try_from(overlap_end - packet_start)
+            let end = usize::try_from(overlap_end.saturating_sub(packet_start))
                 .map_err(|_| "音声区間の終了位置が大きすぎます。".to_string())?;
             region.samples.extend_from_slice(&output[start..end]);
         }

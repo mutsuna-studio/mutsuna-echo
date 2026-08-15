@@ -76,7 +76,7 @@ impl ProcessingPowerState {
         if inner.users == 0 {
             return;
         }
-        inner.users -= 1;
+        inner.users = inner.users.saturating_sub(1);
         if inner.users == 0 {
             inner.inhibitor.take();
         }

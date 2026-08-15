@@ -291,7 +291,7 @@ fn overlap_score(token_start: u64, token_end: u64, turn: &SpeakerTurn) -> Option
     }
     let overlap_start = token_start.max(turn.start_ms);
     let overlap_end = token_end.min(turn.end_ms);
-    (overlap_end > overlap_start).then_some(overlap_end - overlap_start)
+    (overlap_end > overlap_start).then_some(overlap_end.saturating_sub(overlap_start))
 }
 
 #[cfg(test)]

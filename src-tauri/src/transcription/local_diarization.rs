@@ -461,8 +461,8 @@ fn representative_embeddings(
             if overlaps_other {
                 continue;
             }
-            let start = (turn.start_sample - chunk_start) as usize;
-            let end = (turn.end_sample - chunk_start) as usize;
+            let start = turn.start_sample.saturating_sub(chunk_start) as usize;
+            let end = turn.end_sample.saturating_sub(chunk_start) as usize;
             if end.saturating_sub(start) < MIN_EXCLUSIVE_SEGMENT_SAMPLES || end > samples.len() {
                 continue;
             }
@@ -625,7 +625,7 @@ fn merge_overlap_anchors(
             let start = a.start_sample.max(b.start_sample).max(overlap_start);
             let end = a.end_sample.min(b.end_sample).min(overlap_end);
             if end > start {
-                *scores.entry((a.speaker, b.speaker)).or_default() += end - start;
+                *scores.entry((a.speaker, b.speaker)).or_default() += end.saturating_sub(start);
             }
         }
     }

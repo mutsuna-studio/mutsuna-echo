@@ -127,6 +127,7 @@ export type TranscriptFormattingResult = {
 
 export type TranscriptionSession = {
   selectedAudio: SelectedAudioFile | null;
+  processingMeetingId: string | null;
   transcribing: boolean;
   diarizing: boolean;
   progress: TranscriptionProgress | null;
