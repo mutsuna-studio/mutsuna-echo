@@ -28,6 +28,11 @@ android {
     namespace = "jp.mutsuna.echo.localai"
     compileSdk = 36
     defaultConfig { minSdk = 29 }
+    buildTypes {
+        getByName("release") {
+            proguardFiles("proguard-rules.pro")
+        }
+    }
     flavorDimensions += "abi"
     productFlavors {
         create("universal") { dimension = "abi" }
