@@ -239,7 +239,16 @@ fn wait_for_callback(
                 if !peer.ip().is_loopback() {
                     continue;
                 }
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                // A nonblocking listener can yield a nonblocking accepted socket on
+                // Windows. Restore blocking reads before applying the bounded timeout
+                // so a callback that is still being written is not rejected as a
+                // transient WouldBlock error.
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|_| "OAuth callbackを読み取れませんでした。".to_string())?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|_| "OAuth callbackを読み取れませんでした。".to_string())?;
                 let mut request = [0_u8; 8_192];
                 let read = stream
                     .read(&mut request)
@@ -942,6 +951,10 @@ mod tests {
         browser
             .set_read_timeout(Some(Duration::from_millis(150)))
             .expect("set browser timeout");
+        // Give the nonblocking listener time to accept before the browser writes.
+        // This covers Windows, where the accepted socket can otherwise surface the
+        // listener's nonblocking state as a transient read error.
+        std::thread::sleep(Duration::from_millis(50));
         write!(
             browser,
             "GET /oauth/cloudflare/callback?code=synthetic&state=synthetic HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"

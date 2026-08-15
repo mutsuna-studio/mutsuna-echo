@@ -52,7 +52,9 @@ runs:
           'untrusted comment: minisign public key: 1EE92D443A7A97CA' \
           'RWTKl3o6RC3pHpQe7ilIUo5clZxt6vyrf+WplGxhzK/lI/p7zrlNAok+' \
           > "$RUNNER_TEMP/local-ai-runtime/minisign.pub"
-        minisign -Vm "$RUNNER_TEMP/local-ai-runtime/$asset" -p "$RUNNER_TEMP/local-ai-runtime/minisign.pub"
+        minisign -Vm "$RUNNER_TEMP/local-ai-runtime/$asset" \
+          -x "$RUNNER_TEMP/local-ai-runtime/$asset.sig" \
+          -p "$RUNNER_TEMP/local-ai-runtime/minisign.pub"
         unzip -q "$RUNNER_TEMP/local-ai-runtime/$asset" -d "$RUNNER_TEMP/local-ai-runtime/extracted"
         cp "$RUNNER_TEMP/local-ai-runtime/extracted/libonnxruntime.so" \
            "$RUNNER_TEMP/local-ai-runtime/extracted/libsherpa-onnx-c-api.so" \
