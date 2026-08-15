@@ -1,9 +1,15 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use reqwest::{redirect::Policy, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use url::Url;
 
 use crate::credentials::CredentialId;
@@ -16,16 +22,42 @@ const DEVICE_FLOW_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 const ACCESS_TOKEN_MIN_LENGTH: usize = 16;
 const ACCESS_TOKEN_MAX_LENGTH: usize = 4_096;
 const PREPAID_CREDIT_OFFER_ID: &str = "offer_web_prepaid_hour_v1";
+const DEVICE_VERIFICATION_EVENT: &str = "mutsuna-cloud-device-verification";
 
 pub(crate) struct MutsunaCloudState {
     connect: tokio::sync::Mutex<()>,
+    pending: std::sync::RwLock<Option<PendingDeviceVerification>>,
     status: std::sync::RwLock<MutsunaCloudStatus>,
+}
+
+#[derive(Clone)]
+struct PendingDeviceVerification {
+    verification_url: Url,
+    cancellation: Arc<DeviceFlowCancellation>,
+}
+
+#[derive(Default)]
+struct DeviceFlowCancellation {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl DeviceFlowCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 impl Default for MutsunaCloudState {
     fn default() -> Self {
         Self {
             connect: tokio::sync::Mutex::new(()),
+            pending: std::sync::RwLock::new(None),
             status: std::sync::RwLock::new(MutsunaCloudStatus::disconnected()),
         }
     }
@@ -89,9 +121,32 @@ struct DeviceStartRequest {
 #[serde(rename_all = "camelCase")]
 struct DeviceStartResponse {
     device_code: String,
+    user_code: String,
     verification_uri_complete: String,
     expires_at: String,
     poll_interval_seconds: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DeviceVerificationPrompt {
+    user_code: String,
+}
+
+fn normalize_user_code(value: &str) -> Result<String, String> {
+    let compact: String = value
+        .trim()
+        .chars()
+        .filter(|character| *character != '-')
+        .collect();
+    if compact.len() != 8
+        || !compact
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err("Mutsuna Cloudから有効な照合コードを受け取れませんでした。".into());
+    }
+    Ok(format!("{}-{}", &compact[..4], &compact[4..]))
 }
 
 #[derive(Serialize)]
@@ -536,13 +591,27 @@ async fn poll_for_access_token(
     device_code: &SecretString,
     mut poll_after: Duration,
     deadline: Instant,
+    cancellation: Option<&DeviceFlowCancellation>,
 ) -> Result<SecretString, String> {
     loop {
+        if cancellation.is_some_and(DeviceFlowCancellation::is_cancelled) {
+            return Err("Mutsuna Cloudへの接続をキャンセルしました。".into());
+        }
         if Instant::now() >= deadline {
             return Err("Mutsuna Cloudの端末認証がタイムアウトしました。".into());
         }
-        tokio::time::sleep(poll_after.min(deadline.saturating_duration_since(Instant::now())))
-            .await;
+        let sleep_for = poll_after.min(deadline.saturating_duration_since(Instant::now()));
+        if let Some(cancellation) = cancellation {
+            if tokio::time::timeout(sleep_for, cancellation.notify.notified())
+                .await
+                .is_ok()
+                && cancellation.is_cancelled()
+            {
+                return Err("Mutsuna Cloudへの接続をキャンセルしました。".into());
+            }
+        } else {
+            tokio::time::sleep(sleep_for).await;
+        }
         let result: DevicePollResponse = post_json(
             client,
             endpoint(base_url, "/v1/auth/device/poll")?,
@@ -620,12 +689,49 @@ async fn connect_flow(app: &AppHandle) -> Result<MutsunaCloudStatus, String> {
         return Err("Mutsuna Cloudから有効な端末コードを受け取れませんでした。".into());
     }
     let poll_after = Duration::from_secs(started.poll_interval_seconds.clamp(1, 60));
-    tauri_plugin_opener::open_url(verification_url.as_str(), None::<&str>)
-        .map_err(|_| "システムブラウザでMutsuna Cloudを開けませんでした。".to_string())?;
+    let prompt = DeviceVerificationPrompt {
+        user_code: normalize_user_code(&started.user_code)?,
+    };
+    let cancellation = Arc::new(DeviceFlowCancellation::default());
+    *app.state::<MutsunaCloudState>()
+        .pending
+        .write()
+        .map_err(|_| "Mutsuna Cloudの認証状態を更新できませんでした。".to_string())? =
+        Some(PendingDeviceVerification {
+            verification_url: verification_url.clone(),
+            cancellation: Arc::clone(&cancellation),
+        });
+    let start_result = (|| {
+        app.emit(DEVICE_VERIFICATION_EVENT, &prompt)
+            .map_err(|_| "Mutsuna Cloudの照合コードをアプリに表示できませんでした。".to_string())?;
+        tauri_plugin_opener::open_url(verification_url.as_str(), None::<&str>)
+            .map_err(|_| "システムブラウザでMutsuna Cloudを開けませんでした。".to_string())
+    })();
+    if let Err(error) = start_result {
+        let _ = app
+            .state::<MutsunaCloudState>()
+            .pending
+            .write()
+            .map(|mut pending| *pending = None);
+        return Err(error);
+    }
 
     let deadline = Instant::now() + remaining;
-    let access_token =
-        poll_for_access_token(&client, &base_url, &device_code, poll_after, deadline).await?;
+    let access_token_result = poll_for_access_token(
+        &client,
+        &base_url,
+        &device_code,
+        poll_after,
+        deadline,
+        Some(&cancellation),
+    )
+    .await;
+    let _ = app
+        .state::<MutsunaCloudState>()
+        .pending
+        .write()
+        .map(|mut pending| *pending = None);
+    let access_token = access_token_result?;
     let summary = fetch_billing_summary(&client, &base_url, &access_token).await?;
     let status = status_from_summary(summary)?;
     persist_verified(
@@ -653,9 +759,41 @@ pub(crate) async fn connect_mutsuna_cloud(
         .connect
         .try_lock()
         .map_err(|_| "Mutsuna Cloudへの接続はすでに進行中です。".to_string())?;
-    tokio::time::timeout(DEVICE_FLOW_TIMEOUT, connect_flow(&app))
-        .await
-        .map_err(|_| "Mutsuna Cloudの端末認証がタイムアウトしました。".to_string())?
+    let result = match tokio::time::timeout(DEVICE_FLOW_TIMEOUT, connect_flow(&app)).await {
+        Ok(result) => result,
+        Err(_) => Err("Mutsuna Cloudの端末認証がタイムアウトしました。".to_string()),
+    };
+    let _ = state.pending.write().map(|mut pending| *pending = None);
+    result
+}
+
+#[tauri::command]
+pub(crate) fn reopen_mutsuna_cloud_verification(
+    state: State<'_, MutsunaCloudState>,
+) -> Result<(), String> {
+    let verification_url = state
+        .pending
+        .read()
+        .map_err(|_| "Mutsuna Cloudの認証状態を読み取れませんでした。".to_string())?
+        .as_ref()
+        .map(|pending| pending.verification_url.clone())
+        .ok_or_else(|| "進行中のMutsuna Cloud認証がありません。".to_string())?;
+    tauri_plugin_opener::open_url(verification_url.as_str(), None::<&str>)
+        .map_err(|_| "システムブラウザでMutsuna Cloudを開けませんでした。".to_string())
+}
+
+#[tauri::command]
+pub(crate) fn cancel_mutsuna_cloud_connection(
+    state: State<'_, MutsunaCloudState>,
+) -> Result<(), String> {
+    let pending = state
+        .pending
+        .read()
+        .map_err(|_| "Mutsuna Cloudの認証状態を読み取れませんでした。".to_string())?
+        .clone()
+        .ok_or_else(|| "進行中のMutsuna Cloud認証がありません。".to_string())?;
+    pending.cancellation.cancel();
+    Ok(())
 }
 
 #[tauri::command]
@@ -767,6 +905,22 @@ mod tests {
     }
 
     #[test]
+    fn device_verification_prompt_exposes_only_a_formatted_user_code() {
+        assert_eq!(normalize_user_code("TRNRMQSL").as_deref(), Ok("TRNR-MQSL"));
+        assert_eq!(normalize_user_code("TRNR-MQSL").as_deref(), Ok("TRNR-MQSL"));
+        assert!(normalize_user_code("trnrmqsl").is_err());
+        assert!(normalize_user_code("TRNR-MQS!").is_err());
+
+        let prompt = DeviceVerificationPrompt {
+            user_code: "TRNR-MQSL".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(prompt).expect("serialize safe prompt"),
+            serde_json::json!({ "userCode": "TRNR-MQSL" })
+        );
+    }
+
+    #[test]
     fn verified_token_persistence_round_trips_exactly() {
         let mut storage = FakeStorage::default();
         let token = SecretString::from("synthetic-access-token-1234".to_string());
@@ -831,6 +985,7 @@ mod tests {
             &device_code,
             Duration::ZERO,
             Instant::now() + Duration::from_secs(2),
+            None,
         ))
         .expect("authorized token");
         assert_eq!(token.expose_secret(), "synthetic-authorized-token-1234");
@@ -852,9 +1007,31 @@ mod tests {
             &device_code,
             Duration::ZERO,
             Instant::now() + Duration::from_secs(2),
+            None,
         ));
         assert!(result.is_err());
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn device_poll_cancellation_stops_before_a_network_request() {
+        let cancellation = DeviceFlowCancellation::default();
+        cancellation.cancel();
+        let client = http_client().expect("client");
+        let base_url = Url::parse("https://echo.mutsuna.jp").expect("base URL");
+        let device_code = SecretString::from("synthetic-device-code-1234".to_string());
+        let result = tauri::async_runtime::block_on(poll_for_access_token(
+            &client,
+            &base_url,
+            &device_code,
+            Duration::from_secs(60),
+            Instant::now() + Duration::from_secs(120),
+            Some(&cancellation),
+        ));
+        assert_eq!(
+            result.expect_err("cancelled flow must stop"),
+            "Mutsuna Cloudへの接続をキャンセルしました。"
+        );
     }
 
     #[test]

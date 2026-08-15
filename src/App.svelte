@@ -57,7 +57,11 @@
   import type { RecentMeetingSummary } from "./lib/types/recording";
   import type { GenerationAttemptSummary, SummaryModelDefinition, SummaryProgress, SummaryProviderDefinition } from "./lib/types/summary";
   import type { MeetingDocument } from "./lib/types/meeting-document";
-  import { MUTSUNA_CLOUD_COMMANDS } from "./lib/mutsunaCloud";
+  import {
+    MUTSUNA_CLOUD_COMMANDS,
+    MUTSUNA_CLOUD_DEVICE_VERIFICATION_EVENT,
+    type MutsunaCloudDeviceVerification
+  } from "./lib/mutsunaCloud";
   import type {
     SelectedAudioFile,
     EditableTranscript,
@@ -276,6 +280,8 @@
   let cloudflareConnecting = $state(false);
   let cloudflareOAuthLeftApp = false;
   let mutsunaCloudConnecting = $state(false);
+  let mutsunaCloudVerificationCode = $state<string | null>(null);
+  let mutsunaCloudCancellationRequested = $state(false);
   let mutsunaCloudDisconnecting = $state(false);
   let mutsunaCloudPurchasing = $state(false);
   let recordingBusy = $state(false);
@@ -643,7 +649,18 @@
   async function connectMutsunaCloud() {
     if (mutsunaCloudConnecting) return;
     mutsunaCloudConnecting = true;
+    mutsunaCloudCancellationRequested = false;
+    mutsunaCloudVerificationCode = null;
+    let unlistenVerification: UnlistenFn | undefined;
     try {
+      unlistenVerification = await listen<MutsunaCloudDeviceVerification>(
+        MUTSUNA_CLOUD_DEVICE_VERIFICATION_EVENT,
+        ({ payload }) => {
+          if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(payload.userCode)) {
+            mutsunaCloudVerificationCode = payload.userCode;
+          }
+        }
+      );
       await invoke<MutsunaCloudStatus>(MUTSUNA_CLOUD_COMMANDS.connect);
       await Promise.all([refreshMutsunaCloudStatus(), refreshProviders()]);
       if (mutsunaCloudStatus?.canUse) {
@@ -652,9 +669,32 @@
         showWarningToast("Mutsuna Cloudへ接続しました。", "クレジット残高またはアカウント状態を確認してください。");
       }
     } catch (error) {
-      showError(errorText(error));
+      if (!mutsunaCloudCancellationRequested) showError(errorText(error));
     } finally {
+      unlistenVerification?.();
+      mutsunaCloudVerificationCode = null;
       mutsunaCloudConnecting = false;
+      mutsunaCloudCancellationRequested = false;
+    }
+  }
+
+  async function reopenMutsunaCloudVerification() {
+    try {
+      await invoke<void>(MUTSUNA_CLOUD_COMMANDS.reopenVerification);
+    } catch (error) {
+      showError(errorText(error));
+    }
+  }
+
+  async function cancelMutsunaCloudConnection() {
+    if (!mutsunaCloudConnecting || mutsunaCloudCancellationRequested) return;
+    mutsunaCloudCancellationRequested = true;
+    try {
+      await invoke<void>(MUTSUNA_CLOUD_COMMANDS.cancelConnection);
+      mutsunaCloudVerificationCode = null;
+    } catch (error) {
+      mutsunaCloudCancellationRequested = false;
+      showError(errorText(error));
     }
   }
 
@@ -2578,10 +2618,14 @@
                         status={mutsunaCloudStatus}
                         {loading}
                         connecting={mutsunaCloudConnecting}
+                        verificationCode={mutsunaCloudVerificationCode}
+                        cancelling={mutsunaCloudCancellationRequested}
                         disconnecting={mutsunaCloudDisconnecting}
                         purchasing={mutsunaCloudPurchasing}
                         {busy}
                         onConnect={connectMutsunaCloud}
+                        onReopenVerification={reopenMutsunaCloudVerification}
+                        onCancelConnection={cancelMutsunaCloudConnection}
                         onDisconnect={disconnectMutsunaCloud}
                         onPurchase={purchaseMutsunaCloudCredits}
                       />

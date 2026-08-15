@@ -80,6 +80,8 @@ pub fn run() {
             cloudflare_auth::disconnect_cloudflare_oauth,
             mutsuna_cloud::get_mutsuna_cloud_status,
             mutsuna_cloud::connect_mutsuna_cloud,
+            mutsuna_cloud::reopen_mutsuna_cloud_verification,
+            mutsuna_cloud::cancel_mutsuna_cloud_connection,
             mutsuna_cloud::disconnect_mutsuna_cloud,
             mutsuna_cloud::purchase_mutsuna_cloud_credits,
             transcription::providers::get_transcription_providers,

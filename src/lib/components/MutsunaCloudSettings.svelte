@@ -14,10 +14,14 @@
     status: MutsunaCloudStatus | null;
     loading: boolean;
     connecting: boolean;
+    verificationCode: string | null;
+    cancelling: boolean;
     disconnecting: boolean;
     purchasing: boolean;
     busy: boolean;
     onConnect: () => Promise<void>;
+    onReopenVerification: () => Promise<void>;
+    onCancelConnection: () => Promise<void>;
     onDisconnect: () => Promise<void>;
     onPurchase: () => Promise<void>;
   }
@@ -26,10 +30,14 @@
     status,
     loading,
     connecting,
+    verificationCode,
+    cancelling,
     disconnecting,
     purchasing,
     busy,
     onConnect,
+    onReopenVerification,
+    onCancelConnection,
     onDisconnect,
     onPurchase
   }: Props = $props();
@@ -88,7 +96,23 @@
         {connecting ? "ブラウザで認証中…" : "Mutsuna Cloudに接続"}
       </Button>
       {#if connecting}
-        <small role="status">ブラウザで認証を完了してください。認証情報はこの画面には表示されません。</small>
+        <div class="verification" role="status" aria-live="polite">
+          {#if verificationCode}
+            <small>ブラウザに表示されたコードと一致することを確認してください</small>
+            <strong aria-label={`照合コード ${verificationCode}`}>{verificationCode}</strong>
+            <small>一致する場合だけ、ブラウザでログインして「この端末を承認」を押します。</small>
+            <div class="verification-actions">
+              <Button variant="outline" type="button" disabled={cancelling} onclick={() => void onReopenVerification()}>
+                ブラウザをもう一度開く
+              </Button>
+              <Button variant="outline" type="button" disabled={cancelling} loading={cancelling} onclick={() => void onCancelConnection()}>
+                {cancelling ? "キャンセル中…" : "接続をキャンセル"}
+              </Button>
+            </div>
+          {:else}
+            <small>安全な照合コードを準備しています…</small>
+          {/if}
+        </div>
       {:else}
         <small>接続すると、利用可能なクレジット残高をここで確認できます。</small>
       {/if}
@@ -126,6 +150,9 @@
   .account-card b { font-size: .78rem; }
   .account-card .account-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
   .connect-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .verification { display: grid; width: 100%; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in oklch, var(--muted) 24%, transparent); }
+  .verification strong { font: 700 1.35rem/1 ui-monospace, monospace; letter-spacing: .12em; }
+  .verification-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
   .purchase-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   .pricing-link { display: inline-flex; width: fit-content; align-items: center; gap: 5px; color: var(--primary); font-size: .72rem; font-weight: 600; text-decoration: none; }
   .pricing-link:hover { text-decoration: underline; }

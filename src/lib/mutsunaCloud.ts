@@ -1,10 +1,17 @@
 import type { MutsunaCloudStatus } from "./providers";
 
 export const MUTSUNA_CLOUD_PRICING_URL = "https://mutsuna.jp/pricing";
+export const MUTSUNA_CLOUD_DEVICE_VERIFICATION_EVENT = "mutsuna-cloud-device-verification";
+
+export type MutsunaCloudDeviceVerification = {
+  readonly userCode: string;
+};
 
 export const MUTSUNA_CLOUD_COMMANDS = Object.freeze({
   getStatus: "get_mutsuna_cloud_status",
   connect: "connect_mutsuna_cloud",
+  reopenVerification: "reopen_mutsuna_cloud_verification",
+  cancelConnection: "cancel_mutsuna_cloud_connection",
   disconnect: "disconnect_mutsuna_cloud",
   purchaseCredits: "purchase_mutsuna_cloud_credits"
 });
