@@ -1,5 +1,7 @@
 # Mutsuna Echo
 
+[Code signing policy](CODE_SIGNING.md) — SignPath Foundationへの申請準備中です。現時点ではSignPathによる署名は行っていません。
+
 Svelte 5 + TypeScript + Tauri 2 + Rustで作る、マルチOS対応の録音・文字起こしアプリです。
 
 ## v0.1
