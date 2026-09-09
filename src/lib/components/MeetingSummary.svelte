@@ -39,6 +39,7 @@
     onGenerate: () => void;
     onRevalidate: () => void;
     onSave: (document: MeetingDocument) => Promise<MeetingDocument | null>;
+    onSavePendingChange?: (pending: boolean) => void;
     onShowSource: (selection: SummarySourceSelection, trigger: HTMLButtonElement) => void;
   };
 
@@ -60,6 +61,7 @@
     onGenerate,
     onRevalidate,
     onSave,
+    onSavePendingChange,
     onShowSource
   }: Props = $props();
 
@@ -92,6 +94,10 @@
   let saving = $state(false);
   let editableDocument = $state<MeetingDocument | null>(null);
   let dirty = $state(false);
+  $effect(() => {
+    onSavePendingChange?.(dirty || saving);
+    return () => onSavePendingChange?.(false);
+  });
   let editVersion = $state(0);
   let copied = $state(false);
   let generationStartedAt = $state<number | null>(null);

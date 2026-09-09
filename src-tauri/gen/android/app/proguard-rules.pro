@@ -16,6 +16,7 @@
 # R8 cannot see those string-based calls and would otherwise remove or rename
 # the methods in release builds, causing startup and recording JNI failures.
 -keep class jp.mutsuna.echo.SecureCredentialBridge { *; }
+-keep class jp.mutsuna.echo.GoogleDriveBridge { *; }
 -keep class jp.mutsuna.echo.RecordingBridge { *; }
 -keep class jp.mutsuna.echo.AudioPlaybackBridge { *; }
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }

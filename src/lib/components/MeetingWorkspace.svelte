@@ -69,6 +69,7 @@
     SummarySourceSelection
   } from "../types/summary";
   import type { MeetingDocument } from "../types/meeting-document";
+  import GoogleDriveSave from "./GoogleDriveSave.svelte";
   import AudioPlayer from "./AudioPlayer.svelte";
   import MeetingSummary from "./MeetingSummary.svelte";
   import ProcessingStage from "./ProcessingStage.svelte";
@@ -78,6 +79,8 @@
 
   type MeetingContextDraft = { background: string; termsText: string; correctionsText: string; useGlobal: boolean };
   type SummarySourceState = { selection: SummarySourceSelection; returnFocus: HTMLButtonElement };
+
+  let summarySavePending = $state(false);
 
   type Props = {
     selectedAudio: SelectedAudioFile | null;
@@ -598,6 +601,14 @@
 
 <section class="meeting-workspace" bind:this={workspaceElement}>
   {#if meeting || selectedAudio}
+    {#key meeting?.meetingId ?? selectedAudio?.meetingId}
+      <GoogleDriveSave
+        meetingId={(meeting?.meetingId ?? selectedAudio?.meetingId)!}
+        audioAvailable={!!selectedAudio}
+        documentAvailable={!!transcript || !!summaryStatus}
+        disabled={processingCurrentMeeting || summaryGenerating || summarySavePending || transcriptFormatting || saveState === "saving" || saveState === "unsaved" || saveState === "error"}
+      />
+    {/key}
     {#if selectedAudio}
       <div class="audio-player-wrap">
         <AudioPlayer
@@ -655,6 +666,7 @@
           onGenerate={onGenerateSummary}
           onRevalidate={onRevalidateSummary}
           onSave={onSaveSummary}
+          onSavePendingChange={(pending) => summarySavePending = pending}
           onShowSource={showSummarySource}
         />
       {:else if detailTab === "transcript"}

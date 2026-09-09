@@ -12,6 +12,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 
 class MainActivity : TauriActivity() {
+  internal var googleDriveRequestGeneration = 0L
+  internal val googleDriveAuthorization = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+    val authorization = try {
+      com.google.android.gms.auth.api.identity.Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(result.data)
+    } catch (_: Exception) { null }
+    GoogleDriveBridge.finish(googleDriveRequestGeneration, authorization)
+  }
+
   private external fun initializeAndroidContext(context: android.content.Context)
 
   private var pendingConfig: String? = null
@@ -59,6 +67,7 @@ class MainActivity : TauriActivity() {
       isAppearanceLightStatusBars = true
       isAppearanceLightNavigationBars = true
     }
+    GoogleDriveBridge.attach(this)
     RecordingBridge.activity = this
     ScreenOnController.attach(this)
     AppUpdateBridge.attach(this)
@@ -66,6 +75,7 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
+    GoogleDriveBridge.detach(this)
     ScreenOnController.detach(this)
     if (RecordingBridge.activity === this) RecordingBridge.activity = null
     AppUpdateBridge.detach(this)

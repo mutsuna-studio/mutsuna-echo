@@ -25,6 +25,15 @@ fn cloudflare_oauth_client_id() -> Option<String> {
 }
 
 fn main() {
+    for name in [
+        "MUTSUNA_GOOGLE_DESKTOP_CLIENT_ID",
+        "MUTSUNA_GOOGLE_DESKTOP_CLIENT_SECRET",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+        if let Ok(value) = std::env::var(name) {
+            println!("cargo:rustc-env={name}={}", value.trim());
+        }
+    }
     println!("cargo:rerun-if-env-changed={CLOUDFLARE_OAUTH_CLIENT_ID}");
     if let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
         if let Some(repository_dir) = PathBuf::from(manifest_dir).parent() {

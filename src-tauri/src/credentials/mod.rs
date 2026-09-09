@@ -19,6 +19,7 @@ pub(crate) enum CredentialId {
     CloudflareOAuthAccountName,
     CloudflareOAuthAccounts,
     MutsunaCloudAccessToken,
+    GoogleDriveSession,
 }
 
 impl CredentialId {
@@ -33,6 +34,7 @@ impl CredentialId {
             Self::CloudflareOAuthAccountName => "cloudflare-oauth-account-name",
             Self::CloudflareOAuthAccounts => "cloudflare-oauth-accounts",
             Self::MutsunaCloudAccessToken => "mutsuna-cloud-access-token",
+            Self::GoogleDriveSession => "google-drive-session",
         }
     }
 
@@ -47,6 +49,7 @@ impl CredentialId {
             Self::CloudflareOAuthAccountName => "Cloudflare OAuthアカウント名",
             Self::CloudflareOAuthAccounts => "Cloudflare OAuthアカウント一覧",
             Self::MutsunaCloudAccessToken => "Mutsuna Cloudアクセストークン",
+            Self::GoogleDriveSession => "Google Drive連携情報",
         }
     }
 
@@ -115,6 +118,7 @@ mod tests {
             CredentialId::CloudflareOAuthAccountName,
             CredentialId::CloudflareOAuthAccounts,
             CredentialId::MutsunaCloudAccessToken,
+            CredentialId::GoogleDriveSession,
         ] {
             assert!(
                 android_contract.contains(&format!("\"{}\"", credential.id())),

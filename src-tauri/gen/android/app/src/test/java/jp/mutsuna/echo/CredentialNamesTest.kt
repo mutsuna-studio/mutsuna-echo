@@ -17,6 +17,7 @@ class CredentialNamesTest {
       "cloudflare-oauth-account-name",
       "cloudflare-oauth-accounts",
       "mutsuna-cloud-access-token",
+    "google-drive-session",
     )
 
     credentials.forEach { credential ->

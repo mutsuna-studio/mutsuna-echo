@@ -8,6 +8,7 @@ mod cloudflare_auth;
 mod commands;
 mod compute_tuning;
 mod credentials;
+mod google_drive;
 mod inference_cache;
 #[allow(dead_code)]
 mod local_ai_protocol;
@@ -29,6 +30,17 @@ mod summary;
 mod transcript_store;
 pub mod transcription;
 
+#[tauri::command]
+fn open_legal_page(page: String) -> Result<(), String> {
+    let url = match page.as_str() {
+        "terms" => "https://echo.mutsuna.jp/terms",
+        "privacy" => "https://echo.mutsuna.jp/privacy",
+        _ => return Err("指定したページは開けません。".into()),
+    };
+    tauri_plugin_opener::open_url(url, None::<&str>)
+        .map_err(|_| "ブラウザーでページを開けませんでした。".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
@@ -46,6 +58,7 @@ pub fn run() {
     let builder = builder
         .manage(commands::transcribe::AudioSelectionState::default())
         .manage(cloudflare_auth::CloudflareAuthState::default())
+        .manage(google_drive::State::default())
         .manage(mutsuna_cloud::MutsunaCloudState::default())
         .manage(processing_power::ProcessingPowerState::default())
         .manage(recording::RecordingService::default());
@@ -59,6 +72,14 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            open_legal_page,
+            google_drive::auth::google_drive_connection,
+            google_drive::auth::google_drive_connect,
+            google_drive::auth::google_drive_disconnect,
+            google_drive::google_drive_saved_state,
+            google_drive::google_drive_save,
+            google_drive::google_drive_open,
+            google_drive::google_drive_limits,
             android_update::get_android_update_status,
             android_update::check_android_update,
             android_update::start_android_update,

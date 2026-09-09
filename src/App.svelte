@@ -26,6 +26,7 @@
   import ChartNoAxesColumn from "@lucide/svelte/icons/chart-no-axes-column";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Settings from "@lucide/svelte/icons/settings";
+  import GoogleDriveSettings from "./lib/components/GoogleDriveSettings.svelte";
   import ApiKeySettings from "./lib/components/ApiKeySettings.svelte";
   import CloudflareConnectionSettings from "./lib/components/CloudflareConnectionSettings.svelte";
   import MutsunaCloudSettings from "./lib/components/MutsunaCloudSettings.svelte";
@@ -2664,6 +2665,7 @@
                     onSaveManual={(apiToken, accountId) => saveApiKey("cloudflare", apiToken, accountId)}
                     onDeleteManual={() => deleteApiKey("cloudflare")}
                   />
+                  <GoogleDriveSettings />
                   <PowerSettings disabled={updating} onError={showError} />
                   <AppUpdateManager
                     disabled={busy && !updating}
@@ -2671,6 +2673,11 @@
                     onBusyChange={(value) => updating = value}
                   />
                   <ThirdPartyLicenses />
+                  <section class="settings-section">
+                    <h2>利用規約・プライバシー</h2>
+                    <button type="button" onclick={() => invoke("open_legal_page", { page: "terms" }).catch((e) => showError(errorText(e)))}>利用規約を開く</button>
+                    <button type="button" onclick={() => invoke("open_legal_page", { page: "privacy" }).catch((e) => showError(errorText(e)))}>プライバシーポリシーを開く</button>
+                  </section>
                 </div>
               {:else if settingsPane === "transcription" && !summarySettingsPreview}
                 <header class="settings-detail-heading">

@@ -11,6 +11,7 @@ internal object CredentialNames {
     "cloudflare-oauth-account-name",
     "cloudflare-oauth-accounts",
     "mutsuna-cloud-access-token",
+    "google-drive-session",
   )
 
   fun alias(credential: String): String = "mutsuna_echo_${validate(credential)}_api_key"
