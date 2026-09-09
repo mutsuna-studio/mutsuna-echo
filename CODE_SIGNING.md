@@ -1,6 +1,6 @@
 # Code signing policy
 
-Status: preparing a SignPath Foundation application. Approval and signing are
+Status: application submitted on 9 September 2026; awaiting review. Approval and signing are
 not yet enabled. Existing Windows releases are not signed by SignPath Foundation.
 
 If accepted, the intended attribution is:
