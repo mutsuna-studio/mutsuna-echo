@@ -46,10 +46,6 @@ jobs:
       - name: Verify release version
         run: node scripts/verify-release-version.mjs v0.1.10
 
-      - name: Test Android credential contracts
-        working-directory: src-tauri/gen/android
-        run: ./gradlew :app:testUniversalDebugUnitTest
-
       - name: Prepare Android signing key
         shell: bash
         env:
@@ -70,6 +66,10 @@ jobs:
         with:
           mobile: android
           args: --aab --target aarch64
+
+      - name: Test Android credential contracts
+        working-directory: src-tauri/gen/android
+        run: bash ./gradlew :app:testUniversalDebugUnitTest
 
       - name: Verify AAB signature
         id: verify-android
