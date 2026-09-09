@@ -1,7 +1,7 @@
 name: Google Drive internal testing
 on:
   push:
-    branches: [codex/drive-internal-release]
+    tags: ["v*-internal.*"]
 permissions:
   contents: read
 concurrency:
