@@ -61,6 +61,8 @@ pub(crate) struct CloudflareAccountOption {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudflareConnectionStatus {
     connected: bool,
+    auth_method: Option<&'static str>,
+    legacy_configured: bool,
     account_name: Option<String>,
     needs_reauthentication: bool,
     account_selection_required: bool,
@@ -518,15 +520,29 @@ pub(crate) fn is_configured(app: &AppHandle) -> Result<bool, String> {
 }
 
 pub(crate) fn connection_status(app: &AppHandle) -> Result<CloudflareConnectionStatus, String> {
-    let oauth_tokens = oauth_has_tokens(app)?;
-    let oauth_connected = oauth_connected(app)?;
+    connection_status_from_storage(&AppCredentialStorage(app), oauth_client_id().is_some())
+}
+
+fn connection_status_from_storage<S: CredentialStorage>(
+    storage: &S,
+    oauth_configured: bool,
+) -> Result<CloudflareConnectionStatus, String> {
+    let oauth_tokens = storage.has(CredentialId::CloudflareOAuthAccessToken)?
+        && storage.has(CredentialId::CloudflareOAuthRefreshToken)?
+        && storage.has(CredentialId::CloudflareOAuthExpiresAt)?;
+    let oauth_connected = oauth_tokens && storage.has(CredentialId::CloudflareOAuthAccountId)?;
     let accounts = if oauth_tokens && !oauth_connected {
-        stored_accounts(app)
+        storage
+            .load(CredentialId::CloudflareOAuthAccounts)
+            .ok()
+            .and_then(|value| serde_json::from_str(value.expose_secret()).ok())
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
     let account_name = if oauth_connected {
-        crate::credentials::load(app, CredentialId::CloudflareOAuthAccountName)
+        storage
+            .load(CredentialId::CloudflareOAuthAccountName)
             .ok()
             .map(|value| value.expose_secret().to_owned())
     } else {
@@ -534,11 +550,14 @@ pub(crate) fn connection_status(app: &AppHandle) -> Result<CloudflareConnectionS
     };
     Ok(CloudflareConnectionStatus {
         connected: oauth_connected,
+        auth_method: oauth_connected.then_some("oauth"),
+        // Manual Cloudflare credentials are no longer supported by the native layer.
+        legacy_configured: false,
         account_name,
         needs_reauthentication: false,
         account_selection_required: oauth_tokens && !oauth_connected && !accounts.is_empty(),
         accounts,
-        oauth_configured: oauth_client_id().is_some(),
+        oauth_configured,
     })
 }
 
@@ -1090,6 +1109,8 @@ mod tests {
     fn connection_status_serialization_never_contains_secrets() {
         let status = CloudflareConnectionStatus {
             connected: true,
+            auth_method: Some("oauth"),
+            legacy_configured: false,
             account_name: Some("Synthetic Account".into()),
             needs_reauthentication: false,
             account_selection_required: false,
@@ -1106,6 +1127,86 @@ mod tests {
         ] {
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn saved_oauth_status_matches_the_webview_contract_and_rollback_stays_disconnected() {
+        let values = [
+            (
+                CredentialId::CloudflareOAuthAccessToken,
+                SecretString::from("synthetic-access"),
+            ),
+            (
+                CredentialId::CloudflareOAuthRefreshToken,
+                SecretString::from("synthetic-refresh"),
+            ),
+            (
+                CredentialId::CloudflareOAuthExpiresAt,
+                SecretString::from("9999999999"),
+            ),
+            (
+                CredentialId::CloudflareOAuthAccountId,
+                SecretString::from("synthetic-account"),
+            ),
+            (
+                CredentialId::CloudflareOAuthAccountName,
+                SecretString::from("Synthetic Account"),
+            ),
+        ];
+        let refs = values
+            .iter()
+            .map(|(id, value)| (*id, value))
+            .collect::<Vec<_>>();
+        for fail_at in [None, Some(3)] {
+            let mut storage = FakeStorage {
+                fail_at,
+                ..Default::default()
+            };
+            let saved = persist_verified(&mut storage, &refs);
+            assert_eq!(saved.is_ok(), fail_at.is_none());
+            let status = connection_status_from_storage(&storage, true).expect("status");
+            let json = serde_json::to_value(status).expect("serialize");
+            assert_eq!(json["connected"], fail_at.is_none());
+            assert_eq!(
+                json["authMethod"],
+                if fail_at.is_none() {
+                    serde_json::json!("oauth")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(json["legacyConfigured"], false);
+            assert!(!json.to_string().contains("synthetic-access"));
+            assert!(!json.to_string().contains("synthetic-refresh"));
+            if fail_at.is_some() {
+                assert!(storage.values.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn account_selection_does_not_claim_a_connected_oauth_session() {
+        let mut storage = FakeStorage::default();
+        storage.values.extend([
+            (
+                CredentialId::CloudflareOAuthAccessToken,
+                "synthetic-access".into(),
+            ),
+            (
+                CredentialId::CloudflareOAuthRefreshToken,
+                "synthetic-refresh".into(),
+            ),
+            (CredentialId::CloudflareOAuthExpiresAt, "9999999999".into()),
+            (
+                CredentialId::CloudflareOAuthAccounts,
+                r#"[{"id":"synthetic-id","name":"Synthetic Account"}]"#.into(),
+            ),
+        ]);
+        let status = connection_status_from_storage(&storage, true).expect("status");
+        assert!(!status.connected);
+        assert_eq!(status.auth_method, None);
+        assert!(status.account_selection_required);
+        assert_eq!(status.accounts.len(), 1);
     }
 
     #[test]
